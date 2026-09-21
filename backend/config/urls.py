@@ -10,6 +10,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("", HomeView.as_view(), name="home"),
     path("projects/", include("projects.urls")),
+    path("printers/", include("printers.urls")),
     path("login/", auth_views.LoginView.as_view(template_name="accounts/login.html"), name="login"),
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),
     path("api/v1/", include("api.urls")),

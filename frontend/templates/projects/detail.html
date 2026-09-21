@@ -2,11 +2,12 @@
 {% load static %}
 {% block title %}Projekt – PrintForge{% endblock %}
 {% block extra_head %}
+    {# Vendored Three.js r170 ES modules: no CDN, works offline. #}
     <script type="importmap">
         {
             "imports": {
-                "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+                "three": "{% static 'vendor/three/three.module.min.js' %}",
+                "three/addons/": "{% static 'vendor/three/addons/' %}"
             }
         }
     </script>
@@ -19,7 +20,7 @@
          x-data="projectDetail"
          @viewer-state.document="handleViewerState($event)">
         <p class="breadcrumb">
-            <a href="/projects/">← Projektek</a>
+            <a href="{% url 'projects:list' %}">← Projektek</a>
         </p>
         <template x-if="error">
             <p class="error-box" x-text="error"></p>

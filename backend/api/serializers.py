@@ -2,7 +2,10 @@ from rest_framework import serializers
 
 from agents.models import AgentRun
 from designs.models import ModelVersion
+from notifications.models import Notification
+from printers.models import Printer, PrintJob, PrintJobStatus
 from projects.models import Project
+from slicers.models import FilamentProfile, PrinterProfile, ProcessProfile
 from workspaces.models import Workspace, WorkspaceMember
 
 
@@ -99,4 +102,77 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "error",
             "created_at",
         ]
+        read_only_fields = fields
+
+
+class PrintJobSerializer(serializers.ModelSerializer):
+    """Read-only print-queue entry with the denormalised names the UI shows."""
+
+    printer_name = serializers.SerializerMethodField()
+    filament_name = serializers.SerializerMethodField()
+    project_name = serializers.SerializerMethodField()
+    version = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PrintJob
+        fields = [
+            "id",
+            "project",
+            "project_name",
+            "model_version",
+            "version",
+            "printer",
+            "printer_name",
+            "filament",
+            "filament_name",
+            "slicer_profile",
+            "printer_profile",
+            "status",
+            "priority",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_printer_name(self, obj: PrintJob) -> str:
+        return obj.printer.name
+
+    def get_filament_name(self, obj: PrintJob) -> str | None:
+        return obj.filament.name if obj.filament_id else None
+
+    def get_project_name(self, obj: PrintJob) -> str:
+        return obj.project.name
+
+    def get_version(self, obj: PrintJob) -> int:
+        return obj.model_version.version
+
+
+class PrintJobCreateSerializer(serializers.Serializer):
+    """Write payload for ``POST /api/v1/print-jobs/``."""
+
+    project = serializers.PrimaryKeyRelatedField(queryset=Project.objects.all())
+    model_version = serializers.PrimaryKeyRelatedField(queryset=ModelVersion.objects.all())
+    printer = serializers.PrimaryKeyRelatedField(queryset=Printer.objects.all())
+    filament = serializers.PrimaryKeyRelatedField(
+        queryset=FilamentProfile.objects.all(), required=False, allow_null=True
+    )
+    slicer_profile = serializers.PrimaryKeyRelatedField(
+        queryset=ProcessProfile.objects.all(), required=False, allow_null=True
+    )
+    printer_profile = serializers.PrimaryKeyRelatedField(
+        queryset=PrinterProfile.objects.all(), required=False, allow_null=True
+    )
+    priority = serializers.IntegerField(required=False, default=0, min_value=0)
+
+
+class PrintJobTransitionSerializer(serializers.Serializer):
+    """Write payload for ``POST /api/v1/print-jobs/{id}/transition/``."""
+
+    status = serializers.ChoiceField(choices=PrintJobStatus.choices)
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = ["id", "kind", "message", "url", "is_read", "created_at"]
         read_only_fields = fields

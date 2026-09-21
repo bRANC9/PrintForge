@@ -19,9 +19,14 @@
         versionStatus: (versionId) => `${API_BASE}/versions/${encodeURIComponent(versionId)}/status/`,
         artifact: (versionId, kind) =>
             `${API_BASE}/versions/${encodeURIComponent(versionId)}/artifact/${encodeURIComponent(kind)}/`,
+        // Phase 7 (multi-user): print history + notifications.
+        printJobs: () => `${API_BASE}/print-jobs/`,
+        notifications: () => `${API_BASE}/notifications/`,
+        notificationRead: (notificationId) =>
+            `${API_BASE}/notifications/${encodeURIComponent(notificationId)}/read/`,
     };
 
-    const PROJECT_DETAIL_PATTERN = /\/projects\/(\d+)(?:\/|$)/;
+    const NOTIFICATION_POLL_MS = 60000;
     const POLL_INTERVAL_MS = 2000;
     const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -78,9 +83,22 @@
         return new Promise((resolve) => window.setTimeout(resolve, ms));
     }
 
-    function projectIdFromLocation() {
-        const match = window.location.pathname.match(PROJECT_DETAIL_PATTERN);
-        return match ? match[1] : "";
+    /**
+     * Fill a Django `{% url %}` template that was reversed with `pk=0` (a
+     * `projects:detail` URL such as "/projects/0/") with a real primary key.
+     * Anchored on the trailing segment so a port number or a version prefix is
+     * never touched.
+     */
+    function fillPkTemplate(template, pk) {
+        if (!template) return "#";
+        return template.replace(/0(\/?)$/, `${pk}$1`);
+    }
+
+    /** Last numeric path segment - fallback when no data-project-id is set. */
+    function idFromLocation() {
+        const segments = window.location.pathname.split("/").filter(Boolean);
+        const last = segments.length ? segments[segments.length - 1] : "";
+        return /^\d+$/.test(last) ? last : "";
     }
 
     async function describeError(response) {
@@ -139,6 +157,10 @@
         createVersion: (projectId, prompt) =>
             request(endpoints.versions(projectId), { method: "POST", body: { prompt } }),
         versionStatus: (versionId) => request(endpoints.versionStatus(versionId)),
+        listPrintJobs: async () => unwrapList(await request(endpoints.printJobs())),
+        listNotifications: async () => unwrapList(await request(endpoints.notifications())),
+        markNotificationRead: (notificationId) =>
+            request(endpoints.notificationRead(notificationId), { method: "POST" }),
     };
 
     function statusKind(status) {
@@ -147,6 +169,31 @@
         if (FAILED_STATUSES.includes(state)) return "failed";
         if (PENDING_STATUSES.includes(state)) return "pending";
         return "unknown";
+    }
+
+    /** Human label for a FK field that may arrive as an id or as a nested object. */
+    function labelFor(value, fallback) {
+        if (value === null || value === undefined || value === "") return fallback || "—";
+        if (typeof value === "object") return value.name || value.title || value.id || fallback || "—";
+        return String(value);
+    }
+
+    /**
+     * Prefer an API display field (`project_name`, `printer_name`, ...) and fall
+     * back to the raw FK value (id or nested object) when it is null/empty.
+     */
+    function displayName(value, fallback) {
+        if (value !== null && value !== undefined && value !== "") return String(value);
+        return labelFor(fallback);
+    }
+
+    /** Maps a PrintJob status (terv.md 14.) to a badge modifier class. */
+    function printStatusClass(status) {
+        const state = String(status || "").toLowerCase();
+        if (state === "completed") return "is-ok";
+        if (state === "failed" || state === "cancelled") return "is-danger";
+        if (state === "printing" || state === "paused" || state === "ready") return "is-active";
+        return "is-muted";
     }
 
     window.PrintForge = {
@@ -158,13 +205,47 @@
         unwrapList,
         formatDate,
         statusKind,
+        fillPkTemplate,
+        labelFor,
+        displayName,
+        printStatusClass,
     };
 
     // ------------------------------------------------------------------
     // Alpine components
     // ------------------------------------------------------------------
-    function projectListComponent() {
+
+    /**
+     * Shared `detailUrl(pk)` helper. The page stores a reversed
+     * `projects:detail` template (`pk=0`) in `data-project-detail-url`, so no
+     * URL path is ever hardcoded in JS or in an Alpine expression.
+     */
+    function projectDetailUrlMixin() {
         return {
+            get detailUrlTemplate() {
+                return this.$el && this.$el.dataset ? this.$el.dataset.projectDetailUrl || "" : "";
+            },
+            detailUrl(pk) {
+                return fillPkTemplate(this.detailUrlTemplate, pk);
+            },
+        };
+    }
+
+    /**
+     * Copy own properties - **including accessors** - from `source` onto `target`.
+     *
+     * `Object.assign` invokes getters and copies their current *value*, which
+     * would freeze `get visibleProjects()` to the empty array it returned
+     * before `projects` was loaded and would freeze `get detailUrlTemplate()`
+     * to `""` (it read `this.$el` on the bare source object). Copying the
+     * property descriptors keeps them live and reactive.
+     */
+    function mergeLiveProperties(target, source) {
+        return Object.defineProperties(target, Object.getOwnPropertyDescriptors(source));
+    }
+
+    function projectListComponent() {
+        return mergeLiveProperties(projectDetailUrlMixin(), {
             projects: [],
             workspaces: [],
             search: "",
@@ -207,7 +288,7 @@
                     return [];
                 }
             },
-        };
+        });
     }
 
     function projectDetailComponent() {
@@ -261,7 +342,7 @@
             async init() {
                 const root = this.$el;
                 const fromDom = root && root.dataset ? root.dataset.projectId || "" : "";
-                this.projectId = fromDom || projectIdFromLocation();
+                this.projectId = fromDom || idFromLocation();
                 if (!this.projectId) {
                     this.error = "Hiányzó projekt azonosító az URL-ben.";
                     this.loading = false;
@@ -375,6 +456,100 @@
     }
 
     /**
+     * Nav notifications bell (terv.md 21. fejezet, Phase 7).
+     * GET /api/v1/notifications/ + POST /api/v1/notifications/{id}/read/
+     */
+    function notificationsBellComponent() {
+        return {
+            notifications: [],
+            open: false,
+            loading: false,
+            loaded: false,
+            error: "",
+            pollTimer: null,
+
+            get unreadCount() {
+                return this.notifications.filter((item) => !item.is_read).length;
+            },
+
+            formatDate,
+
+            async init() {
+                await this.refresh();
+                this.pollTimer = window.setInterval(() => {
+                    if (!document.hidden) this.refresh();
+                }, NOTIFICATION_POLL_MS);
+            },
+
+            async refresh() {
+                this.loading = true;
+                try {
+                    this.notifications = await api.listNotifications();
+                    this.error = "";
+                } catch (error) {
+                    this.error = error.message || String(error);
+                } finally {
+                    this.loading = false;
+                    this.loaded = true;
+                }
+            },
+
+            toggle() {
+                this.open = !this.open;
+                if (this.open && !this.loaded) this.refresh();
+            },
+
+            close() {
+                this.open = false;
+            },
+
+            async markRead(notification) {
+                if (!notification || notification.is_read) return;
+                const previous = notification.is_read;
+                notification.is_read = true; // optimistic, rolled back on failure
+                try {
+                    await api.markNotificationRead(notification.id);
+                    this.error = "";
+                } catch (error) {
+                    notification.is_read = previous;
+                    this.error = error.message || String(error);
+                }
+            },
+        };
+    }
+
+    /**
+     * Print history page (terv.md 14. + Phase 7 "print history").
+     * GET /api/v1/print-jobs/ (paginated, includes *_name display fields).
+     */
+    function printHistoryComponent() {
+        return mergeLiveProperties(projectDetailUrlMixin(), {
+            jobs: [],
+            loading: true,
+            error: "",
+
+            formatDate,
+            displayName,
+            statusClass: printStatusClass,
+
+            versionLabel(job) {
+                if (job && job.version !== null && job.version !== undefined) return `v${job.version}`;
+                return labelFor(job ? job.model_version : null);
+            },
+
+            async init() {
+                try {
+                    this.jobs = await api.listPrintJobs();
+                } catch (error) {
+                    this.error = error.message || String(error);
+                } finally {
+                    this.loading = false;
+                }
+            },
+        });
+    }
+
+    /**
      * Alpine directive that keeps the imperative Three.js viewer in sync with
      * reactive state:  x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken }"
      */
@@ -407,6 +582,8 @@
         if (!Alpine) return;
         Alpine.data("projectList", projectListComponent);
         Alpine.data("projectDetail", projectDetailComponent);
+        Alpine.data("notificationsBell", notificationsBellComponent);
+        Alpine.data("printHistory", printHistoryComponent);
         registerStlViewerDirective(Alpine);
     });
 

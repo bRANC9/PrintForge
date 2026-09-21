@@ -1,14 +1,16 @@
 // PrintForge 3D viewer (Three.js, ES module).
 //
-// Loaded from `templates/designs/viewer.html` through an import map:
+// Three.js is vendored under `static/vendor/three/` and resolved through an
+// import map in `templates/projects/detail.html` (no CDN, works offline):
 //
 //     <script type="importmap">
 //     { "imports": {
-//         "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-//         "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+//         "three": "{% static 'vendor/three/three.module.min.js' %}",
+//         "three/addons/": "{% static 'vendor/three/addons/' %}"
 //     } }
 //     </script>
 //
+// Vendored versions: three r170 (three.module.min.js), Alpine 3.17.4.
 // The module exposes `window.PrintForgeViewer` so the classic Alpine code in
 // app.js can drive it without a build step.
 import * as THREE from "three";

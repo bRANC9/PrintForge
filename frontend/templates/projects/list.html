@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Projektek – PrintForge{% endblock %}
 {% block content %}
-    <div data-project-list x-data="projectList">
+    {# The detail URL template (pk=0) is filled client-side by `detailUrl()`. #}
+    <div data-project-list
+         data-project-detail-url="{% url 'projects:detail' pk=0 %}"
+         x-data="projectList">
         <header class="page-head">
             <div>
                 <h1>Projektek</h1>
@@ -16,12 +19,10 @@
             <p class="error-box" x-text="error"></p>
         </template>
         <p class="muted" x-show="loading">Betöltés…</p>
-        <p class="muted"
-           x-show="!loading && !error && !visibleProjects.length">Még nincs projekt ebben a workspace-ben.</p>
+        <p class="muted" x-show="!loading && !error && !visibleProjects.length">Még nincs projekt.</p>
         <div class="project-grid" x-show="!loading && visibleProjects.length">
             <template x-for="project in visibleProjects" :key="project.id">
-                {# A /projects/<id>/ útvonalat a backend urls.py-nak kell biztosítania (projects:detail). #}
-                <a class="card project-card" :href="'/projects/' + project.id + '/'">
+                <a class="card project-card" :href="detailUrl(project.id)">
                     <h2 x-text="project.name"></h2>
                     <p class="muted" x-text="project.description || 'Nincs leírás.'"></p>
                     <footer>

@@ -1,8 +1,8 @@
 """Permission / ownership tests (terv.md 20., 26.3).
 
-Covers the Phase-1 contract:
+Covers the Phase-7 contract:
 
-* anonymous callers may read but never write;
+* anonymous callers are rejected (only ``/api/v1/health/`` is public);
 * ``owner`` / ``created_by`` are taken from ``request.user`` and can never be
   forged through the request payload (they are read-only at the serializer and
   set by the view / service layer);
@@ -39,6 +39,12 @@ pytestmark = pytest.mark.django_db
         ("put", "/api/v1/projects/{proj}/", {"workspace": "{ws}", "name": "Intruder"}),
         ("patch", "/api/v1/projects/{proj}/", {"name": "Intruder"}),
         ("delete", "/api/v1/projects/{proj}/", None),
+        (
+            "post",
+            "/api/v1/print-jobs/",
+            {"project": "{proj}", "model_version": 1, "printer": 1},
+        ),
+        ("post", "/api/v1/notifications/read-all/", None),
     ],
 )
 def test_unauthenticated_writes_are_rejected(api_client, workspace, project, method, url, data):
@@ -53,13 +59,22 @@ def test_unauthenticated_writes_are_rejected(api_client, workspace, project, met
     assert Project.objects.filter(pk=project.pk).exists()
 
 
-def test_unauthenticated_reads_are_allowed(api_client, workspace, project):
-    for url in ("/api/v1/workspaces/", "/api/v1/projects/"):
+def test_unauthenticated_reads_are_rejected(api_client, workspace, project):
+    """Phase 7: every endpoint except ``/api/v1/health/`` requires authentication."""
+    for url in (
+        "/api/v1/workspaces/",
+        "/api/v1/projects/",
+        "/api/v1/versions/1/",
+        "/api/v1/agent-runs/",
+        "/api/v1/print-jobs/",
+        "/api/v1/notifications/",
+    ):
         response = api_client.get(url)
-        assert response.status_code == 200
+        assert response.status_code in (401, 403), url
 
-    assert api_client.get(f"/api/v1/workspaces/{workspace.id}/").status_code == 200
-    assert api_client.get(f"/api/v1/projects/{project.id}/").status_code == 200
+    assert api_client.get(f"/api/v1/workspaces/{workspace.id}/").status_code in (401, 403)
+    assert api_client.get(f"/api/v1/projects/{project.id}/").status_code in (401, 403)
+    assert api_client.post("/api/v1/notifications/read-all/").status_code in (401, 403)
 
 
 # ---------------------------------------------------------------------------

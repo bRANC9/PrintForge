@@ -78,6 +78,14 @@ class PrintJob(models.Model):
         blank=True,
         related_name="print_jobs",
     )
+    printer_profile = models.ForeignKey(
+        "slicers.PrinterProfile",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="print_jobs",
+    )
+    slicing_json = models.JSONField(default=dict, blank=True)
     gcode = models.FileField(upload_to=print_job_gcode_path, blank=True)
     status = models.CharField(
         max_length=20,

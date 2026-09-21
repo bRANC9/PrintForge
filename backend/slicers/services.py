@@ -6,15 +6,15 @@ data classes the backend understands, then drives ``PrintJob.status`` through
 ``PREPARING -> SLICING -> READY`` (or ``FAILED``).
 
 ``PrintJob`` links to a physical ``printers.Printer`` and to
-``slicers.FilamentProfile`` / ``slicers.ProcessProfile``. It does not carry a
-``PrinterProfile`` FK, so the matching slicer printer profile is resolved by
-name, then backend, then ``is_default``, falling back to the physical
-printer's own name/backend.
+``slicers.FilamentProfile`` / ``slicers.ProcessProfile``. The matching slicer
+``PrinterProfile`` is resolved by name, then backend, then ``is_default``,
+falling back to the physical printer's own name/backend; the resolved profile
+is persisted to ``PrintJob.printer_profile`` so the match is explicit.
+Estimates/metadata are stored in ``PrintJob.slicing_json``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -22,6 +22,7 @@ from django.utils import timezone
 
 from files.services import get_storage
 from printers.models import PrintJob, PrintJobStatus
+from printers.services import set_slicing_metadata
 
 from .base import (
     FilamentSettings,
@@ -34,7 +35,6 @@ from .models import FilamentProfile, PrinterProfile, ProcessProfile
 from .prusaslicer import PrusaSlicerBackend
 
 __all__ = [
-    "estimate_path",
     "filament_settings",
     "gcode_path",
     "get_backend",
@@ -62,11 +62,6 @@ def gcode_path(project_id: int, job_id: int) -> str:
     return f"print_jobs/{project_id}/{job_id}.gcode"
 
 
-def estimate_path(project_id: int, job_id: int) -> str:
-    """Relative storage path of the estimate sidecar JSON for a job."""
-    return f"print_jobs/{project_id}/{job_id}.estimate.json"
-
-
 # ---------------------------------------------------------------------------
 # ORM rows -> data-only profile settings
 # ---------------------------------------------------------------------------
@@ -92,15 +87,20 @@ def resolve_printer_profile(printer: Any | None) -> PrinterProfile | None:
     return profile
 
 
-def printer_settings(printer: Any | None) -> PrinterSettings:
-    """Build :class:`PrinterSettings` from a physical printer + its profile."""
-    profile = resolve_printer_profile(printer)
-    if profile is not None:
+def printer_settings(printer: Any | None, profile: PrinterProfile | None = None) -> PrinterSettings:
+    """Build :class:`PrinterSettings` from a physical printer + its profile.
+
+    Pass ``profile`` to reuse an already-resolved :class:`PrinterProfile`
+    (e.g. the one stored on ``PrintJob.printer_profile``) and avoid a second
+    lookup.
+    """
+    resolved = profile if profile is not None else resolve_printer_profile(printer)
+    if resolved is not None:
         return PrinterSettings(
-            name=profile.name,
-            printer_model=profile.printer_model,
-            backend=profile.backend or (getattr(printer, "backend", "") if printer else ""),
-            settings=dict(profile.settings_json or {}),
+            name=resolved.name,
+            printer_model=resolved.printer_model,
+            backend=resolved.backend or (getattr(printer, "backend", "") if printer else ""),
+            settings=dict(resolved.settings_json or {}),
         )
     if printer is None:
         return PrinterSettings()
@@ -145,6 +145,15 @@ def _set_status(job: PrintJob, status: str) -> None:
     job.save(update_fields=["status"])
 
 
+def _persist_slicing_metadata(job: PrintJob, data: dict[str, Any]) -> None:
+    """Merge ``data`` into ``PrintJob.slicing_json`` via printers.services.
+
+    ``printers.services.set_slicing_metadata`` merges the keys (preserving any
+    existing ones), validates JSON-serializability and persists the field.
+    """
+    set_slicing_metadata(job, **data)
+
+
 def _read_model(job: PrintJob, storage: Any) -> bytes:
     version = job.model_version
     name = getattr(getattr(version, "stl_file", None), "name", "") if version else ""
@@ -166,19 +175,26 @@ def slice_job(
 
     ``PrintJob.status`` goes ``PREPARING -> SLICING -> READY`` on success. On
     any failure the status is persisted as ``FAILED`` and the exception is
-    re-raised so Celery records the failure and can retry.
+    re-raised so Celery records the failure and can retry. Estimates/metadata
+    go into ``PrintJob.slicing_json`` and the resolved slicer printer profile is
+    stored on ``PrintJob.printer_profile``.
     """
     backend = backend or get_backend()
     storage = storage or get_storage()
 
-    _set_status(job, PrintJobStatus.PREPARING)
+    # Resolve the printer profile once and persist the match explicitly.
+    profile = resolve_printer_profile(job.printer)
+    job.printer_profile = profile
+    job.status = PrintJobStatus.PREPARING
+    job.save(update_fields=["status", "printer_profile"])
+
     try:
         data = model_bytes if model_bytes is not None else _read_model(job, storage)
 
         _set_status(job, PrintJobStatus.SLICING)
         result = backend.slice(
             data,
-            printer_settings(job.printer),
+            printer_settings(job.printer, profile),
             filament_settings(job.filament),
             process_settings(job.slicer_profile),
         )
@@ -188,26 +204,34 @@ def slice_job(
         estimate = backend.estimate(result)
         relative = gcode_path(job.project_id, job.pk)
         storage.write_bytes(relative, result.data)
-        storage.write_bytes(
-            estimate_path(job.project_id, job.pk),
-            json.dumps(
-                {
-                    "job_id": job.pk,
-                    "format": result.format,
-                    "gcode_bytes": len(result.data),
-                    "estimate": estimate,
-                    "computed_at": timezone.now().isoformat(),
-                },
-                indent=2,
-            ).encode("utf-8"),
+        _persist_slicing_metadata(
+            job,
+            {
+                "status": PrintJobStatus.READY.value,
+                "format": result.format,
+                "gcode": relative,
+                "gcode_bytes": len(result.data),
+                "slicer": estimate.get("slicer"),
+                "estimate": estimate,
+                "computed_at": timezone.now().isoformat(),
+            },
         )
 
         job.gcode.name = relative
         job.status = PrintJobStatus.READY
-        job.save(update_fields=["gcode", "status"])
+        job.save(update_fields=["gcode", "status", "slicing_json"])
     except Exception as exc:
         logger.warning("Slicing failed for PrintJob %s: %s", job.pk, exc)
-        _set_status(job, PrintJobStatus.FAILED)
+        _persist_slicing_metadata(
+            job,
+            {
+                "status": PrintJobStatus.FAILED.value,
+                "errors": [f"{type(exc).__name__}: {exc}"],
+                "completed_at": timezone.now().isoformat(),
+            },
+        )
+        job.status = PrintJobStatus.FAILED
+        job.save(update_fields=["status", "slicing_json"])
         raise
 
     return {

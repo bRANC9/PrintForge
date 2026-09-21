@@ -1,36 +1,44 @@
 # ---------------------------------------------------------------------------
 # Build context exclusions for the Django image (docker/django/Dockerfile).
 # Keep the context small and never ship secrets / local state into the image.
+#
+# NOTE: Docker matches these patterns against the path relative to the build
+# context root, so a bare `.venv` only excludes the root `.venv`. Use `**/`
+# to exclude nested paths (e.g. `backend/.venv`, `backend/**/__pycache__`).
+# Shipping a host `.venv` is actively harmful: `uv sync` would reuse it and the
+# image would contain dangling interpreter symlinks pointing at the host.
 # ---------------------------------------------------------------------------
 
 # Version control
 .git
 .gitignore
 
-# Virtualenvs & Python caches
-.venv
-venv
-__pycache__
-*.py[cod]
-*.egg-info
-.pytest_cache
-.ruff_cache
-.mypy_cache
+# Virtualenvs & Python caches (any depth)
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
 
-# Coverage / test artifacts
-.coverage
-coverage.xml
-htmlcov
+# Coverage / test artifacts (any depth)
+**/.coverage
+**/coverage.xml
+**/htmlcov
 
 # Environment & secrets
 .env
 .env.*
 !.env.example
 
-# Local persistent data & databases
+# Local persistent data, databases & generated assets
 data/
-*.sqlite3
-*.sqlite3-journal
+**/*.sqlite3
+**/*.sqlite3-journal
+backend/staticfiles/
+backend/media/
 
 # Design / planning docs (not needed in the image)
 terv.md

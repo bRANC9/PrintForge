@@ -1,0 +1,109 @@
+# PrintForge – production / pull-based stack (TrueNAS SCALE, or any host that
+# already runs Watchtower).
+#
+#   External Ollama:  docker compose -f docker-compose.prod.yml up -d
+#   Internal Ollama:  docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
+#
+# Same services, ports and env as docker-compose.yml, but web/worker are PULLED
+# from GHCR instead of built locally, and carry the Watchtower enable label so
+# the already-running Watchtower recreates them when a new :latest is published.
+#
+# Rollback / pinning: set PRINTFORGE_IMAGE in .env, e.g.
+#   PRINTFORGE_IMAGE=ghcr.io/branc9/printforge:sha-1a2b3c4
+# Watchtower follows the image reference, so a pinned tag is not auto-updated.
+#
+# Requires the repo's ./docker/db/init (pgvector extension) next to this file.
+
+name: printforge
+
+x-app-env: &app-env
+    DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-insecure-dev-key-change-me}
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-}
+    DATABASE_URL: ${DATABASE_URL:-postgres://printforge:printforge@db:5432/printforge}
+    REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-coder:30b}
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+    EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+    RAG_ENABLED: ${RAG_ENABLED:-false}
+    STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+    MEDIA_ROOT: /data/media
+
+services:
+    db:
+        image: pgvector/pgvector:pg16
+        environment:
+            POSTGRES_DB: ${POSTGRES_DB:-printforge}
+            POSTGRES_USER: ${POSTGRES_USER:-printforge}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-printforge}
+        volumes:
+            - ${DATA_ROOT:-./data}/pg:/var/lib/postgresql/data
+            - ./docker/db/init:/docker-entrypoint-initdb.d:ro
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "pg_isready -U ${POSTGRES_USER:-printforge} -d ${POSTGRES_DB:-printforge}",
+                ]
+            interval: 5s
+            timeout: 5s
+            retries: 12
+        restart: unless-stopped
+
+    redis:
+        image: redis:7-alpine
+        command: ["redis-server", "--appendonly", "yes"]
+        volumes:
+            - ${DATA_ROOT:-./data}/redis:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 5s
+            retries: 12
+        restart: unless-stopped
+
+    web:
+        image: ${PRINTFORGE_IMAGE:-ghcr.io/branc9/printforge:latest}
+        pull_policy: always
+        command: ["/app/docker/django/entrypoint.sh", "web"]
+        environment: *app-env
+        volumes:
+            - ${DATA_ROOT:-./data}/media:/data/media
+        ports:
+            - "${WEB_PORT:-8080}:8000"
+        depends_on:
+            db:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\"",
+                ]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 30s
+        labels:
+            com.centurylinklabs.watchtower.enable: "true"
+        restart: unless-stopped
+
+    worker:
+        image: ${PRINTFORGE_IMAGE:-ghcr.io/branc9/printforge:latest}
+        pull_policy: always
+        command: ["/app/docker/django/entrypoint.sh", "worker"]
+        environment: *app-env
+        volumes:
+            - ${DATA_ROOT:-./data}/media:/data/media
+        depends_on:
+            db:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        labels:
+            com.centurylinklabs.watchtower.enable: "true"
+        restart: unless-stopped

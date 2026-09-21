@@ -7,14 +7,56 @@
         <title>{% block title %}PrintForge{% endblock %}</title>
         <link rel="stylesheet" href="{% static 'css/app.css' %}">
         {% block extra_head %}{% endblock %}
-        <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+        {# Vendored Alpine.js 3.17.4 (no CDN, works offline). #}
+        <script defer src="{% static 'vendor/alpine/alpine.min.js' %}"></script>
     </head>
     <body>
         <header class="site-header">
             <a class="brand" href="{% url 'home' %}">PrintForge</a>
             <nav class="site-nav">
-                <a href="/projects/">Projektek</a>
+                <a href="{% url 'projects:list' %}">Projektek</a>
+                {# TODO: switch to {% url 'printers:history' %} once the route exists. #}
+                <a href="/printers/history/">Nyomtatási előzmények</a>
                 {% if user.is_authenticated %}
+                    <div class="notif" x-data="notificationsBell" @click.outside="close()">
+                        <button type="button"
+                                class="notif-toggle"
+                                @click="toggle()"
+                                :aria-expanded="open ? 'true' : 'false'">
+                            <svg class="notif-icon"
+                                 viewBox="0 0 24 24"
+                                 width="18"
+                                 height="18"
+                                 aria-hidden="true"
+                                 focusable="false">
+                                <path fill="currentColor" d="M12 3a5 5 0 0 0-5 5v3.6L5.6 15h12.8L17 11.6V8a5 5 0 0 0-5-5Zm0 18a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 21Z" />
+                            </svg>
+                            <span class="visually-hidden">Értesítések</span>
+                            <span class="notif-count" x-show="unreadCount" x-cloak x-text="unreadCount"></span>
+                        </button>
+                        <div class="notif-dropdown" x-show="open" x-cloak>
+                            <p class="muted" x-show="loading">Betöltés…</p>
+                            <p class="error-box" x-show="error" x-text="error"></p>
+                            <p class="muted" x-show="!loading && !notifications.length">Nincs értesítés.</p>
+                            <ul class="notif-list">
+                                <template x-for="item in notifications" :key="item.id">
+                                    <li :class="{ 'is-unread': !item.is_read }">
+                                        <a :href="item.url || '#'"
+                                           @click="!item.url && $event.preventDefault()"
+                                           x-text="item.message"></a>
+                                        <div class="notif-meta">
+                                            <span class="badge" x-text="item.kind"></span>
+                                            <time class="muted" x-text="formatDate(item.created_at)"></time>
+                                            <button type="button"
+                                                    class="link-btn"
+                                                    x-show="!item.is_read"
+                                                    @click="markRead(item)">Megjelölés olvasottként</button>
+                                        </div>
+                                    </li>
+                                </template>
+                            </ul>
+                        </div>
+                    </div>
                     <span class="user">{{ user }}</span>
                     <form method="post" action="{% url 'logout' %}">
                         {% csrf_token %}

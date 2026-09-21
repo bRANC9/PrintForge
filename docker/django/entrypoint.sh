@@ -32,6 +32,9 @@ wait_for_db
 
 python manage.py migrate --noinput
 
+# Collect static files so WhiteNoise can serve them from gunicorn.
+python manage.py collectstatic --noinput
+
 case "$1" in
     worker)
         exec celery -A config worker --loglevel=info

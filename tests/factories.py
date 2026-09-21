@@ -20,7 +20,10 @@ from django.contrib.auth import get_user_model
 
 from agents.spec import ModelSpecification
 from designs.models import ModelVersion
+from notifications.models import Notification
+from printers.models import Printer, PrintJob, PrintJobStatus
 from projects.models import Project
+from slicers.models import FilamentProfile, PrinterProfile, ProcessProfile
 from workspaces.models import Workspace, WorkspaceMember, WorkspaceRole
 
 User = get_user_model()
@@ -99,3 +102,76 @@ class ModelVersionFactory(factory.django.DjangoModelFactory):
     specification_json = factory.LazyFunction(lambda: ModelSpecification.example())
     validation_json = factory.LazyFunction(dict)
     created_by = factory.SelfAttribute("project.created_by")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: printers / print queue / notifications
+# ---------------------------------------------------------------------------
+
+
+class PrinterFactory(factory.django.DjangoModelFactory):
+    """A printer registry entry (no network; adapters are faked in tests)."""
+
+    class Meta:
+        model = Printer
+
+    name = factory.Sequence(lambda n: f"Printer {n}")
+    backend = "creality_k2"
+    host = ""
+    is_active = True
+
+
+class PrinterProfileFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = PrinterProfile
+
+    name = factory.Sequence(lambda n: f"Printer profile {n}")
+    printer_model = "K2 Pro"
+    backend = "creality_k2"
+
+
+class FilamentProfileFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = FilamentProfile
+
+    name = factory.Sequence(lambda n: f"Filament {n}")
+    material = "PLA"
+    brand = ""
+
+
+class ProcessProfileFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = ProcessProfile
+
+    name = factory.Sequence(lambda n: f"Process {n}")
+    layer_height = 0.2
+
+
+class PrintJobFactory(factory.django.DjangoModelFactory):
+    """A queued print job whose version always belongs to its project."""
+
+    class Meta:
+        model = PrintJob
+
+    project = factory.SubFactory(ProjectFactory)
+    model_version = factory.SubFactory(
+        ModelVersionFactory, project=factory.SelfAttribute("..project")
+    )
+    printer = factory.SubFactory(PrinterFactory)
+    created_by = factory.SelfAttribute("project.created_by")
+    priority = 0
+    status = PrintJobStatus.QUEUED
+
+
+class NotificationFactory(factory.django.DjangoModelFactory):
+    """One in-app notification, unread by default."""
+
+    class Meta:
+        model = Notification
+
+    user = factory.SubFactory(UserFactory)
+    workspace = None
+    kind = "info"
+    message = factory.Sequence(lambda n: f"notification {n}")
+    url = ""
+    is_read = False

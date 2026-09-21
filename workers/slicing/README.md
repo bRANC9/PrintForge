@@ -15,6 +15,8 @@ hostile profile can never block the web worker (terv.md 12., 20. fejezet).
 | Broker / result | `REDIS_URL` (`CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND`) |
 | Input | `printers.PrintJob` (model version + printer/filament/process profiles) |
 | Output | `PrintJob.gcode` (stored via `files.services.get_storage()`) |
+| Estimate | `PrintJob.slicing_json` |
+| Printer match | `PrintJob.printer_profile` |
 | Status | `PrintJob.status` (`PrintJobStatus`) |
 
 ### Input
@@ -23,9 +25,10 @@ hostile profile can never block the web worker (terv.md 12., 20. fejezet).
 `PrintJob.model_version.stl_file`, the physical `PrintJob.printer`, and the
 optional `filament` / `slicer_profile` (a `ProcessProfile`).
 
-`PrintJob` has no `PrinterProfile` FK, so the slicer printer profile is
-resolved by name, then `backend`, then `is_default`, falling back to the
-physical printer's own name/backend (`slicers.services.resolve_printer_profile`).
+The slicer printer profile is resolved by name, then `backend`, then
+`is_default`, falling back to the physical printer's own name/backend
+(`slicers.services.resolve_printer_profile`). The resolved row is persisted to
+`PrintJob.printer_profile`, so the match is explicit instead of implicit.
 
 ### Status transitions
 
@@ -34,13 +37,14 @@ QUEUED -> PREPARING -> SLICING -> READY
                               \-> FAILED   (exception re-raised for Celery)
 ```
 
-* `PREPARING` is written before the model artifact is read.
+* `PREPARING` is written (together with the resolved `printer_profile`) before
+  the model artifact is read.
 * `SLICING` is written right before the CLI runs.
 * On success the G-code is stored, `PrintJob.gcode` is set and the estimate is
-  written to a sidecar JSON (`print_jobs/<project_id>/<job_id>.estimate.json`,
-  because `PrintJob` has no JSON metadata field).
-* On any failure `FAILED` is persisted first, then the exception is re-raised
-  so Celery records the failure and can retry.
+  persisted into `PrintJob.slicing_json` (`status`, `format`, `gcode`,
+  `gcode_bytes`, `slicer`, `estimate`, `computed_at`).
+* On any failure `FAILED` and the error are persisted into `slicing_json`, then
+  the exception is re-raised so Celery records the failure and can retry.
 
 ### Estimate
 

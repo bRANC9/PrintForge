@@ -1,4 +1,4 @@
-"""Print queue service over ``PrintJob`` (terv.md 14. fejezet).
+"""Print queue service over ``PrintJob`` (terv.md 14., 20. fejezet).
 
 Business logic for enqueueing, dispatching and tracking print jobs. Views, DRF
 serializers and MCP tools call these functions; nothing here may depend on DRF
@@ -18,25 +18,60 @@ State machine
 Valid transitions are declared in :data:`ALLOWED_TRANSITIONS`. Re-transitioning
 to the *same* status is an idempotent no-op. ``COMPLETED`` is terminal;
 ``FAILED`` and ``CANCELLED`` may be requeued explicitly (``-> QUEUED``).
+
+Permission (terv.md 20.)
+-----------------------
+
+Printer control is a **separate** permission (``PRINTER_OPERATOR``), not MEMBER.
+The service layer enforces it itself -- it never relies on the HTTP-layer
+``IsPrinterOperator`` -- so an API/MCP caller cannot bypass it. Every entry point
+that can start, pause, cancel or complete a print takes an optional ``user``:
+
+* when ``user`` is provided and the target is a *control* status
+  (:data:`CONTROL_STATUSES`), :func:`~printers.permissions.require_printer_operator`
+  is called and a non-operator gets :class:`~django.core.exceptions.PermissionDenied`;
+* when ``user`` is ``None`` the check is skipped, which is what internal workers
+  (slicer, dispatcher) do.
+
+Scope
+-----
+
+:func:`jobs_for_user` is the read entry point for the API: it returns only the
+jobs whose project lives in a workspace the caller is a member of.
 """
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from django.db import transaction
+from django.db.models import QuerySet
+
+from files.services import get_storage
+from workspaces.models import WorkspaceMember
 
 from .factory import get_printer_backend
 from .models import Printer, PrintJob, PrintJobStatus
+from .permissions import require_printer_operator
 
 __all__ = [
+    "ACTIVE_STATUSES",
     "ALLOWED_TRANSITIONS",
+    "CONTROL_STATUSES",
     "QUEUEABLE_STATUSES",
     "InvalidTransitionError",
     "QueueError",
     "assign_filament",
+    "cancel_job",
     "enqueue_job",
+    "job_status",
+    "jobs_for_user",
     "next_job",
     "printer_status",
     "queue_for_printer",
+    "set_slicing_metadata",
+    "start_job",
     "transition",
 ]
 
@@ -51,6 +86,20 @@ class InvalidTransitionError(QueueError):
 
 #: Statuses that are waiting to be dispatched (eligible for ``next_job``).
 QUEUEABLE_STATUSES = (PrintJobStatus.QUEUED,)
+
+#: Statuses where a physical print is running and the adapter is involved.
+ACTIVE_STATUSES = frozenset({PrintJobStatus.PRINTING, PrintJobStatus.PAUSED})
+
+#: Target statuses that require ``PRINTER_OPERATOR`` when a user is supplied
+#: (terv.md 20.). ``FAILED`` is intentionally absent: workers may fail a job.
+CONTROL_STATUSES = frozenset(
+    {
+        PrintJobStatus.PRINTING,
+        PrintJobStatus.PAUSED,
+        PrintJobStatus.CANCELLED,
+        PrintJobStatus.COMPLETED,
+    }
+)
 
 #: The print-job state machine. Keys/values are ``PrintJobStatus`` members.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -116,12 +165,15 @@ def enqueue_job(
     priority: int = 0,
     filament=None,
     slicer_profile=None,
+    printer_profile=None,
 ) -> PrintJob:
     """Create a ``QUEUED`` print job.
 
     ``model_version`` must belong to ``project``; ``priority`` must be >= 0.
-    The printer is *not* required to be active -- a queue may legitimately hold
-    work for a printer that is temporarily offline.
+    ``filament``/``slicer_profile``/``printer_profile`` are optional slicer
+    configuration FKs and are stored as given. The printer is *not* required to
+    be active -- a queue may legitimately hold work for a printer that is
+    temporarily offline.
     """
     if model_version.project_id != project.pk:
         raise QueueError("model_version does not belong to the given project")
@@ -133,10 +185,58 @@ def enqueue_job(
         printer=printer,
         filament=filament,
         slicer_profile=slicer_profile,
+        printer_profile=printer_profile,
         created_by=created_by,
         priority=priority,
         status=PrintJobStatus.QUEUED,
     )
+
+
+# ---------------------------------------------------------------------------
+# Scoped reads (Phase 7 -- shared printer queue)
+# ---------------------------------------------------------------------------
+
+
+def jobs_for_user(user) -> QuerySet[PrintJob]:
+    """Jobs in every workspace ``user`` is a member of.
+
+    Membership is resolved through :class:`~workspaces.models.WorkspaceMember`
+    via a subquery (no join duplication, so no ``distinct()`` and no
+    PostgreSQL ``DISTINCT``/``ORDER BY`` pitfalls). A workspace OWNER is an
+    explicit member, so owners are included; anonymous users get an empty
+    queryset. Ordered ``-priority, created_at`` and eager-loads the relations
+    the API serializes.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return PrintJob.objects.none()
+    member_workspaces = WorkspaceMember.objects.filter(user=user).values("workspace_id")
+    return (
+        PrintJob.objects.filter(project__workspace_id__in=member_workspaces)
+        .select_related(
+            "project",
+            "project__workspace",
+            "printer",
+            "filament",
+            "slicer_profile",
+            "printer_profile",
+            "model_version",
+            "created_by",
+        )
+        .order_by("-priority", "created_at")
+    )
+
+
+def job_status(job: PrintJob) -> dict[str, Any]:
+    """Small read model for polling a single job (no extra queries)."""
+    return {
+        "job_id": job.pk,
+        "status": job.status,
+        "priority": job.priority,
+        "printer_id": job.printer_id,
+        "gcode": getattr(job.gcode, "name", "") or "",
+        "slicing": dict(job.slicing_json or {}),
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
 
 
 def queue_for_printer(printer: Printer):
@@ -152,6 +252,11 @@ def next_job(printer: Printer) -> PrintJob | None:
     return queue_for_printer(printer).first()
 
 
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+
+
 def _coerce_status(status) -> str:
     if isinstance(status, PrintJobStatus):
         return status
@@ -162,12 +267,17 @@ def _coerce_status(status) -> str:
 
 
 @transaction.atomic
-def transition(job: PrintJob, status) -> PrintJob:
+def transition(job: PrintJob, status, *, user=None) -> PrintJob:
     """Move ``job`` to ``status`` after validating the transition.
 
     Returns the (possibly unchanged) job. Raises :class:`InvalidTransitionError`
     for an unknown status or a transition not declared in
     :data:`ALLOWED_TRANSITIONS`. Same-status calls are idempotent no-ops.
+
+    When ``user`` is provided and the target is a control status
+    (:data:`CONTROL_STATUSES`), ``PRINTER_OPERATOR`` is required
+    (terv.md 20.). The state machine is validated *before* the permission check,
+    so an invalid move never leaks whether the caller could operate.
     """
     new_status = _coerce_status(status)
     current = job.status
@@ -180,9 +290,100 @@ def transition(job: PrintJob, status) -> PrintJob:
             f"Cannot transition PrintJob #{job.pk} from {current} to {new_status}."
         )
 
+    if user is not None and new_status in CONTROL_STATUSES:
+        require_printer_operator(user, job.printer)
+
     job.status = new_status
     job.save(update_fields=["status", "updated_at"])
     return job
+
+
+# ---------------------------------------------------------------------------
+# Slicing metadata (replaces the sidecar estimate file)
+# ---------------------------------------------------------------------------
+
+
+@transaction.atomic
+def set_slicing_metadata(job: PrintJob, **data: Any) -> PrintJob:
+    """Merge ``data`` into ``PrintJob.slicing_json``.
+
+    ``slicer-worker`` calls this after slicing (``format``, ``gcode_bytes``,
+    ``estimate``, ``computed_at``, ...) instead of writing a sidecar estimate
+    file. Existing keys are preserved; values must be JSON-serializable.
+    """
+    merged = dict(job.slicing_json or {})
+    merged.update(data)
+    try:
+        json.dumps(merged)
+    except (TypeError, ValueError) as exc:
+        raise QueueError(f"slicing metadata is not JSON serializable: {exc}") from exc
+    job.slicing_json = merged
+    job.save(update_fields=["slicing_json", "updated_at"])
+    return job
+
+
+# ---------------------------------------------------------------------------
+# Start / cancel paths (always guarded by PRINTER_OPERATOR)
+# ---------------------------------------------------------------------------
+
+
+def start_job(job: PrintJob, *, user=None, backend=None, storage=None) -> PrintJob:
+    """Upload and start a ``READY`` job on its printer, then mark it ``PRINTING``.
+
+    Permission: ``PRINTER_OPERATOR`` is required for ``user`` (when given).
+    ``backend``/``storage`` are injectable for tests; in production they come
+    from :func:`~printers.factory.get_printer_backend` and
+    :func:`files.services.get_storage`.
+
+    The adapter is never faked: an unconfigured K2 transport raises
+    :class:`~printers.base.PrinterProtocolNotImplementedError` and the job stays
+    ``READY``. Resuming a ``PAUSED`` job is a plain
+    ``transition(job, PRINTING, user=...)`` (the pause/resume command is not part
+    of the ``PrinterBackend`` contract yet).
+    """
+    if user is not None:
+        require_printer_operator(user, job.printer)
+    if job.status != PrintJobStatus.READY:
+        raise InvalidTransitionError(
+            f"Only a READY job can be started (PrintJob #{job.pk} is {job.status}); "
+            "resume a PAUSED job with transition(job, PRINTING, user=...)."
+        )
+
+    gcode_name = getattr(job.gcode, "name", "") or ""
+    if not gcode_name:
+        raise QueueError(f"PrintJob #{job.pk} has no G-code to upload")
+
+    adapter = backend if backend is not None else get_printer_backend(job.printer)
+    store = storage if storage is not None else get_storage()
+    remote = adapter.upload(store.read_bytes(gcode_name), gcode_name.rsplit("/", 1)[-1])
+    adapter.start(remote)
+    return transition(job, PrintJobStatus.PRINTING, user=user)
+
+
+def cancel_job(job: PrintJob, *, user=None, backend=None) -> PrintJob:
+    """Cancel ``job``, telling the printer only when a print is active.
+
+    Permission: ``PRINTER_OPERATOR`` is required for ``user`` (when given).
+    ``backend`` is injectable for tests. ``QUEUED``/``READY`` jobs are cancelled
+    without touching the printer; ``PRINTING``/``PAUSED`` jobs call
+    ``backend.cancel()`` first.
+    """
+    if user is not None:
+        require_printer_operator(user, job.printer)
+    if job.status == PrintJobStatus.CANCELLED:
+        return job
+    if PrintJobStatus.CANCELLED not in ALLOWED_TRANSITIONS.get(job.status, frozenset()):
+        raise InvalidTransitionError(f"Cannot cancel PrintJob #{job.pk} from {job.status}.")
+
+    if job.status in ACTIVE_STATUSES:
+        adapter = backend if backend is not None else get_printer_backend(job.printer)
+        adapter.cancel()
+    return transition(job, PrintJobStatus.CANCELLED, user=user)
+
+
+# ---------------------------------------------------------------------------
+# Printer status / filament assignment
+# ---------------------------------------------------------------------------
 
 
 def printer_status(printer: Printer):

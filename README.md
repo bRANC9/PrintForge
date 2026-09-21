@@ -58,6 +58,23 @@ Web UI: <http://localhost:8080> · API: <http://localhost:8080/api/v1/health/>
 - Only publish the `web` port. `db`, `redis` and `ollama` stay on the internal
   network — never expose `11434`.
 
+## Production deploy (GHCR + Watchtower)
+
+Releases publish the Django (web/worker) image to GitHub Container Registry as
+`ghcr.io/branc9/printforge` (tags: `latest`, `sha-<short>`, branch name, and
+semver for `v*` tags). On a host that already runs Watchtower (e.g. TrueNAS),
+deploy the pull-based stack instead of building:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+# internal Ollama:
+docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
+```
+
+See [`docs/truenas-deploy.md`](docs/truenas-deploy.md) for the full flow
+(dataset layout, `.env`, Watchtower behaviour, rollback via a pinned
+`PRINTFORGE_IMAGE`).
+
 ## Local development (uv)
 
 ```bash

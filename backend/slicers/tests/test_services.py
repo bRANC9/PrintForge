@@ -81,10 +81,43 @@ def test_slice_job_stores_gcode_and_estimate(job, tmp_path):
     assert job.status == PrintJobStatus.READY
     assert job.gcode.name == services.gcode_path(job.project_id, job.pk)
     assert storage.read_bytes(job.gcode.name) == GCODE
-    assert storage.exists(services.estimate_path(job.project_id, job.pk))
     assert result["status"] == "READY"
     assert result["estimate"]["filament_g"] == 1.5
     assert backend.received[0] == b"solid x\nendsolid x\n"
+
+    metadata = job.slicing_json
+    assert metadata["status"] == "READY"
+    assert metadata["format"] == "gcode"
+    assert metadata["gcode"] == job.gcode.name
+    assert metadata["gcode_bytes"] == len(GCODE)
+    assert metadata["slicer"] == "fake"
+    assert metadata["estimate"]["filament_g"] == 1.5
+    assert "computed_at" in metadata
+
+
+def test_slice_job_links_resolved_printer_profile(job, tmp_path):
+    profile = PrinterProfile.objects.create(
+        name="K2 Pro",
+        printer_model="K2",
+        backend="creality",
+        settings_json={"nozzle_diameter": 0.4},
+    )
+    storage = _storage_with_model(job, tmp_path)
+
+    services.slice_job(job, backend=FakeBackend(), storage=storage)
+
+    job.refresh_from_db()
+    assert job.printer_profile_id == profile.id
+
+
+def test_slice_job_links_default_printer_profile(job, tmp_path):
+    profile = PrinterProfile.objects.create(name="Generic", is_default=True)
+    storage = _storage_with_model(job, tmp_path)
+
+    services.slice_job(job, backend=FakeBackend(), storage=storage)
+
+    job.refresh_from_db()
+    assert job.printer_profile_id == profile.id
 
 
 def test_status_is_slicing_while_the_backend_runs(job, tmp_path):
@@ -108,6 +141,8 @@ def test_slice_job_persists_failure(job, tmp_path):
 
     job.refresh_from_db()
     assert job.status == PrintJobStatus.FAILED
+    assert job.slicing_json["status"] == "FAILED"
+    assert "slicer exploded" in job.slicing_json["errors"][0]
     assert not storage.exists(services.gcode_path(job.project_id, job.pk))
 
 
@@ -153,6 +188,8 @@ def test_celery_task_slices(job, tmp_path, monkeypatch):
     assert result["status"] == "READY"
     assert job.status == PrintJobStatus.READY
     assert storage.exists(job.gcode.name)
+    assert job.slicing_json["status"] == "READY"
+    assert job.slicing_json["estimate"]["filament_g"] == 1.5
 
 
 def test_celery_task_handles_missing_job():

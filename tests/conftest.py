@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import pytest
 from factories import (
+    FilamentProfileFactory,
     ModelVersionFactory,
+    NotificationFactory,
+    PrinterFactory,
+    PrinterProfileFactory,
+    PrintJobFactory,
+    ProcessProfileFactory,
     ProjectFactory,
     UserFactory,
     WorkspaceFactory,
@@ -19,7 +25,13 @@ from factories import (
 from rest_framework.test import APIClient
 
 __all__ = [
+    "FilamentProfileFactory",
     "ModelVersionFactory",
+    "NotificationFactory",
+    "PrintJobFactory",
+    "PrinterFactory",
+    "PrinterProfileFactory",
+    "ProcessProfileFactory",
     "ProjectFactory",
     "UserFactory",
     "WorkspaceFactory",

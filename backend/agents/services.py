@@ -4,6 +4,18 @@ from projects.models import Project
 
 from .models import AgentRun, AgentRunStatus
 
+__all__ = [
+    "fail_run",
+    "finish_run",
+    "runs_accessible_to",
+    "start_run",
+]
+
+
+def runs_accessible_to(user):
+    """Agent runs in the workspaces ``user`` is a member of (Phase 7 scoping)."""
+    return AgentRun.objects.filter(project__workspace__members__user=user).distinct()
+
 
 def start_run(*, project: Project, user_prompt: str) -> AgentRun:
     return AgentRun.objects.create(

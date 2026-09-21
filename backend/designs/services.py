@@ -29,6 +29,7 @@ __all__ = [
     "read_artifact",
     "start_render",
     "version_status",
+    "versions_accessible_to",
     "versions_for_project",
 ]
 
@@ -76,6 +77,11 @@ def latest_version(project: Project) -> ModelVersion | None:
 def versions_for_project(project: Project):
     """All versions of a project, newest first."""
     return project.versions.select_related("created_by").order_by("-version")
+
+
+def versions_accessible_to(user):
+    """Versions in the workspaces ``user`` is a member of (Phase 7 scoping)."""
+    return ModelVersion.objects.filter(project__workspace__members__user=user).distinct()
 
 
 def version_status(version: ModelVersion) -> dict[str, Any]:

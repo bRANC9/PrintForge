@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Nyomtatási előzmények – PrintForge{% endblock %}
+{% block content %}
+    {# The project URL template (pk=0) is filled client-side by `detailUrl()`. #}
+    <div data-print-history
+         data-project-detail-url="{% url 'projects:detail' pk=0 %}"
+         x-data="printHistory">
+        <header class="page-head">
+            <div>
+                <h1>Nyomtatási előzmények</h1>
+                <p class="muted">A nyomtatási sor feladatai, állapotuk és prioritásuk.</p>
+            </div>
+        </header>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted" x-show="!loading && !error && !jobs.length">Még nincs nyomtatási feladat.</p>
+        <div class="table-wrap" x-show="!loading && jobs.length">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Projekt</th>
+                        <th>Verzió</th>
+                        <th>Nyomtató</th>
+                        <th>Filament</th>
+                        <th>Állapot</th>
+                        <th>Prioritás</th>
+                        <th>Létrehozva</th>
+                        <th>Módosítva</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="job in jobs" :key="job.id">
+                        <tr>
+                            <td x-text="job.id"></td>
+                            <td>
+                                <a :href="detailUrl(job.project)"
+                                   x-text="displayName(job.project_name, job.project)"></a>
+                            </td>
+                            <td x-text="versionLabel(job)"></td>
+                            <td x-text="displayName(job.printer_name, job.printer)"></td>
+                            <td x-text="displayName(job.filament_name, job.filament)"></td>
+                            <td>
+                                <span class="status-badge"
+                                      :class="statusClass(job.status)"
+                                      x-text="job.status"></span>
+                            </td>
+                            <td x-text="job.priority"></td>
+                            <td class="muted" x-text="formatDate(job.created_at)"></td>
+                            <td class="muted" x-text="formatDate(job.updated_at)"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
+{% endblock %}

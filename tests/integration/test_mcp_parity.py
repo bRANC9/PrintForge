@@ -50,16 +50,6 @@ def queued(monkeypatch):
     return ids
 
 
-def _tool(tool_name: str):
-    """Return the registered handler.
-
-    Used instead of :func:`mcp.tools.call` for tools that take a parameter
-    literally named ``name``: the dispatcher ``call(name, **kwargs)`` currently
-    shadows it (see the xfail test below).
-    """
-    return all_tools()[tool_name].handler
-
-
 def test_every_registered_tool_has_a_parity_test():
     assert set(all_tools()) <= PARITY_TOOLS, (
         "A new MCP tool was registered without a parity test in "
@@ -76,16 +66,9 @@ def test_dispatcher_routes_a_tool_without_a_name_parameter():
     assert result == [{"id": workspace.projects.get().id, "name": "Routed"}]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "PRODUCTION BUG (mcp): mcp.tools.call(name, **kwargs) uses the same "
-        "identifier 'name' for both the tool name and a forwarded parameter, so "
-        "create_workspace/create_project cannot be invoked through the public "
-        "dispatcher. Reported to the mcp owner; expected to xpass once fixed."
-    ),
-    strict=False,
-)
 def test_call_dispatcher_forwards_a_parameter_named_name():
+    """Regression: ``call``'s tool id is positional-only, so a tool parameter
+    literally named ``name`` no longer collides with it."""
     owner = UserFactory()
 
     result = call("create_workspace", name="Lab", owner_id=owner.id)
@@ -102,7 +85,7 @@ def test_create_workspace_tool_delegates_to_service():
     owner = UserFactory()
 
     with patch("mcp.tools_impl.create_workspace", wraps=create_workspace) as service:
-        result = _tool("create_workspace")(name="Lab", owner_id=owner.id)
+        result = call("create_workspace", name="Lab", owner_id=owner.id)
 
     service.assert_called_once_with(name="Lab", owner=owner)
     created = Workspace.objects.get(pk=result["id"])
@@ -121,7 +104,8 @@ def test_create_project_tool_delegates_to_service():
     user = workspace.owner
 
     with patch("mcp.tools_impl.create_project", wraps=create_project) as service:
-        result = _tool("create_project")(
+        result = call(
+            "create_project",
             workspace_id=workspace.id,
             name="Bracket",
             user_id=user.id,

@@ -1,7 +1,9 @@
-{# Three.js viewer partial. Include it ONCE inside an Alpine scope that exposes
-   `stlUrl`, `scadUrl`, `viewerLabel`, `viewerState`, `viewerMessage` and
-   `dimensions` (see `projectDetail` in static/js/app.js). The import map and
-   the `viewer.js` module live in the including page's `extra_head` block. #}
+{% comment %}
+    Three.js viewer partial. Include it ONCE inside an Alpine scope that exposes
+    `stlUrl`, `scadUrl`, `viewerLabel`, `viewerState`, `viewerMessage` and
+    `dimensions` (see `projectDetail` in static/js/app.js). The import map and
+    the `viewer.js` module live in the including page's `extra_head` block.
+{% endcomment %}
 <section class="panel viewer-panel">
     <header class="viewer-toolbar">
         <div>
