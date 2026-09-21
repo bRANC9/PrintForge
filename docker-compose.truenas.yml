@@ -1,0 +1,168 @@
+# ===========================================================================
+# PrintForge - TrueNAS SCALE 25.10 "Custom App" (paste this YAML into the UI)
+# ===========================================================================
+#
+# Self-contained and paste-ready: no image build, no env-file support, no
+# relative host mounts and no variable interpolation. All values are literal,
+# so the TrueNAS UI can consume it as-is. Every value you MUST change is marked
+# with "# EDIT:".
+#
+# BEFORE INSTALLING, edit:
+#   1. every "/mnt/<POOL>/..." path          -> your pool + dataset
+#   2. CHANGE_ME                             -> ONE strong password, used in
+#                                               both POSTGRES_PASSWORD and
+#                                               DATABASE_URL (keep them equal)
+#   3. CHANGE_ME (DJANGO_SECRET_KEY)         -> a long random string, e.g.
+#                                               python3 -c "import secrets;print(secrets.token_urlsafe(64))"
+#   4. DJANGO_ALLOWED_HOSTS                  -> the NAS hostname / IP
+#   5. DJANGO_CSRF_TRUSTED_ORIGINS           -> only when HTTPS is in front
+#   6. the published port, if 8080 is taken
+#
+# Notes:
+#   * The pgvector "vector" extension is created by the Django migration
+#     backend/embeddings/migrations/0001_enable_vector_extension.py, so the
+#     docker/db/init SQL mount is NOT needed in this file.
+#   * The entrypoint waits for the database and runs migrations on start.
+#   * Watchtower is already running on the host and updates these containers
+#     when a new ghcr.io/branc9/printforge:latest is published. Do NOT add a
+#     Watchtower service here.
+#   * Internal Ollama is an optional commented block at the bottom.
+#   * Known limitation: the CAD / slicing workers cannot run from this image
+#     yet (no OpenSCAD / PrusaSlicer, sandbox images not published). The UI/API
+#     work; model generation and slicing fail with a notification.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: printforge
+      POSTGRES_USER: printforge
+      # EDIT: one strong password (must equal the password in DATABASE_URL below)
+      POSTGRES_PASSWORD: CHANGE_ME
+    volumes:
+      # EDIT: absolute path on your pool
+      - /mnt/<POOL>/apps/printforge/pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U printforge -d printforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      # EDIT: absolute path on your pool
+      - /mnt/<POOL>/apps/printforge/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/branc9/printforge:latest
+    command: ["/app/docker/django/entrypoint.sh", "web"]
+    environment:
+      DJANGO_DEBUG: "false"
+      # EDIT: long random string (see the header for the generator command)
+      DJANGO_SECRET_KEY: CHANGE_ME
+      # EDIT: your NAS hostname/IP (keep localhost for local checks)
+      DJANGO_ALLOWED_HOSTS: CHANGE_ME,localhost
+      # EDIT: only behind HTTPS, e.g. "https://printforge.example.com"; else ""
+      DJANGO_CSRF_TRUSTED_ORIGINS: ""
+      # EDIT: the password must equal POSTGRES_PASSWORD above (single password)
+      DATABASE_URL: postgres://printforge:CHANGE_ME@db:5432/printforge
+      REDIS_URL: redis://redis:6379/0
+      # external Ollama; internal alternative: http://ollama:11434
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: "qwen3-coder:30b"
+      EMBEDDING_MODEL: "bge-m3"
+      EMBEDDING_DIM: "1024"
+      RAG_ENABLED: "false"
+      STORAGE_BACKEND: local
+      MEDIA_ROOT: /data/media
+    volumes:
+      # EDIT: absolute path on your pool
+      - /mnt/<POOL>/apps/printforge/media:/data/media
+    ports:
+      # EDIT: host port (left) if 8080 is taken; container port stays 8000
+      - "8080:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  worker:
+    image: ghcr.io/branc9/printforge:latest
+    command: ["/app/docker/django/entrypoint.sh", "worker"]
+    environment:
+      DJANGO_DEBUG: "false"
+      # EDIT: same value as in web
+      DJANGO_SECRET_KEY: CHANGE_ME
+      # EDIT: same value as in web
+      DJANGO_ALLOWED_HOSTS: CHANGE_ME,localhost
+      # EDIT: same value as in web
+      DJANGO_CSRF_TRUSTED_ORIGINS: ""
+      # EDIT: same value as in web (must equal POSTGRES_PASSWORD above)
+      DATABASE_URL: postgres://printforge:CHANGE_ME@db:5432/printforge
+      REDIS_URL: redis://redis:6379/0
+      # external Ollama; internal alternative: http://ollama:11434
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: "qwen3-coder:30b"
+      EMBEDDING_MODEL: "bge-m3"
+      EMBEDDING_DIM: "1024"
+      RAG_ENABLED: "false"
+      STORAGE_BACKEND: local
+      MEDIA_ROOT: /data/media
+    volumes:
+      # EDIT: absolute path on your pool
+      - /mnt/<POOL>/apps/printforge/media:/data/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+# ===========================================================================
+# OPTIONAL: internal Ollama (only if Ollama runs on this same NAS)
+#
+# To enable:
+#   1. delete the leading "# " (hash + space) from every line below
+#   2. set OLLAMA_BASE_URL to http://ollama:11434 in BOTH web and worker above
+#   3. for an NVIDIA GPU, also delete the "# " on the inner deploy lines and
+#      make sure the NVIDIA container toolkit is configured for Docker
+# ===========================================================================
+#
+#   ollama:
+#     image: ollama/ollama:latest
+#     volumes:
+#       # EDIT: absolute path on your pool
+#       - /mnt/<POOL>/apps/printforge/ollama:/root/.ollama
+#     # deploy:
+#     #   resources:
+#     #     reservations:
+#     #       devices:
+#     #         - driver: nvidia
+#     #           count: all
+#     #           capabilities: [gpu]
+#     restart: unless-stopped

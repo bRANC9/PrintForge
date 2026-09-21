@@ -71,6 +71,10 @@ docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
 ```
 
+For the TrueNAS SCALE **Custom App UI**, paste
+[`docker-compose.truenas.yml`](./docker-compose.truenas.yml) instead — a
+self-contained YAML (no build, no env-file, no relative mounts, literal values).
+
 `docker-compose.prod.yml` is hardened for production: `DJANGO_DEBUG` defaults to
 `false`, and the HTTPS flags (`DJANGO_SECURE_SSL_REDIRECT`,
 `DJANGO_SESSION_COOKIE_SECURE`, `DJANGO_CSRF_COOKIE_SECURE`,
