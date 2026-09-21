@@ -6,7 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
     UV_FROZEN=1 \
     UV_PROJECT_ENVIRONMENT=/app/backend/.venv
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Pinned to the version used in CI (.github/workflows/ci.yml). Bump both together.
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
 WORKDIR /app
 

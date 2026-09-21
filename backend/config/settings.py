@@ -19,6 +19,12 @@ env = environ.Env(
 )
 environ.Env.read_env(REPO_ROOT / ".env")
 
+# Parse the database URL up front. Some apps depend on PostgreSQL-only features
+# (the `embeddings` app uses pgvector) and must only be registered when the
+# default database is PostgreSQL. See the Applications section below.
+_DATABASE_CONFIG = env.db_url("DATABASE_URL", default="sqlite:///" + str(BASE_DIR / "db.sqlite3"))
+DB_IS_POSTGRES = _DATABASE_CONFIG["ENGINE"] == "django.db.backends.postgresql"
+
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="insecure-dev-key-change-me")
 DEBUG = env("DJANGO_DEBUG")
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
@@ -54,6 +60,12 @@ LOCAL_APPS = [
     "api",
     "mcp",
 ]
+
+# pgvector's VectorField/VectorExtension cannot run on sqlite, so the app (and
+# its migrations) is only registered on PostgreSQL. This keeps the sqlite-based
+# test suite and local development working without the extension.
+if DB_IS_POSTGRES:
+    LOCAL_APPS.append("embeddings")
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
@@ -93,7 +105,7 @@ ASGI_APPLICATION = "config.asgi.application"
 # ---------------------------------------------------------------------------
 
 DATABASES = {
-    "default": env.db_url("DATABASE_URL", default="sqlite:///" + str(BASE_DIR / "db.sqlite3")),
+    "default": _DATABASE_CONFIG,
 }
 DATABASES["default"]["CONN_MAX_AGE"] = env.int("DB_CONN_MAX_AGE", default=60)
 
@@ -181,3 +193,6 @@ RAG_ENABLED = env("RAG_ENABLED")
 OPENSCAD_TIMEOUT_SEC = env.int("OPENSCAD_TIMEOUT_SEC", default=60)
 OPENSCAD_MEMORY_LIMIT = env("OPENSCAD_MEMORY_LIMIT", default="1g")
 OPENSCAD_CPU_LIMIT = env("OPENSCAD_CPU_LIMIT", default="1.0")
+
+# Agent workflow (see terv.md 6-7. fejezet)
+AGENT_MAX_ATTEMPTS = env.int("AGENT_MAX_ATTEMPTS", default=3)

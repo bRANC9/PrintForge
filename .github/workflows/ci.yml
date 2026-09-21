@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to match the version used by the Docker image / local dev (uv.lock).
+  UV_VERSION: "0.11.7"
+
+jobs:
+  lint:
+    name: Lint (ruff + djlint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: djlint --check
+        run: uv run djlint ../frontend/templates --check
+
+  test:
+    name: Test (pytest + pgvector)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: printforge
+          POSTGRES_USER: printforge
+          POSTGRES_PASSWORD: printforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U printforge -d printforge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgres://printforge:printforge@localhost:5432/printforge
+      POSTGRES_DB: printforge
+      POSTGRES_USER: printforge
+      POSTGRES_PASSWORD: printforge
+      REDIS_URL: redis://localhost:6379/0
+      DJANGO_DEBUG: "false"
+      DJANGO_SECRET_KEY: ci-insecure-secret-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Create vector extension (main db + template1)
+        run: |
+          uv run python - <<'PY'
+          import os
+
+          import psycopg
+
+          base = os.environ["DATABASE_URL"].rsplit("/", 1)[0]
+          for dbname in ("printforge", "template1"):
+              with psycopg.connect(f"{base}/{dbname}", autocommit=True) as conn:
+                  conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+              print(f"vector extension ready on {dbname}")
+          PY
+
+      - name: Run pytest
+        run: uv run pytest
+
+  compose:
+    name: Compose config validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate base stack
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate internal-Ollama override
+        run: docker compose -f docker-compose.yml -f docker-compose.ollama.yml config --quiet

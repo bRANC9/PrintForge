@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# Build context exclusions for the Django image (docker/django/Dockerfile).
+# Keep the context small and never ship secrets / local state into the image.
+# ---------------------------------------------------------------------------
+
+# Version control
+.git
+.gitignore
+
+# Virtualenvs & Python caches
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Coverage / test artifacts
+.coverage
+coverage.xml
+htmlcov
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Local persistent data & databases
+data/
+*.sqlite3
+*.sqlite3-journal
+
+# Design / planning docs (not needed in the image)
+terv.md
+docs/
+
+# Repo tooling / metadata
+.github
+.opencode
+
+# IDE / OS
+.idea
+.vscode
+*.swp
+.DS_Store
+Thumbs.db
