@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 from factories import ModelVersionFactory, ProjectFactory, UserFactory, WorkspaceFactory
 
+from configuration.models import AppSettings
+from configuration.services import invalidate_settings_cache
 from files.services import LocalStorage
 from notifications.services import NotificationKind
 from printers.models import Printer, PrintJob, PrintJobStatus
-from slicers import services, tasks
+from slicers import prusaslicer, services, tasks
 from slicers.base import SlicedResult, SlicerError
 from slicers.models import PrinterProfile
 
@@ -280,3 +282,33 @@ def test_missing_job_does_not_notify(monkeypatch):
 
     assert tasks.slice_print_job(999_999) == {"job_id": 999_999, "status": "missing"}
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Runtime settings integration (real configuration.services.get_setting)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_config_reads_real_runtime_settings():
+    AppSettings.objects.create(slicer_mode="docker", slicer_timeout_sec=42)
+    invalidate_settings_cache()
+
+    resolved = prusaslicer.PrusaSlicerBackend().resolve_config()
+
+    assert resolved.mode == "docker"
+    assert resolved.timeout_sec == 42
+
+
+def test_runtime_setting_change_applies_without_new_backend():
+    AppSettings.objects.create(slicer_mode="local", slicer_timeout_sec=11)
+    invalidate_settings_cache()
+    backend = prusaslicer.PrusaSlicerBackend()
+
+    assert backend.resolve_config().mode == "local"
+
+    AppSettings.objects.filter(pk=1).update(slicer_mode="docker", slicer_timeout_sec=22)
+    invalidate_settings_cache()
+
+    resolved = backend.resolve_config()
+    assert resolved.mode == "docker"
+    assert resolved.timeout_sec == 22

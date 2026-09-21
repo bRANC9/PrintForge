@@ -24,6 +24,9 @@
         notifications: () => `${API_BASE}/notifications/`,
         notificationRead: (notificationId) =>
             `${API_BASE}/notifications/${encodeURIComponent(notificationId)}/read/`,
+        // Runtime settings (staff-only).
+        settings: () => `${API_BASE}/settings/`,
+        settingsTestOllama: () => `${API_BASE}/settings/test-ollama/`,
     };
 
     const NOTIFICATION_POLL_MS = 60000;
@@ -138,7 +141,10 @@
         }
         const response = await fetch(url, config);
         if (!response.ok) {
-            throw new Error(await describeError(response));
+            const error = new Error(await describeError(response));
+            // Keep the HTTP status so callers can react to 403/404 explicitly.
+            error.status = response.status;
+            throw error;
         }
         if (response.status === 204) return null;
         const text = await response.text();
@@ -153,6 +159,9 @@
     const api = {
         listProjects: async () => unwrapList(await request(endpoints.projects())),
         getProject: (projectId) => request(endpoints.project(projectId)),
+        createProject: (payload) => request(endpoints.projects(), { method: "POST", body: payload }),
+        listWorkspaces: async () => unwrapList(await request(endpoints.workspaces())),
+        createWorkspace: (name) => request(endpoints.workspaces(), { method: "POST", body: { name } }),
         listVersions: async (projectId) => unwrapList(await request(endpoints.versions(projectId))),
         createVersion: (projectId, prompt) =>
             request(endpoints.versions(projectId), { method: "POST", body: { prompt } }),
@@ -161,6 +170,9 @@
         listNotifications: async () => unwrapList(await request(endpoints.notifications())),
         markNotificationRead: (notificationId) =>
             request(endpoints.notificationRead(notificationId), { method: "POST" }),
+        getSettings: () => request(endpoints.settings()),
+        updateSettings: (patch) => request(endpoints.settings(), { method: "PATCH", body: patch }),
+        testOllama: () => request(endpoints.settingsTestOllama(), { method: "POST" }),
     };
 
     function statusKind(status) {
@@ -252,6 +264,21 @@
             loading: true,
             error: "",
 
+            // Create forms (Feature: create project / workspace from the UI).
+            showProjectForm: false,
+            showWorkspaceForm: false,
+            projectForm: { name: "", description: "", workspace: "" },
+            workspaceForm: { name: "" },
+            creatingProject: false,
+            creatingWorkspace: false,
+            projectError: "",
+            workspaceError: "",
+            notice: "",
+
+            get hasWorkspaces() {
+                return this.workspaces.length > 0;
+            },
+
             get visibleProjects() {
                 const term = this.search.trim().toLowerCase();
                 if (!term) return this.projects;
@@ -271,7 +298,7 @@
                 this.loading = true;
                 this.error = "";
                 try {
-                    const results = await Promise.all([api.listProjects(), this.loadWorkspaces()]);
+                    const results = await Promise.all([this.loadProjects(), this.loadWorkspaces()]);
                     this.projects = results[0];
                     this.workspaces = results[1];
                 } catch (error) {
@@ -279,13 +306,99 @@
                 } finally {
                     this.loading = false;
                 }
+                this.syncForms();
+            },
+
+            /** Open the form the user actually needs on first load. */
+            syncForms() {
+                if (!this.hasWorkspaces) {
+                    this.showWorkspaceForm = true;
+                    this.showProjectForm = false;
+                    return;
+                }
+                if (!this.projectForm.workspace) {
+                    this.projectForm.workspace = this.workspaces[0].id;
+                }
+                this.showProjectForm = true;
+                this.showWorkspaceForm = false;
+            },
+
+            toggleProjectForm() {
+                if (!this.hasWorkspaces) {
+                    this.showWorkspaceForm = true;
+                    return;
+                }
+                this.showProjectForm = !this.showProjectForm;
+            },
+
+            toggleWorkspaceForm() {
+                this.showWorkspaceForm = !this.showWorkspaceForm;
+            },
+
+            async loadProjects() {
+                return api.listProjects();
             },
 
             async loadWorkspaces() {
                 try {
-                    return unwrapList(await request(endpoints.workspaces()));
+                    return await api.listWorkspaces();
                 } catch (error) {
                     return [];
+                }
+            },
+
+            async reloadProjects() {
+                try {
+                    this.projects = await this.loadProjects();
+                } catch (error) {
+                    this.error = error.message || String(error);
+                }
+            },
+
+            async createProject() {
+                const name = this.projectForm.name.trim();
+                const workspaceId = Number.parseInt(this.projectForm.workspace, 10);
+                if (!name || !Number.isFinite(workspaceId) || this.creatingProject) return;
+
+                this.creatingProject = true;
+                this.projectError = "";
+                this.notice = "";
+                try {
+                    const created = await api.createProject({
+                        workspace: workspaceId,
+                        name,
+                        description: this.projectForm.description.trim(),
+                    });
+                    this.projectForm.name = "";
+                    this.projectForm.description = "";
+                    this.showProjectForm = false;
+                    await this.reloadProjects();
+                    this.notice = `Projekt létrehozva: ${(created && created.name) || name}`;
+                } catch (error) {
+                    this.projectError = error.message || String(error);
+                } finally {
+                    this.creatingProject = false;
+                }
+            },
+
+            async createWorkspace() {
+                const name = this.workspaceForm.name.trim();
+                if (!name || this.creatingWorkspace) return;
+
+                this.creatingWorkspace = true;
+                this.workspaceError = "";
+                this.notice = "";
+                try {
+                    const created = await api.createWorkspace(name);
+                    this.workspaceForm.name = "";
+                    this.workspaces = await this.loadWorkspaces();
+                    if (created && created.id) this.projectForm.workspace = created.id;
+                    this.syncForms();
+                    this.notice = `Workspace létrehozva: ${(created && created.name) || name}`;
+                } catch (error) {
+                    this.workspaceError = error.message || String(error);
+                } finally {
+                    this.creatingWorkspace = false;
                 }
             },
         });
@@ -550,6 +663,180 @@
     }
 
     /**
+     * Settings page (staff-only).
+     *
+     * GET/PATCH /api/v1/settings/  -> {effective, overrides, sources, read_only, updated_at}
+     * POST       /api/v1/settings/test-ollama/ -> {ok, detail}
+     *
+     * The form only sends the fields the operator actually changed (a PATCH
+     * diff against the last loaded `effective` values), so untouched
+     * env/default-sourced settings are never turned into DB overrides.
+     */
+    function settingsPageComponent() {
+        function emptyForm() {
+            return {
+                ollama_base_url: "",
+                ollama_model: "",
+                embedding_model: "",
+                rag_enabled: false,
+                openscad_mode: "",
+                openscad_timeout_sec: "",
+                openscad_memory_limit: "",
+                openscad_cpu_limit: "",
+                slicer_mode: "",
+                slicer_timeout_sec: "",
+                storage_backend: "",
+            };
+        }
+
+        function formFromEffective(effective) {
+            const data = effective || {};
+            return {
+                ollama_base_url: data.ollama_base_url || "",
+                ollama_model: data.ollama_model || "",
+                embedding_model: data.embedding_model || "",
+                rag_enabled: Boolean(data.rag_enabled),
+                openscad_mode: data.openscad_mode || "",
+                openscad_timeout_sec:
+                    data.openscad_timeout_sec === null || data.openscad_timeout_sec === undefined
+                        ? ""
+                        : data.openscad_timeout_sec,
+                openscad_memory_limit: data.openscad_memory_limit || "",
+                openscad_cpu_limit: data.openscad_cpu_limit || "",
+                slicer_mode: data.slicer_mode || "",
+                slicer_timeout_sec:
+                    data.slicer_timeout_sec === null || data.slicer_timeout_sec === undefined
+                        ? ""
+                        : data.slicer_timeout_sec,
+                storage_backend: data.storage_backend || "",
+            };
+        }
+
+        /** "" / null -> null (meaning "clear the override"). */
+        function serialize(value) {
+            if (typeof value === "boolean") return value;
+            if (value === "" || value === null || value === undefined) return null;
+            return value;
+        }
+
+        return {
+            loading: true,
+            saving: false,
+            testing: false,
+            forbidden: false,
+            error: "",
+            notice: "",
+            testResult: null,
+            effective: {},
+            overrides: {},
+            sources: {},
+            readOnly: [],
+            updatedAt: "",
+            form: emptyForm(),
+            baseline: emptyForm(),
+
+            readOnlyNotes: {
+                embedding_dim:
+                    "Megváltoztatása a pgvector séma és az összes embedding újragenerálását igényli.",
+            },
+
+            source(name) {
+                return this.sources[name] || "default";
+            },
+
+            /** Read-only fields are rendered straight from `effective`. */
+            effectiveValue(name) {
+                const value = this.effective ? this.effective[name] : null;
+                return value === null || value === undefined ? "" : value;
+            },
+
+            formatDate,
+
+            async init() {
+                await this.load();
+            },
+
+            async load() {
+                this.loading = true;
+                this.error = "";
+                this.forbidden = false;
+                try {
+                    this.applyResponse(await api.getSettings());
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.error = error.message || String(error);
+                } finally {
+                    this.loading = false;
+                }
+            },
+
+            applyResponse(data) {
+                const payload = data || {};
+                this.effective = payload.effective || {};
+                this.overrides = payload.overrides || {};
+                this.sources = payload.sources || {};
+                this.readOnly = Array.isArray(payload.read_only) ? payload.read_only : [];
+                this.updatedAt = payload.updated_at || "";
+                this.form = formFromEffective(this.effective);
+                this.baseline = formFromEffective(this.effective);
+            },
+
+            /** Only the changed fields, as a PATCH body. */
+            buildPatch() {
+                const patch = {};
+                for (const name of Object.keys(this.form)) {
+                    const next = serialize(this.form[name]);
+                    const previous = serialize(this.baseline[name]);
+                    if (!Object.is(next, previous)) patch[name] = next;
+                }
+                return patch;
+            },
+
+            async save() {
+                if (this.saving || this.forbidden) return;
+                const patch = this.buildPatch();
+                this.error = "";
+                this.notice = "";
+                if (!Object.keys(patch).length) {
+                    this.notice = "Nincs mentendő változás.";
+                    return;
+                }
+                this.saving = true;
+                try {
+                    this.applyResponse(await api.updateSettings(patch));
+                    this.notice = "Beállítások elmentve.";
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.error = error.message || String(error);
+                } finally {
+                    this.saving = false;
+                }
+            },
+
+            async testOllama() {
+                if (this.testing || this.forbidden) return;
+                this.testing = true;
+                this.testResult = null;
+                this.error = "";
+                try {
+                    this.testResult = await api.testOllama();
+                } catch (error) {
+                    this.testResult = { ok: false, detail: error.message || String(error) };
+                } finally {
+                    this.testing = false;
+                }
+            },
+
+            reset() {
+                this.form = formFromEffective(this.effective);
+                this.baseline = formFromEffective(this.effective);
+                this.notice = "";
+                this.error = "";
+            },
+        };
+    }
+
+    /**
      * Alpine directive that keeps the imperative Three.js viewer in sync with
      * reactive state:  x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken }"
      */
@@ -584,6 +871,7 @@
         Alpine.data("projectDetail", projectDetailComponent);
         Alpine.data("notificationsBell", notificationsBellComponent);
         Alpine.data("printHistory", printHistoryComponent);
+        Alpine.data("settingsPage", settingsPageComponent);
         registerStlViewerDirective(Alpine);
     });
 

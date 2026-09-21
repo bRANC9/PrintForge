@@ -9,6 +9,12 @@ ENV PYTHONUNBUFFERED=1 \
 # Pinned to the version used in CI (.github/workflows/ci.yml). Bump both together.
 COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
+# Docker CLI (client only) so the CAD/slicer workers can launch ephemeral
+# sandbox containers through the mounted Docker socket (Docker-out-of-Docker).
+# The binary is a static Go build from the official CLI image; the Docker engine
+# is NOT installed (the host daemon is used via /var/run/docker.sock).
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+
 WORKDIR /app
 
 # Dependencies first (better layer caching).

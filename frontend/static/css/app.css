@@ -597,3 +597,127 @@ ul.error-box {
     color: var(--muted);
 }
 
+
+/* Create forms (projects / workspaces) ------------------------------------ */
+
+.page-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.create-panel {
+    margin-bottom: 1.25rem;
+}
+
+.create-panel h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.05rem;
+}
+
+.stack-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-width: 520px;
+}
+
+.stack-form label {
+    margin-top: 0.35rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.stack-form .input,
+.stack-form .textarea {
+    max-width: none;
+}
+
+.form-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.75rem;
+}
+
+.notice-box {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--ok);
+    border-radius: 8px;
+    background: rgba(76, 217, 123, 0.08);
+    color: var(--ok);
+    font-size: 0.9rem;
+}
+
+/* Settings page ----------------------------------------------------------- */
+
+.settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.settings-form .panel h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.05rem;
+}
+
+.form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-bottom: 0.85rem;
+}
+
+.form-row:last-child {
+    margin-bottom: 0;
+}
+
+.form-row label {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.form-row .input {
+    max-width: 420px;
+}
+
+.form-row.is-inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.field-hint {
+    margin: 0.15rem 0 0;
+    font-size: 0.78rem;
+}
+
+.badge.source-db {
+    border-color: var(--accent);
+    color: var(--accent-2);
+}
+
+.badge.source-env {
+    border-color: var(--ok);
+    color: var(--ok);
+}
+
+.badge.source-default {
+    color: var(--muted);
+}
+
+.status-line.is-ok {
+    color: var(--ok);
+}
+
+.status-line.is-danger {
+    color: var(--danger);
+}

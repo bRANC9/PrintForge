@@ -16,14 +16,24 @@ treated as **untrusted data**:
 
 Mode selection
 --------------
-``SLICER_MODE`` (env, also honoured from Django settings) picks:
+``slicer_mode`` and ``slicer_timeout_sec`` are resolved **at call time** through
+``configuration.services.get_setting`` (DB override -> Django settings ->
+``os.environ`` -> default), so an admin change applies to the next job without
+a worker restart. No value is cached at import time.
 
 * ``local``  -- run ``PRUSASLICER_BINARY`` directly (dev machines);
-* ``docker`` -- run ``PRUSASLICER_IMAGE`` via ``SLICER_DOCKER_BINARY``
+* ``docker`` -- run the published image via ``SLICER_DOCKER_BINARY``
   (production / CI, see ``docker/slicer/README.md``).
 
-Other knobs: ``SLICER_TIMEOUT_SEC``, ``SLICER_MEMORY_LIMIT``,
-``SLICER_CPU_LIMIT``.
+Transport overrides (env-only, read at call time):
+
+* ``PRUSASLICER_BINARY``   -- host binary (default ``prusa-slicer``);
+* ``SLICER_IMAGE``         -- container image; wins over ``PRUSASLICER_IMAGE``;
+* ``PRUSASLICER_IMAGE``    -- legacy alias for the image;
+* ``SLICER_DOCKER_BINARY`` -- container runtime (default ``docker``);
+* ``SLICER_MEMORY_LIMIT`` / ``SLICER_CPU_LIMIT`` -- container resource caps.
+
+Default image: ``ghcr.io/branc9/printforge-prusaslicer:latest``.
 
 Profile -> CLI mapping
 -----------------------
@@ -42,6 +52,7 @@ no explicit value is present.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -65,7 +76,19 @@ from .base import (
     resolve_model,
 )
 
+try:  # api-dev implements this contract in parallel; degrade gracefully without it
+    from configuration.services import get_setting
+except Exception:  # noqa: BLE001 - runtime settings are best-effort
+
+    def get_setting(name: str, default: Any = None) -> Any:
+        """Env-only fallback while ``configuration.services`` is unavailable."""
+        return os.environ.get(name.upper(), default)
+
+
 __all__ = [
+    "DEFAULT_IMAGE",
+    "DEFAULT_MODE",
+    "DEFAULT_TIMEOUT_SEC",
     "SANDBOX_FLAGS",
     "PrusaSlicerBackend",
     "PrusaSlicerConfig",
@@ -76,6 +99,16 @@ __all__ = [
     "prepare_profiles",
     "render_ini",
 ]
+
+
+#: Published PrusaSlicer sandbox image (infra-devops). Override with ``SLICER_IMAGE``.
+DEFAULT_IMAGE = "ghcr.io/branc9/printforge-prusaslicer:latest"
+
+#: Fallbacks when the runtime-settings service has no value.
+DEFAULT_MODE = "local"
+DEFAULT_TIMEOUT_SEC = 300.0
+
+logger = logging.getLogger(__name__)
 
 
 # Container sandbox flags shared with the CAD worker (terv.md 20. fejezet).
@@ -269,13 +302,18 @@ def parse_gcode_estimates(gcode: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class PrusaSlicerConfig:
-    """Resolved runtime configuration for the backend."""
+    """Resolved runtime configuration for the backend.
 
-    mode: str = "local"
+    ``mode``/``timeout_sec`` here are only *fallbacks*; :meth:`PrusaSlicerBackend.resolve_config`
+    overlays the effective values from the runtime-settings service on every
+    call, unless they were injected explicitly (constructor kwargs / ``config``).
+    """
+
+    mode: str = DEFAULT_MODE
     binary: str = "prusa-slicer"
-    image: str = "printforge-prusaslicer"
+    image: str = DEFAULT_IMAGE
     docker_binary: str = "docker"
-    timeout_sec: float = 600.0
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC
     memory_limit: str = "2g"
     cpu_limit: str = "2.0"
 
@@ -288,15 +326,26 @@ def _resolve(name: str, default: str) -> str:
 
 
 def _config_from_environment() -> PrusaSlicerConfig:
+    """Read the transport-level (env-only) overrides; mode/timeout are runtime."""
     return PrusaSlicerConfig(
-        mode=_resolve("SLICER_MODE", "local").strip().lower(),
+        mode=DEFAULT_MODE,
         binary=_resolve("PRUSASLICER_BINARY", "prusa-slicer"),
-        image=_resolve("PRUSASLICER_IMAGE", "printforge-prusaslicer"),
+        image=(_resolve("SLICER_IMAGE", "") or _resolve("PRUSASLICER_IMAGE", "") or DEFAULT_IMAGE),
         docker_binary=_resolve("SLICER_DOCKER_BINARY", "docker"),
-        timeout_sec=float(_resolve("SLICER_TIMEOUT_SEC", "600")),
+        timeout_sec=DEFAULT_TIMEOUT_SEC,
         memory_limit=_resolve("SLICER_MEMORY_LIMIT", "2g"),
         cpu_limit=_resolve("SLICER_CPU_LIMIT", "2.0"),
     )
+
+
+def _coerce_timeout(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid slicer_timeout_sec value: %r", value)
+        return None
 
 
 def _model_name(source_filename: str) -> str:
@@ -339,6 +388,10 @@ class PrusaSlicerBackend(SlicerBackend):
             "memory_limit": memory_limit,
             "cpu_limit": cpu_limit,
         }
+        # Explicit injections are never overridden by the runtime-settings service.
+        explicit = {key for key, value in overrides.items() if value is not None}
+        if config is not None:
+            explicit |= {"mode", "timeout_sec"}
         resolved = replace(
             resolved, **{key: value for key, value in overrides.items() if value is not None}
         )
@@ -348,6 +401,28 @@ class PrusaSlicerBackend(SlicerBackend):
                 f"Unknown SLICER_MODE {resolved.mode!r}; expected 'local' or 'docker'"
             )
         self.config = resolved
+        self._explicit = frozenset(explicit)
+
+    def resolve_config(self) -> PrusaSlicerConfig:
+        """Overlay the runtime settings on the transport config (no caching).
+
+        ``mode``/``timeout_sec`` are re-read from ``configuration.services`` on
+        every call, so an admin change applies to the next job. Explicitly
+        injected values (constructor kwargs or a ``config`` object) win.
+        """
+        config = self.config
+        if "mode" not in self._explicit:
+            config = replace(
+                config,
+                mode=str(get_setting("slicer_mode") or DEFAULT_MODE).strip().lower(),
+            )
+        if "timeout_sec" not in self._explicit:
+            timeout = _coerce_timeout(get_setting("slicer_timeout_sec"))
+            if timeout is not None:
+                config = replace(config, timeout_sec=timeout)
+        if config.mode not in ("local", "docker"):
+            raise SlicerError(f"Unknown slicer_mode {config.mode!r}; expected 'local' or 'docker'")
+        return config
 
     # -- SlicerBackend ------------------------------------------------------
 
@@ -360,6 +435,7 @@ class PrusaSlicerBackend(SlicerBackend):
     ) -> SlicedResult:
         source = resolve_model(model)
         model_name = _model_name(source.filename)
+        config = self.resolve_config()
 
         with tempfile.TemporaryDirectory(prefix="printforge-slice-") as tmp:
             input_dir = Path(tmp) / "in"
@@ -375,6 +451,7 @@ class PrusaSlicerBackend(SlicerBackend):
                 config_files,
                 overrides,
                 model_name=model_name,
+                config=config,
             )
             try:
                 completed = subprocess.run(  # noqa: S603 - list args, shell=False
@@ -382,13 +459,11 @@ class PrusaSlicerBackend(SlicerBackend):
                     shell=False,
                     capture_output=True,
                     text=True,
-                    timeout=self.config.timeout_sec,
+                    timeout=config.timeout_sec,
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise SlicerTimeout(
-                    f"PrusaSlicer timed out after {self.config.timeout_sec}s"
-                ) from exc
+                raise SlicerTimeout(f"PrusaSlicer timed out after {config.timeout_sec}s") from exc
 
             if completed.returncode != 0:
                 detail = (completed.stderr or completed.stdout or "").strip()
@@ -448,27 +523,33 @@ class PrusaSlicerBackend(SlicerBackend):
         *,
         model_name: str = "model.stl",
         output_name: str = "model.gcode",
+        config: PrusaSlicerConfig | None = None,
     ) -> list[str]:
-        """Build the PrusaSlicer command as a list (never a shell string)."""
+        """Build the PrusaSlicer command as a list (never a shell string).
+
+        When ``config`` is omitted the effective runtime settings are resolved
+        on the spot, so a mode change applies without reconstructing the backend.
+        """
+        config = config or self.resolve_config()
         action = ["--export-gcode", "--output"]
-        if self.config.mode == "docker":
+        if config.mode == "docker":
             load_args: list[str] = []
             for path in config_files:
                 load_args += ["--load", f"/work/{Path(path).name}"]
             return [
-                self.config.docker_binary,
+                config.docker_binary,
                 "run",
                 "--rm",
                 *SANDBOX_FLAGS,
                 "--memory",
-                self.config.memory_limit,
+                config.memory_limit,
                 "--cpus",
-                self.config.cpu_limit,
+                config.cpu_limit,
                 "-v",
                 f"{input_dir}:/work:ro",
                 "-v",
                 f"{output_dir}:/out:rw",
-                self.config.image,
+                config.image,
                 *action,
                 f"/out/{output_name}",
                 *load_args,
@@ -480,7 +561,7 @@ class PrusaSlicerBackend(SlicerBackend):
         for path in config_files:
             load_args += ["--load", str(path)]
         return [
-            self.config.binary,
+            config.binary,
             *action,
             str(output_dir / output_name),
             *load_args,

@@ -17,8 +17,9 @@ There are two supported ways to deploy:
 | **A — Custom App UI (primary)** | You want to paste a YAML in the TrueNAS web UI | [`docker-compose.truenas.yml`](../docker-compose.truenas.yml) |
 | **B — SSH + `docker compose` (alternative)** | You prefer the CLI and an `.env` file | [`docker-compose.prod.yml`](../docker-compose.prod.yml) |
 
-> **Read section 9 before deploying:** the CAD/slicing workers cannot run from
-> this image yet. The UI/API work; model generation and slicing will fail.
+> **Section 9 covers the CAD/slicing sandbox** (OpenSCAD + PrusaSlicer images,
+> the Docker socket and its security trade-off). Read it before relying on model
+> generation or slicing.
 
 ---
 
@@ -75,7 +76,7 @@ init SQL mount is needed**.
 Use the UI (Datasets → Add Dataset) or SSH:
 
 ```bash
-mkdir -p /mnt/<POOL>/apps/printforge/{pg,redis,media}
+mkdir -p /mnt/<POOL>/apps/printforge/{pg,redis,media,scratch}
 ```
 
 ### A2. Open the Custom App form and paste the YAML
@@ -161,7 +162,7 @@ Persistent data and secrets live on the pool, **never in the repo** (the SCALE
 root filesystem is immutable).
 
 ```bash
-mkdir -p /mnt/<pool>/apps/printforge
+mkdir -p /mnt/<pool>/apps/printforge/{pg,redis,media,scratch}
 cd /mnt/<pool>/apps/printforge
 
 # compose files live in the clone
@@ -181,6 +182,7 @@ DJANGO_ALLOWED_HOSTS=truenas.lan,192.168.1.10
 DJANGO_CSRF_TRUSTED_ORIGINS=          # only needed with HTTPS (section 6)
 POSTGRES_PASSWORD=<strong-password>
 DATA_ROOT=/mnt/<pool>/apps/printforge
+SANDBOX_WORK_DIR=/mnt/<pool>/apps/printforge/scratch
 WEB_PORT=8080
 PRINTFORGE_IMAGE=ghcr.io/branc9/printforge:latest
 ```
@@ -322,21 +324,99 @@ auto-updated** — switch back to `...:latest` to resume automatic updates.
 Available tags are listed at
 `https://github.com/bRANC9/PrintForge/pkgs/container/printforge`.
 
-## 9. Known limitation: CAD / slicing workers cannot run yet
+## 9. CAD / slicing sandbox (OpenSCAD + PrusaSlicer)
 
-The published image is the **Django app only** (web/worker). It does **not**
-contain OpenSCAD or PrusaSlicer, and the sandbox images
-(`docker/openscad/**`, `docker/slicer/**`) are **not published to GHCR** yet.
+Model generation and slicing run as **ephemeral sandbox containers**, never in
+the worker process. For each job the worker shells out to `docker run`
+(Docker-out-of-Docker) with a locked-down command:
 
-- Working: auth, projects/workspaces, the UI, the API, agent orchestration, RAG
-  (with Ollama reachable).
-- **Not working:** prompt → SCAD → STL model generation, mesh validation and
-  slicing. These calls fail and surface as a failed job / error notification in
-  the UI.
+```text
+docker run --rm --network none --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
+  --memory 1g --cpus 1.0 \
+  -v <job>/in:/work:ro -v <job>/out:/out:rw \
+  ghcr.io/branc9/printforge-openscad:latest -o /out/model.stl /work/model.scad
+```
 
-This is expected for the current release; the CAD and slicing workers will get
-their own image builds and Compose services in a later phase. Do not report the
-model-generation/slicing failures as a deployment bug.
+| Flag | Why |
+| --- | --- |
+| `--network none` | generated code must not reach the network |
+| `--read-only` + `--tmpfs /tmp` | immutable rootfs; only in-memory scratch |
+| `--cap-drop ALL` + `no-new-privileges` | no capabilities, no escalation |
+| `--pids-limit` / `--memory` / `--cpus` | fork-bomb and resource caps |
+| Python `timeout` | hard `OPENSCAD_TIMEOUT_SEC` / `SLICER_TIMEOUT_SEC` |
+
+The same flags apply to PrusaSlicer (`docker/slicer`, `--memory 2g --cpus 2.0`).
+
+### Images
+
+| Image | Built from | Purpose |
+| --- | --- | --- |
+| `ghcr.io/branc9/printforge-openscad:latest` | `docker/openscad/` | `.scad` → `.stl` |
+| `ghcr.io/branc9/printforge-prusaslicer:latest` | `docker/slicer/` | `.stl` → `.gcode` |
+
+They are **pulled automatically on first use** by the Docker daemon, so the very
+first model/slice may take longer. Pre-pull to avoid the wait:
+
+```bash
+docker pull ghcr.io/branc9/printforge-openscad:latest
+docker pull ghcr.io/branc9/printforge-prusaslicer:latest
+```
+
+The sandbox images are **independent of the app image**: Watchtower only tracks
+the `web`/`worker` app containers and does **not** update them. They are rebuilt
+and pushed by `release.yml` on every push/tag, and re-pulled by the daemon when
+the local copy is missing.
+
+### Docker socket (security trade-off)
+
+The `worker` service mounts `/var/run/docker.sock`. That is **required** for
+Docker-out-of-Docker and is the main security trade-off of this deployment:
+it grants the container control of the host Docker daemon, so any process in it
+can start/stop/inspect **any** container on the host. The socket is mounted into
+`worker` only, never into `web`.
+
+### Verify
+
+```bash
+# images present (after the manual pull above, or after the first job)
+docker images | grep printforge-
+
+# start a model generation in the UI, then watch the sandbox container
+docker ps -a --filter ancestor=ghcr.io/branc9/printforge-openscad:latest
+```
+
+### How it is wired (Docker CLI + scratch dir + socket)
+
+Everything the sandbox needs is baked into the images and the compose files:
+
+- **Docker CLI** — `docker/django/Dockerfile` copies the client binary from
+  `docker:27-cli` into the app image, so `worker` can call `docker run`. Only the
+  client is added; the Docker engine is **not** installed (the host daemon is
+  reached through the mounted socket).
+- **Scratch dir** — the worker's `TMPDIR` points at a scratch directory that is
+  bind-mounted at the **identical absolute path** (host == container). This is
+  what makes Docker-out-of-Docker work: the host daemon resolves the sandbox
+  `-v` source paths on the host, so the worker's job dirs must exist at the same
+  path on the host.
+  - **Path A (Custom App):** `TMPDIR` and the identical-path volume are already
+    in the `worker` block of the YAML (both marked `# EDIT:`).
+  - **Path B (SSH):** set `SANDBOX_WORK_DIR=/mnt/<POOL>/apps/printforge/scratch`
+    in `.env`; the compose file mounts it and sets `TMPDIR` from it.
+- **Docker socket** — mounted into `worker` only (see the security note above).
+
+If a model/slice fails, check in this order:
+
+```bash
+# 1. CLI present in the worker
+docker exec <worker-container> docker --version
+
+# 2. scratch dir exists on the host and is writable
+ls -ld /mnt/<POOL>/apps/printforge/scratch
+
+# 3. socket mounted
+docker inspect <worker-container> --format '{{json .Mounts}}' | grep docker.sock
+```
 
 ## 10. If gunicorn workers time out
 

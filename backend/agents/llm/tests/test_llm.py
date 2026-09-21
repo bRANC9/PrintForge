@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import sys
+import types
 import urllib.error
 from typing import Any
 
@@ -17,9 +19,25 @@ from agents.llm import (
     OpenAICompatibleProvider,
     get_provider,
 )
+from agents.llm.ollama import _service_setting
 from agents.spec import ModelSpecification
 
 VALID_SPEC: dict[str, Any] = ModelSpecification.example()
+
+SERVICE_VALUES: dict[str, str] = {
+    "ollama_base_url": "http://from-service:11434/",
+    "ollama_model": "service-model",
+}
+
+
+def fake_settings(values: dict[str, Any] | None = None):
+    """Return a ``get_setting`` seam backed by a plain dict (no DB, no Django)."""
+    data = SERVICE_VALUES if values is None else values
+
+    def get_setting(name: str) -> Any:
+        return data.get(name)
+
+    return get_setting
 
 
 class FakeProvider(LLMProvider):
@@ -62,9 +80,11 @@ def test_fake_provider_satisfies_the_interface():
 
 
 def test_get_provider_defaults_to_ollama():
-    provider = get_provider()
+    provider = get_provider(get_setting=fake_settings())
     assert isinstance(provider, OllamaProvider)
     assert provider.name == "ollama"
+    assert provider.base_url == "http://from-service:11434"
+    assert provider.model == "service-model"
 
 
 def test_get_provider_forwards_overrides():
@@ -86,6 +106,94 @@ def test_get_provider_returns_openai_stub():
 def test_get_provider_rejects_unknown_name():
     with pytest.raises(LLMError):
         get_provider("does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# Runtime settings resolution (injected seam, no Django settings, no DB)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_are_resolved_from_injected_service():
+    provider = OllamaProvider(get_setting=fake_settings())
+    assert provider.base_url == "http://from-service:11434"
+    assert provider.model == "service-model"
+
+
+def test_explicit_values_win_over_settings_service():
+    def exploding(name: str) -> Any:
+        raise AssertionError(f"settings service must not be queried for {name}")
+
+    provider = OllamaProvider(
+        base_url="http://explicit:11434/",
+        model="explicit-model",
+        get_setting=exploding,
+    )
+    assert provider.base_url == "http://explicit:11434"
+    assert provider.model == "explicit-model"
+
+
+def test_blank_settings_fall_back_to_defaults():
+    provider = OllamaProvider(
+        get_setting=fake_settings({"ollama_base_url": "  ", "ollama_model": None})
+    )
+    assert provider.base_url == "http://localhost:11434"
+    assert provider.model == "qwen3-coder:30b"
+
+
+def test_reload_picks_up_runtime_settings_change():
+    live = {"ollama_base_url": "http://old:11434", "ollama_model": "old-model"}
+    provider = OllamaProvider(get_setting=lambda name: live[name])
+    assert (provider.base_url, provider.model) == ("http://old:11434", "old-model")
+
+    live.update(ollama_base_url="http://new:11434", ollama_model="new-model")
+    provider.reload()
+    assert (provider.base_url, provider.model) == ("http://new:11434", "new-model")
+
+
+def test_reload_keeps_explicit_values():
+    live = {"ollama_base_url": "http://svc:11434", "ollama_model": "svc-model"}
+    provider = OllamaProvider(get_setting=lambda name: live[name])
+    provider.reload(model="override")
+    assert (provider.base_url, provider.model) == ("http://svc:11434", "override")
+
+
+def test_default_resolver_uses_module_seam(monkeypatch):
+    monkeypatch.setattr("agents.llm.ollama._service_setting", fake_settings())
+    provider = OllamaProvider()
+    assert (provider.base_url, provider.model) == ("http://from-service:11434", "service-model")
+
+
+def test_default_resolver_delegates_to_configuration_service(monkeypatch):
+    fake_module = types.ModuleType("configuration.services")
+    fake_module.get_setting = lambda name: f"value:{name}"
+    monkeypatch.setitem(sys.modules, "configuration.services", fake_module)
+
+    assert _service_setting("ollama_base_url") == "value:ollama_base_url"
+    assert _service_setting("ollama_model") == "value:ollama_model"
+
+
+@pytest.mark.django_db
+def test_runtime_override_takes_effect_without_restart():
+    """A DB override is read per construction, so no process restart is needed."""
+    from configuration.models import AppSettings
+    from configuration.services import invalidate_settings_cache
+
+    AppSettings.objects.update_or_create(
+        pk=1,
+        defaults={"ollama_base_url": "http://db-override:11434", "ollama_model": "db-model"},
+    )
+    invalidate_settings_cache()
+
+    first = OllamaProvider()
+    assert (first.base_url, first.model) == ("http://db-override:11434", "db-model")
+
+    # Change the runtime setting; the next provider instance picks it up.
+    AppSettings.objects.filter(pk=1).update(ollama_model="db-model-2")
+    invalidate_settings_cache()
+
+    assert OllamaProvider().model == "db-model-2"
+    # An explicitly constructed provider still ignores the DB override.
+    assert OllamaProvider(model="explicit").model == "explicit"
 
 
 def test_schema_to_json_schema_accepts_model_and_dict():
@@ -133,7 +241,7 @@ def test_generate_forwards_system_and_options(monkeypatch):
 
 def test_generate_rejects_empty_prompt():
     with pytest.raises(LLMError):
-        OllamaProvider().generate("   ")
+        OllamaProvider(base_url="http://test:11434", model="test-model").generate("   ")
 
 
 def test_generate_rejects_empty_response(monkeypatch):
@@ -181,7 +289,7 @@ def test_connection_error_is_wrapped(monkeypatch):
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr("agents.llm.ollama.urllib.request.urlopen", boom)
-    provider = OllamaProvider(base_url="http://test:11434")
+    provider = OllamaProvider(base_url="http://test:11434", model="test-model")
     with pytest.raises(LLMError, match="Cannot reach Ollama"):
         provider.generate("hi")
 
@@ -193,6 +301,6 @@ def test_http_error_is_wrapped(monkeypatch):
         )
 
     monkeypatch.setattr("agents.llm.ollama.urllib.request.urlopen", boom)
-    provider = OllamaProvider(base_url="http://test:11434")
+    provider = OllamaProvider(base_url="http://test:11434", model="test-model")
     with pytest.raises(LLMError, match="HTTP 500"):
         provider.generate("hi")

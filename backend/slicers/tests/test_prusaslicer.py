@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from slicers import prusaslicer
 from slicers.base import (
     FilamentSettings,
     PrinterSettings,
@@ -38,6 +39,17 @@ PRINTER = PrinterSettings(
 )
 FILAMENT = FilamentSettings(name="Hyper PLA", material="PLA", settings={"temperature": 210})
 PROCESS = ProcessSettings(name="Fine", layer_height=0.15, settings={"fill_density": "20%"})
+
+
+@pytest.fixture(autouse=True)
+def _runtime_settings(monkeypatch):
+    """Deterministic runtime settings so tests never touch the DB or real env.
+
+    Individual tests may re-patch ``prusaslicer.get_setting`` afterwards.
+    """
+    values = {"slicer_mode": "local", "slicer_timeout_sec": 300}
+    monkeypatch.setattr(prusaslicer, "get_setting", lambda name: values.get(name))
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +285,159 @@ def test_docker_args_include_exact_sandbox_flags(tmp_path):
     assert "/work/printer.ini" in args
     assert "/out/model.gcode" in args
     assert "/work/model.stl" in args
+
+
+def test_docker_run_argument_list(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        prusaslicer,
+        "get_setting",
+        lambda name: {"slicer_mode": "docker", "slicer_timeout_sec": 300}.get(name),
+    )
+    backend = PrusaSlicerBackend(image="ghcr.io/branc9/printforge-prusaslicer:latest")
+    config = tmp_path / "printer.ini"
+    config.write_text("nozzle_diameter = 0.4\n")
+
+    args = backend.build_args(
+        tmp_path / "in",
+        tmp_path / "out",
+        config_files=[config],
+        overrides=["--infill=20%"],
+    )
+
+    assert args == [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "256",
+        "--memory",
+        "2g",
+        "--cpus",
+        "2.0",
+        "-v",
+        f"{tmp_path / 'in'}:/work:ro",
+        "-v",
+        f"{tmp_path / 'out'}:/out:rw",
+        "ghcr.io/branc9/printforge-prusaslicer:latest",
+        "--export-gcode",
+        "--output",
+        "/out/model.gcode",
+        "--load",
+        "/work/printer.ini",
+        "--infill=20%",
+        "/work/model.stl",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Runtime settings (configuration.services.get_setting)
+# ---------------------------------------------------------------------------
+
+
+def test_default_image_name(monkeypatch):
+    monkeypatch.delenv("SLICER_IMAGE", raising=False)
+    monkeypatch.delenv("PRUSASLICER_IMAGE", raising=False)
+    assert prusaslicer.DEFAULT_IMAGE == "ghcr.io/branc9/printforge-prusaslicer:latest"
+    assert PrusaSlicerBackend().config.image == prusaslicer.DEFAULT_IMAGE
+
+
+def test_slicer_image_env_overrides_default(monkeypatch):
+    monkeypatch.setenv("SLICER_IMAGE", "registry.example/printforge-slicer:1.2")
+    assert PrusaSlicerBackend().config.image == "registry.example/printforge-slicer:1.2"
+
+
+def test_legacy_prusaslicer_image_env(monkeypatch):
+    monkeypatch.delenv("SLICER_IMAGE", raising=False)
+    monkeypatch.setenv("PRUSASLICER_IMAGE", "legacy/printforge-slicer:2")
+    assert PrusaSlicerBackend().config.image == "legacy/printforge-slicer:2"
+
+
+def test_mode_resolved_from_runtime_setting(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        prusaslicer,
+        "get_setting",
+        lambda name: {"slicer_mode": "docker"}.get(name),
+    )
+    backend = PrusaSlicerBackend()
+    args = backend.build_args(tmp_path / "in", tmp_path / "out")
+    assert args[0] == "docker"
+    assert prusaslicer.DEFAULT_IMAGE in args
+
+
+def test_timeout_resolved_from_runtime_setting(monkeypatch):
+    monkeypatch.setattr(
+        prusaslicer,
+        "get_setting",
+        lambda name: {"slicer_mode": "local", "slicer_timeout_sec": 123}.get(name),
+    )
+    assert PrusaSlicerBackend().resolve_config().timeout_sec == 123
+
+
+def test_runtime_setting_change_applies_to_next_job(monkeypatch):
+    state: dict[str, object] = {"slicer_mode": "local", "slicer_timeout_sec": 60}
+    monkeypatch.setattr(prusaslicer, "get_setting", lambda name: state.get(name))
+    backend = PrusaSlicerBackend()
+
+    assert backend.resolve_config().mode == "local"
+    state["slicer_mode"] = "docker"
+    state["slicer_timeout_sec"] = 90
+
+    resolved = backend.resolve_config()
+    assert resolved.mode == "docker"
+    assert resolved.timeout_sec == 90
+
+
+def test_explicit_mode_wins_over_runtime_setting(monkeypatch):
+    monkeypatch.setattr(
+        prusaslicer,
+        "get_setting",
+        lambda name: "docker" if name == "slicer_mode" else None,
+    )
+    assert PrusaSlicerBackend(mode="local").resolve_config().mode == "local"
+
+
+def test_invalid_runtime_mode_is_rejected(monkeypatch):
+    monkeypatch.setattr(prusaslicer, "get_setting", lambda name: "nonsense")
+    with pytest.raises(SlicerError):
+        PrusaSlicerBackend().resolve_config()
+
+
+def test_invalid_timeout_falls_back_to_default(monkeypatch):
+    monkeypatch.setattr(
+        prusaslicer,
+        "get_setting",
+        lambda name: "not-a-number" if name == "slicer_timeout_sec" else "local",
+    )
+    assert PrusaSlicerBackend().resolve_config().timeout_sec == prusaslicer.DEFAULT_TIMEOUT_SEC
+
+
+def test_slice_uses_runtime_timeout(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["kwargs"] = kwargs
+        output_path = args[args.index("--output") + 1]
+        Path(output_path).write_bytes(GCODE)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(
+        prusaslicer,
+        "get_setting",
+        lambda name: {"slicer_mode": "local", "slicer_timeout_sec": 77}.get(name),
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    PrusaSlicerBackend().slice(b"solid x\n", PRINTER, FILAMENT, PROCESS)
+    assert captured["kwargs"]["timeout"] == 77
 
 
 def test_slice_raises_on_nonzero_exit(monkeypatch):

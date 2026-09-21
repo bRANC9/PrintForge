@@ -256,7 +256,8 @@ def test_parse_markdown_without_heading_uses_fallback():
 def test_seed_ingest_round_trip_via_call_command(monkeypatch, settings):
     from embeddings.models import EmbeddingChunk, KnowledgeDocument
 
-    settings.RAG_ENABLED = True
+    runtime = {"rag_enabled": True, "embedding_model": "bge-m3"}
+    monkeypatch.setattr(services, "get_setting", lambda name: runtime.get(name))
     dimension = settings.EMBEDDING_DIM
     monkeypatch.setattr(
         services, "embed_text", lambda text: [1.0 + (i % 3) for i in range(dimension)]

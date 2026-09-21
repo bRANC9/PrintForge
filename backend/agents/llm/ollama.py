@@ -5,9 +5,13 @@ extra dependency (terv.md 3. / 18. fejezet). ``generate()`` calls
 ``POST {base}/api/generate`` and ``structured()`` calls ``POST {base}/api/chat``
 with Ollama's structured-output ``format`` field.
 
-Configuration is read from Django settings (``OLLAMA_BASE_URL``,
-``OLLAMA_MODEL``) but every value can be overridden per instance, which keeps
-the provider usable from Celery workers and tests.
+``base_url``/``model`` are resolved from the runtime settings service
+(``configuration.services.get_setting``: DB override -> Django settings ->
+``os.environ`` -> default). Values are resolved **at construction time** —
+never cached at import time — and can be refreshed with :meth:`reload`, so an
+admin setting change takes effect on the next provider instance without a
+process restart. Explicit constructor arguments always win; a ``get_setting``
+seam can be injected for tests without touching the database.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -24,6 +29,9 @@ from .base import LLMError, LLMProvider
 DEFAULT_TIMEOUT_SEC = 120.0
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3-coder:30b"
+
+#: Settings-resolver seam: ``(name) -> effective value``.
+SettingGetter = Callable[[str], Any]
 
 STRUCTURED_SYSTEM_PROMPT = (
     "You are a CAD specification assistant. Answer with a single JSON object "
@@ -43,11 +51,27 @@ class OllamaProvider(LLMProvider):
         timeout: float = DEFAULT_TIMEOUT_SEC,
         *,
         system_prompt: str = STRUCTURED_SYSTEM_PROMPT,
+        get_setting: SettingGetter | None = None,
     ) -> None:
-        self.base_url = (base_url or _setting("OLLAMA_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-        self.model = model or _setting("OLLAMA_MODEL", DEFAULT_MODEL)
+        self._get_setting: SettingGetter = get_setting or _service_setting
         self.timeout = float(timeout)
         self.system_prompt = system_prompt
+        self.base_url = DEFAULT_BASE_URL
+        self.model = DEFAULT_MODEL
+        self.reload(base_url=base_url, model=model)
+
+    def reload(self, *, base_url: str | None = None, model: str | None = None) -> None:
+        """Re-resolve ``base_url``/``model`` from the settings service.
+
+        Called by ``__init__``; call it again to pick up a runtime settings
+        change (a provider instance is short-lived per call, so this is usually
+        not needed). Explicit arguments win over the settings service, so
+        ``reload(model="x")`` refreshes only the base URL.
+        """
+        resolved_base = base_url if base_url is not None else self._get_setting("ollama_base_url")
+        resolved_model = model if model is not None else self._get_setting("ollama_model")
+        self.base_url = str(_or_default(resolved_base, DEFAULT_BASE_URL)).rstrip("/")
+        self.model = str(_or_default(resolved_model, DEFAULT_MODEL))
 
     # -- public API ---------------------------------------------------------
 
@@ -166,11 +190,27 @@ class OllamaProvider(LLMProvider):
         return result
 
 
-def _setting(name: str, default: str) -> str:
-    """Read a value from Django settings without requiring them at import time."""
-    from django.conf import settings
+def _service_setting(name: str) -> Any:
+    """Resolve a setting through the runtime settings service.
 
-    return getattr(settings, name, default)
+    ``configuration.services.get_setting`` (owned by ``api-dev``) is imported
+    lazily so this module imports without Django configured, and so a runtime
+    override is picked up on the next provider construction rather than being
+    frozen at import time. Resolution order is DB override -> Django settings
+    -> ``os.environ`` -> default, all handled by that service.
+    """
+    from configuration.services import get_setting
+
+    return get_setting(name)
+
+
+def _or_default(value: Any, default: str) -> Any:
+    """Treat ``None``/blank as "not configured" and use *default*."""
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    return value
 
 
 def _message_content(result: dict[str, Any]) -> str | None:

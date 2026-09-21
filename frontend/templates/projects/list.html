@@ -10,11 +10,96 @@
                 <h1>Projektek</h1>
                 <p class="muted">AI-val generált parametrikus CAD modellek és verzióik.</p>
             </div>
-            <input class="input"
-                   type="search"
-                   placeholder="Szűrés név szerint…"
-                   x-model="search">
+            <div class="page-head-actions">
+                <input class="input"
+                       type="search"
+                       placeholder="Szűrés név szerint…"
+                       x-model="search">
+                {% if user.is_authenticated %}
+                    <button type="button" class="btn btn-primary" @click="toggleProjectForm()">Új projekt</button>
+                    <button type="button" class="btn" @click="toggleWorkspaceForm()">Új workspace</button>
+                {% endif %}
+            </div>
         </header>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        {% if user.is_authenticated %}
+            <section class="panel create-panel"
+                     x-show="showProjectForm && hasWorkspaces"
+                     x-cloak>
+                <h2>Új projekt</h2>
+                <form class="stack-form" @submit.prevent="createProject()">
+                    <label for="new-project-name">Név</label>
+                    <input id="new-project-name"
+                           class="input"
+                           type="text"
+                           maxlength="200"
+                           required
+                           placeholder="Pl. Telefontartó"
+                           x-model="projectForm.name"
+                           :disabled="creatingProject">
+                    <label for="new-project-workspace">Workspace</label>
+                    <select id="new-project-workspace"
+                            class="input"
+                            x-model="projectForm.workspace"
+                            :disabled="creatingProject">
+                        <template x-for="workspace in workspaces" :key="workspace.id">
+                            <option :value="workspace.id" x-text="workspace.name"></option>
+                        </template>
+                    </select>
+                    <label for="new-project-description">Leírás</label>
+                    <textarea id="new-project-description"
+                              class="textarea"
+                              rows="3"
+                              placeholder="Mit modellezünk?"
+                              x-model="projectForm.description"
+                              :disabled="creatingProject"></textarea>
+                    <p class="error-box" x-show="projectError" x-cloak x-text="projectError"></p>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="creatingProject || !projectForm.name.trim()"
+                                x-text="creatingProject ? 'Létrehozás…' : 'Projekt létrehozása'"></button>
+                        <button type="button" class="btn" @click="showProjectForm = false">Mégse</button>
+                    </div>
+                </form>
+            </section>
+            <section class="panel create-panel"
+                     x-show="showWorkspaceForm || !hasWorkspaces"
+                     x-cloak>
+                <h2>Új workspace</h2>
+                <p class="muted"
+                   x-show="!hasWorkspaces">Projekt létrehozásához először workspace kell. Hozz létre egyet:</p>
+                <form class="stack-form" @submit.prevent="createWorkspace()">
+                    <label for="new-workspace-name">Név</label>
+                    <input id="new-workspace-name"
+                           class="input"
+                           type="text"
+                           maxlength="200"
+                           required
+                           placeholder="Pl. Műhely"
+                           x-model="workspaceForm.name"
+                           :disabled="creatingWorkspace">
+                    <p class="error-box"
+                       x-show="workspaceError"
+                       x-cloak
+                       x-text="workspaceError"></p>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="creatingWorkspace || !workspaceForm.name.trim()"
+                                x-text="creatingWorkspace ? 'Létrehozás…' : 'Workspace létrehozása'"></button>
+                        <button type="button"
+                                class="btn"
+                                x-show="hasWorkspaces"
+                                @click="showWorkspaceForm = false">Mégse</button>
+                    </div>
+                </form>
+            </section>
+        {% else %}
+            <p class="muted">
+                <a href="{% url 'login' %}">Jelentkezz be</a> projekt létrehozásához.
+            </p>
+        {% endif %}
         <template x-if="error">
             <p class="error-box" x-text="error"></p>
         </template>

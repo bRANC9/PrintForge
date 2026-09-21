@@ -520,17 +520,13 @@ def test_agent_runs_are_workspace_scoped():
     assert client.get(f"/api/v1/agent-runs/{run_b.id}/").status_code == 404
 
 
-@pytest.mark.xfail(
-    reason=(
-        "PRODUCTION BUG (api-dev): WorkspaceScopePermission._workspace_from_request "
-        "trusts the payload 'workspace' key, but PrintJobCreateSerializer ignores "
-        "unknown fields. A MEMBER of workspace A can therefore enqueue a print job "
-        "against a project in workspace B by adding 'workspace': <A>. Reported; "
-        "expected to xpass once the project's own workspace is checked."
-    ),
-    strict=False,
-)
 def test_enqueue_cannot_target_a_foreign_workspace_project():
+    """Regression for the cross-workspace enqueue bypass (fixed in Phase 7).
+
+    The permission layer now trusts only the endpoint's writable serializer
+    fields, so the ignored ``workspace`` key can no longer authorize a foreign
+    ``project``.
+    """
     attacker = UserFactory()
     attacker_workspace = WorkspaceFactory(owner=attacker)
     victim_workspace = WorkspaceFactory()

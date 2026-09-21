@@ -7,6 +7,8 @@ from .views import (
     NotificationViewSet,
     PrintJobViewSet,
     ProjectViewSet,
+    SettingsAPIView,
+    TestOllamaView,
     WorkspaceViewSet,
     health,
 )
@@ -21,5 +23,7 @@ router.register("notifications", NotificationViewSet, basename="notification")
 
 urlpatterns = [
     path("health/", health, name="api-health"),
+    path("settings/", SettingsAPIView.as_view(), name="api-settings"),
+    path("settings/test-ollama/", TestOllamaView.as_view(), name="api-settings-test-ollama"),
     path("", include(router.urls)),
 ]

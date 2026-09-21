@@ -58,6 +58,14 @@ x-app-env: &app-env
     GUNICORN_MAX_REQUESTS_JITTER: ${GUNICORN_MAX_REQUESTS_JITTER:-100}
     GUNICORN_ACCESS_LOG: ${GUNICORN_ACCESS_LOG:-false}
     GUNICORN_LOG_LEVEL: ${GUNICORN_LOG_LEVEL:-info}
+    # CAD / slicing sandbox (Docker-out-of-Docker). The worker launches one
+    # ephemeral sandbox container per job; the images are pulled on demand.
+    OPENSCAD_MODE: ${OPENSCAD_MODE:-docker}
+    OPENSCAD_IMAGE: ${OPENSCAD_IMAGE:-ghcr.io/branc9/printforge-openscad:latest}
+    SLICER_MODE: ${SLICER_MODE:-docker}
+    SLICER_IMAGE: ${SLICER_IMAGE:-ghcr.io/branc9/printforge-prusaslicer:latest}
+    # The PrusaSlicer backend reads PRUSASLICER_IMAGE; keep it in sync with SLICER_IMAGE.
+    PRUSASLICER_IMAGE: ${PRUSASLICER_IMAGE:-ghcr.io/branc9/printforge-prusaslicer:latest}
 
 services:
     db:
@@ -124,9 +132,25 @@ services:
         image: ${PRINTFORGE_IMAGE:-ghcr.io/branc9/printforge:latest}
         pull_policy: always
         command: ["/app/docker/django/entrypoint.sh", "worker"]
-        environment: *app-env
+        environment:
+            <<: *app-env
+            # Docker-out-of-Docker: the host daemon resolves the sandbox -v
+            # source paths on the HOST, so the worker's scratch dir must be
+            # mounted at the identical absolute path (see the volume below).
+            # tempfile (job dirs) honours TMPDIR. Set SANDBOX_WORK_DIR to a pool
+            # dataset path on TrueNAS, e.g. /mnt/<pool>/apps/printforge/scratch.
+            TMPDIR: ${SANDBOX_WORK_DIR:-/data/scratch}
         volumes:
             - ${DATA_ROOT:-./data}/media:/data/media
+            # Docker-out-of-Docker scratch: identical path on both sides, so the
+            # sandbox launched via the socket can see the worker's job dirs.
+            - ${SANDBOX_WORK_DIR:-/data/scratch}:${SANDBOX_WORK_DIR:-/data/scratch}
+            # SECURITY: mounting the Docker socket gives this container control of
+            # the host Docker daemon (Docker-out-of-Docker). It is REQUIRED so the
+            # CAD/slicer workers can launch ephemeral sandbox containers, and it is
+            # the main security trade-off of this deployment: any process in this
+            # container can start/stop/inspect ANY container on the host.
+            - /var/run/docker.sock:/var/run/docker.sock
         depends_on:
             db:
                 condition: service_healthy

@@ -12,9 +12,10 @@ Usage::
 
     retrieve("M5 ISO 4762 dims", limit=5, company_id="acme")
 
-Every entry point is guarded by ``settings.RAG_ENABLED`` (default ``False``)
-and by ``settings.DB_IS_POSTGRES``; importing this package is always safe, even
-on the sqlite fallback where the ``embeddings`` app is not installed.
+Every entry point is guarded by the runtime ``rag_enabled`` setting (resolved
+via ``configuration.services.get_setting``, default ``False``) and by
+``settings.DB_IS_POSTGRES``; importing this package is always safe, even on the
+sqlite fallback where the ``embeddings`` app is not installed.
 """
 
 from __future__ import annotations

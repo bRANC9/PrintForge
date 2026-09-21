@@ -1,14 +1,15 @@
 name: Release
 
-# Builds the Django (web/worker) image and publishes it to GitHub Container
-# Registry, so TrueNAS can deploy by pulling instead of building on the NAS.
+# Builds and publishes the PrintForge images to GitHub Container Registry so
+# TrueNAS can deploy by pulling instead of building on the NAS.
 #
-#   Image: ghcr.io/<owner-lowercased>/<repo-lowercased>   (e.g. ghcr.io/branc9/printforge)
+#   App (web/worker): ghcr.io/<owner>/printforge
+#   OpenSCAD sandbox: ghcr.io/<owner>/printforge-openscad
+#   Slicer sandbox:   ghcr.io/<owner>/printforge-prusaslicer
 #
-# NOTE: the CAD/slicing sandbox images (docker/openscad/**, docker/slicer/**)
-# are intentionally NOT published yet. When the CAD and slicing workers go live
-# they get their own entries here (e.g. a build matrix with their own
-# Dockerfile + image name), because they are independent images.
+# The sandbox images are independent of the app image. Watchtower only tracks the
+# app image (the compose `web`/`worker` services); the sandbox images are pulled
+# on demand by the worker and rebuilt here on every push/tag.
 
 on:
   push:
@@ -76,3 +77,62 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  sandbox:
+    name: Publish sandbox image (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: printforge-openscad
+            context: docker/openscad
+            file: docker/openscad/Dockerfile
+          - name: printforge-prusaslicer
+            context: docker/slicer
+            file: docker/slicer/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Same lowercasing as the app job; the image is ghcr.io/<owner>/<matrix.name>.
+      - name: Compute lowercased owner
+        id: ns
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ steps.ns.outputs.owner }}/${{ matrix.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: true
+          # Same reasoning as the app image: no attestation index entries.
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Separate cache scopes so the matrix legs do not clobber each other.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

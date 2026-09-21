@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -248,3 +249,119 @@ def test_export_times_out(monkeypatch):
 def test_unknown_mode_is_rejected():
     with pytest.raises(CADError):
         OpenSCADBackend(mode="nope")
+
+
+# ---------------------------------------------------------------------------
+# Runtime settings (configuration.services.get_setting)
+# ---------------------------------------------------------------------------
+
+
+def _patch_runtime_settings(monkeypatch, values):
+    """Patch the lazy settings reader with a dict-backed fake."""
+    monkeypatch.setattr(
+        "designs.cad.openscad._read_runtime_setting",
+        lambda name, default=None: values.get(name, default),
+    )
+
+
+def test_runtime_settings_resolved_per_access(monkeypatch):
+    values = {
+        "openscad_mode": "local",
+        "openscad_timeout_sec": 60,
+        "openscad_memory_limit": "1g",
+        "openscad_cpu_limit": "1.0",
+    }
+    _patch_runtime_settings(monkeypatch, values)
+    backend = OpenSCADBackend()
+    assert backend.config.mode == "local"
+    assert backend.config.timeout_sec == 60.0
+
+    # A UI change must apply on the next access, without a restart / new backend.
+    values.update(
+        {
+            "openscad_mode": "docker",
+            "openscad_timeout_sec": 7,
+            "openscad_memory_limit": "512m",
+            "openscad_cpu_limit": "0.5",
+        }
+    )
+    config = backend.config
+    assert config.mode == "docker"
+    assert config.timeout_sec == 7.0
+    assert config.memory_limit == "512m"
+    assert config.cpu_limit == "0.5"
+
+
+def test_docker_args_use_runtime_limits(monkeypatch, tmp_path):
+    _patch_runtime_settings(
+        monkeypatch,
+        {
+            "openscad_mode": "docker",
+            "openscad_timeout_sec": 30,
+            "openscad_memory_limit": "2g",
+            "openscad_cpu_limit": "1.5",
+        },
+    )
+    args = OpenSCADBackend().build_args(tmp_path / "in", tmp_path / "out")
+    joined = " ".join(args)
+    assert "--memory 2g" in joined
+    assert "--cpus 1.5" in joined
+    assert "--network none" in joined
+
+
+def test_export_timeout_comes_from_runtime_settings(monkeypatch):
+    _patch_runtime_settings(monkeypatch, {"openscad_timeout_sec": 12})
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        with open(args[2], "wb") as handle:
+            handle.write(b"solid fake\n")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    OpenSCADBackend().export(_model(), "stl")
+    assert captured["timeout"] == 12.0
+
+
+def test_default_image_is_the_ghcr_image(monkeypatch):
+    monkeypatch.delenv("OPENSCAD_IMAGE", raising=False)
+    _patch_runtime_settings(monkeypatch, {"openscad_mode": "docker"})
+    backend = OpenSCADBackend()
+    assert backend.config.image == "ghcr.io/branc9/printforge-openscad:latest"
+    args = backend.build_args(Path("/in"), Path("/out"))
+    assert "ghcr.io/branc9/printforge-openscad:latest" in args
+
+
+def test_openscad_image_env_override(monkeypatch):
+    monkeypatch.setenv("OPENSCAD_IMAGE", "registry.example/openscad:dev")
+    _patch_runtime_settings(monkeypatch, {"openscad_mode": "docker"})
+    assert OpenSCADBackend().config.image == "registry.example/openscad:dev"
+
+
+def test_reads_through_configuration_service(monkeypatch):
+    try:
+        import configuration.services as configuration_services
+    except Exception:  # noqa: BLE001 - configuration app may not be ready yet
+        pytest.skip("configuration.services not available yet")
+
+    calls: list[str] = []
+    values = {
+        "openscad_mode": "docker",
+        "openscad_timeout_sec": 9,
+        "openscad_memory_limit": "3g",
+        "openscad_cpu_limit": "2.0",
+    }
+
+    def fake_get_setting(name):
+        calls.append(name)
+        return values.get(name)
+
+    monkeypatch.setattr(configuration_services, "get_setting", fake_get_setting, raising=False)
+
+    config = OpenSCADBackend().config
+    assert config.mode == "docker"
+    assert config.timeout_sec == 9.0
+    assert config.memory_limit == "3g"
+    assert config.cpu_limit == "2.0"
+    assert "openscad_mode" in calls

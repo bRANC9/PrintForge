@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+{% block title %}Beállítások – PrintForge{% endblock %}
+{% block content %}
+    <div data-settings-page x-data="settingsPage">
+        <header class="page-head">
+            <div>
+                <h1>Beállítások</h1>
+                <p class="muted">Runtime beállítások. A mentett értékek felülírják a környezeti változókat, üresen hagyva visszaáll a környezeti érték.</p>
+            </div>
+            <div class="page-head-actions">
+                <button type="button"
+                        class="btn"
+                        @click="testOllama()"
+                        :disabled="testing || forbidden"
+                        x-text="testing ? 'Tesztelés…' : 'Kapcsolat teszt'"></button>
+                <button type="button"
+                        class="btn btn-primary"
+                        @click="save()"
+                        :disabled="saving || forbidden"
+                        x-text="saving ? 'Mentés…' : 'Mentés'"></button>
+            </div>
+        </header>
+        <p class="error-box"
+           x-show="forbidden"
+           x-cloak>Nincs jogosultságod a beállítások eléréséhez (csak adminisztrátoroknak).</p>
+        <template x-if="error && !forbidden">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <template x-if="testResult">
+            <p class="status-line" :class="testResult.ok ? 'is-ok' : 'is-danger'">
+                <span x-text="testResult.ok ? 'Ollama kapcsolat rendben' : 'Ollama kapcsolat hiba'"></span>
+                <span class="muted" x-text="testResult.detail"></span>
+            </p>
+        </template>
+        <p class="muted" x-show="updatedAt">Utolsó módosítás: <span x-text="formatDate(updatedAt)"></span></p>
+        <form class="settings-form"
+              x-show="!loading && !forbidden"
+              x-cloak
+              @submit.prevent="save()">
+            <section class="panel">
+                <h2>AI</h2>
+                <div class="form-row">
+                    <label for="setting-ollama-base-url">Ollama base URL <span class="badge"
+       :class="'source-' + source('ollama_base_url')"
+       x-text="source('ollama_base_url')"></span></label>
+                    <input id="setting-ollama-base-url"
+                           class="input"
+                           type="url"
+                           placeholder="http://ollama:11434"
+                           x-model="form.ollama_base_url"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-ollama-model">Ollama modell <span class="badge"
+       :class="'source-' + source('ollama_model')"
+       x-text="source('ollama_model')"></span></label>
+                    <input id="setting-ollama-model"
+                           class="input"
+                           type="text"
+                           placeholder="qwen3-coder:30b"
+                           x-model="form.ollama_model"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-embedding-model">Embedding modell <span class="badge"
+       :class="'source-' + source('embedding_model')"
+       x-text="source('embedding_model')"></span></label>
+                    <input id="setting-embedding-model"
+                           class="input"
+                           type="text"
+                           placeholder="bge-m3"
+                           x-model="form.embedding_model"
+                           :disabled="saving">
+                </div>
+                <div class="form-row is-inline">
+                    <label for="setting-rag-enabled">RAG engedélyezve <span class="badge"
+       :class="'source-' + source('rag_enabled')"
+       x-text="source('rag_enabled')"></span></label>
+                    <input id="setting-rag-enabled"
+                           type="checkbox"
+                           x-model="form.rag_enabled"
+                           :disabled="saving">
+                </div>
+            </section>
+            <section class="panel">
+                <h2>CAD (OpenSCAD)</h2>
+                <div class="form-row">
+                    <label for="setting-openscad-mode">Mód <span class="badge"
+       :class="'source-' + source('openscad_mode')"
+       x-text="source('openscad_mode')"></span></label>
+                    <select id="setting-openscad-mode"
+                            class="input"
+                            x-model="form.openscad_mode"
+                            :disabled="saving">
+                        <option value="">(nincs felülírás)</option>
+                        <option value="local">local</option>
+                        <option value="docker">docker</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label for="setting-openscad-timeout">Timeout (mp) <span class="badge"
+       :class="'source-' + source('openscad_timeout_sec')"
+       x-text="source('openscad_timeout_sec')"></span></label>
+                    <input id="setting-openscad-timeout"
+                           class="input"
+                           type="number"
+                           min="0"
+                           x-model.number="form.openscad_timeout_sec"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-openscad-memory">Memória limit <span class="badge"
+       :class="'source-' + source('openscad_memory_limit')"
+       x-text="source('openscad_memory_limit')"></span></label>
+                    <input id="setting-openscad-memory"
+                           class="input"
+                           type="text"
+                           placeholder="1g"
+                           x-model="form.openscad_memory_limit"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-openscad-cpu">CPU limit <span class="badge"
+       :class="'source-' + source('openscad_cpu_limit')"
+       x-text="source('openscad_cpu_limit')"></span></label>
+                    <input id="setting-openscad-cpu"
+                           class="input"
+                           type="text"
+                           placeholder="1.0"
+                           x-model="form.openscad_cpu_limit"
+                           :disabled="saving">
+                </div>
+            </section>
+            <section class="panel">
+                <h2>Slicing</h2>
+                <div class="form-row">
+                    <label for="setting-slicer-mode">Mód <span class="badge"
+       :class="'source-' + source('slicer_mode')"
+       x-text="source('slicer_mode')"></span></label>
+                    <select id="setting-slicer-mode"
+                            class="input"
+                            x-model="form.slicer_mode"
+                            :disabled="saving">
+                        <option value="">(nincs felülírás)</option>
+                        <option value="local">local</option>
+                        <option value="docker">docker</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label for="setting-slicer-timeout">Timeout (mp) <span class="badge"
+       :class="'source-' + source('slicer_timeout_sec')"
+       x-text="source('slicer_timeout_sec')"></span></label>
+                    <input id="setting-slicer-timeout"
+                           class="input"
+                           type="number"
+                           min="0"
+                           x-model.number="form.slicer_timeout_sec"
+                           :disabled="saving">
+                </div>
+            </section>
+            <section class="panel">
+                <h2>Tárolás</h2>
+                <div class="form-row">
+                    <label for="setting-storage-backend">Storage backend <span class="badge"
+       :class="'source-' + source('storage_backend')"
+       x-text="source('storage_backend')"></span></label>
+                    <select id="setting-storage-backend"
+                            class="input"
+                            x-model="form.storage_backend"
+                            :disabled="saving">
+                        <option value="">(nincs felülírás)</option>
+                        <option value="local">local</option>
+                    </select>
+                </div>
+            </section>
+            <section class="panel" x-show="readOnly.length" x-cloak>
+                <h2>Csak olvasható</h2>
+                <template x-for="name in readOnly" :key="name">
+                    <div class="form-row">
+                        <label :for="'setting-ro-' + name">
+                            <span x-text="name"></span>
+                            <span class="badge" :class="'source-' + source(name)" x-text="source(name)"></span>
+                            <span class="badge">read-only</span>
+                        </label>
+                        <input :id="'setting-ro-' + name"
+                               class="input"
+                               type="text"
+                               :value="effectiveValue(name)"
+                               disabled>
+                        <p class="muted field-hint"
+                           x-show="readOnlyNotes[name]"
+                           x-text="readOnlyNotes[name]"></p>
+                    </div>
+                </template>
+            </section>
+            <div class="form-actions">
+                <button type="submit"
+                        class="btn btn-primary"
+                        :disabled="saving"
+                        x-text="saving ? 'Mentés…' : 'Mentés'"></button>
+                <button type="button" class="btn" @click="reset()" :disabled="saving">Visszaállítás</button>
+            </div>
+        </form>
+    </div>
+{% endblock %}

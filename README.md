@@ -61,9 +61,10 @@ Web UI: <http://localhost:8080> · API: <http://localhost:8080/api/v1/health/>
 ## Production deploy (GHCR + Watchtower)
 
 Releases publish the Django (web/worker) image to GitHub Container Registry as
-`ghcr.io/branc9/printforge` (tags: `latest`, `sha-<short>`, branch name, and
-semver for `v*` tags). On a host that already runs Watchtower (e.g. TrueNAS),
-deploy the pull-based stack instead of building:
+`ghcr.io/branc9/printforge`, plus the CAD/slicing sandbox images
+`ghcr.io/branc9/printforge-openscad` and
+`ghcr.io/branc9/printforge-prusaslicer` (same tag scheme). On a host that already
+runs Watchtower (e.g. TrueNAS), deploy the pull-based stack instead of building:
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d
@@ -82,17 +83,21 @@ self-contained YAML (no build, no env-file, no relative mounts, literal values).
 Before the first `up`, set `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`,
 `DJANGO_ALLOWED_HOSTS` (and `DJANGO_CSRF_TRUSTED_ORIGINS` when behind TLS) — see
 the `.env.example` "PRODUCTION (TrueNAS)" block. The repo is private, so the
-GHCR package is private by default: either make it public or run
+GHCR packages are private by default: either make them public or run
 `docker login ghcr.io` on the NAS (this also covers Watchtower's pulls).
+
+Model generation and slicing run as **ephemeral sandbox containers** launched by
+the `worker` (Docker-out-of-Docker). This needs three things, all wired up:
+the app image ships the Docker CLI, `worker` mounts `/var/run/docker.sock`, and
+a scratch directory is bind-mounted at an identical absolute path with
+`TMPDIR` pointed at it (`SANDBOX_WORK_DIR`, e.g.
+`/mnt/<pool>/apps/printforge/scratch` on TrueNAS). The socket is the main
+security trade-off; see section 9 of the runbook.
 
 See [`docs/truenas-deploy.md`](docs/truenas-deploy.md) for the full runbook
 (pre-flight, dataset layout, `.env`, verification, reverse-proxy/HTTPS flags,
-Watchtower behaviour, rollback via a pinned `PRINTFORGE_IMAGE`).
-
-> Known limitation: the published image is the Django app only. OpenSCAD /
-> PrusaSlicer are not included and the sandbox images are not published yet, so
-> model generation and slicing fail (with a notification). The UI/API, auth and
-> RAG work.
+Watchtower behaviour, the CAD/slicing sandbox, rollback via a pinned
+`PRINTFORGE_IMAGE`).
 
 ## Local development (uv)
 

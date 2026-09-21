@@ -29,6 +29,24 @@ from embeddings.services import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def runtime_settings(monkeypatch):
+    """Patch the runtime-settings resolver with an in-memory mapping.
+
+    The RAG flag and the embedding model now come from
+    ``configuration.services.get_setting`` (runtime-editable, DB override ->
+    Django settings -> env -> default), so tests patch that service rather than
+    mutating Django settings.
+    """
+    values: dict[str, Any] = {"rag_enabled": False, "embedding_model": "bge-m3"}
+
+    def fake_get_setting(name: str) -> Any:
+        return values.get(name)
+
+    monkeypatch.setattr(services, "get_setting", fake_get_setting)
+    return values
+
+
 def test_module_imports_without_touching_models():
     """Importing on sqlite must not require the pgvector app to be installed."""
     assert callable(services.embed_text)
@@ -36,27 +54,34 @@ def test_module_imports_without_touching_models():
     assert services.DEFAULT_CHUNK_SIZE > 0
 
 
-def test_retrieve_returns_empty_when_rag_disabled(settings):
-    settings.RAG_ENABLED = False
+def test_rag_enabled_reads_the_runtime_service(runtime_settings):
+    runtime_settings["rag_enabled"] = True
+    assert services.rag_enabled() is True
+    runtime_settings["rag_enabled"] = False
+    assert services.rag_enabled() is False
+
+
+def test_retrieve_returns_empty_when_rag_disabled(runtime_settings):
+    runtime_settings["rag_enabled"] = False
     assert retrieve("M5 csavar") == []
 
 
-def test_ingest_raises_when_rag_disabled(settings):
-    settings.RAG_ENABLED = False
+def test_ingest_raises_when_rag_disabled(runtime_settings):
+    runtime_settings["rag_enabled"] = False
     with pytest.raises(RagDisabledError):
         ingest_document(source_type="manual", title="x", content="hello")
 
 
-def test_ingest_raises_unavailable_on_non_postgres(settings):
+def test_ingest_raises_unavailable_on_non_postgres(runtime_settings, settings):
     if settings.DB_IS_POSTGRES:
         pytest.skip("sqlite-specific: the pgvector app is installed on PostgreSQL")
-    settings.RAG_ENABLED = True
+    runtime_settings["rag_enabled"] = True
     with pytest.raises(services.RagUnavailableError):
         ingest_document(source_type="manual", title="x", content="hello")
 
 
-def test_delete_is_safe_noop_when_rag_disabled(settings):
-    settings.RAG_ENABLED = False
+def test_delete_is_safe_noop_when_rag_disabled(runtime_settings):
+    runtime_settings["rag_enabled"] = False
     assert services.delete_document(1) == 0
 
 
@@ -92,10 +117,10 @@ def _stub_urlopen(
     monkeypatch.setattr(services.urllib.request, "urlopen", fake_urlopen)
 
 
-def test_embed_text_posts_to_ollama_api_embed(monkeypatch, settings):
+def test_embed_text_posts_to_ollama_api_embed(monkeypatch, settings, runtime_settings):
     settings.OLLAMA_BASE_URL = "http://test:11434/"
-    settings.EMBEDDING_MODEL = "bge-m3"
     settings.EMBEDDING_DIM = 3
+    runtime_settings["embedding_model"] = "bge-m3"
     captured: list[Any] = []
     _stub_urlopen(monkeypatch, {"embeddings": [[0.1, 0.2, 0.3]]}, captured)
 
@@ -107,7 +132,7 @@ def test_embed_text_posts_to_ollama_api_embed(monkeypatch, settings):
     assert timeout == services.EMBEDDING_TIMEOUT_SEC
 
 
-def test_embed_text_accepts_legacy_embedding_response(monkeypatch, settings):
+def test_embed_text_accepts_legacy_embedding_response(monkeypatch, settings, runtime_settings):
     settings.EMBEDDING_DIM = 2
     _stub_urlopen(monkeypatch, {"embedding": [1.0, 2.0]})
     assert embed_text("x") == [1.0, 2.0]
@@ -118,20 +143,20 @@ def test_embed_text_rejects_empty_input():
         embed_text("   ")
 
 
-def test_embed_text_rejects_missing_vector(monkeypatch, settings):
+def test_embed_text_rejects_missing_vector(monkeypatch, runtime_settings):
     _stub_urlopen(monkeypatch, {"done": True})
     with pytest.raises(EmbeddingError, match="no embedding"):
         embed_text("hi")
 
 
-def test_embed_text_rejects_dimension_mismatch(monkeypatch, settings):
+def test_embed_text_rejects_dimension_mismatch(monkeypatch, settings, runtime_settings):
     settings.EMBEDDING_DIM = 1024
     _stub_urlopen(monkeypatch, {"embeddings": [[0.1, 0.2]]})
     with pytest.raises(EmbeddingError, match="EMBEDDING_DIM"):
         embed_text("hi")
 
 
-def test_embed_text_wraps_connection_error(monkeypatch):
+def test_embed_text_wraps_connection_error(monkeypatch, runtime_settings):
     def boom(request: Any, timeout: float | None = None) -> None:
         raise urllib.error.URLError("connection refused")
 
@@ -140,7 +165,7 @@ def test_embed_text_wraps_connection_error(monkeypatch):
         embed_text("hi")
 
 
-def test_embed_text_wraps_http_error(monkeypatch):
+def test_embed_text_wraps_http_error(monkeypatch, runtime_settings):
     def boom(request: Any, timeout: float | None = None) -> None:
         raise urllib.error.HTTPError(
             "http://test/api/embed", 500, "boom", {}, io.BytesIO(b"server error")
@@ -202,8 +227,8 @@ def test_chunk_text_rejects_invalid_parameters():
     reason="embeddings needs PostgreSQL + pgvector (skipped on sqlite)",
 )
 @pytest.mark.django_db
-def test_ingest_then_retrieve_round_trip(monkeypatch, settings):
-    settings.RAG_ENABLED = True
+def test_ingest_then_retrieve_round_trip(monkeypatch, settings, runtime_settings):
+    runtime_settings["rag_enabled"] = True
     dimension = settings.EMBEDDING_DIM
     calls: list[str] = []
 

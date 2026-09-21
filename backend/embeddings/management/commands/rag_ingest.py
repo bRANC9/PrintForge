@@ -12,10 +12,11 @@ Examples::
     manage.py rag_ingest --seed --dry-run
     manage.py rag_ingest --dir knowledge/ --clear
 
-The command is a safe no-op with a clear message when ``RAG_ENABLED=false`` or
-the default database is not PostgreSQL (the ``embeddings`` app is not
-installed on sqlite). ``--dry-run`` parses and reports without touching the
-embedding model or the database.
+The command is a safe no-op with a clear message when the runtime
+``rag_enabled`` setting is false (see ``configuration.services``) or the default
+database is not PostgreSQL (the ``embeddings`` app is not installed on sqlite).
+``--dry-run`` parses and reports without touching the embedding model or the
+database.
 
 Input formats (see :mod:`embeddings.loaders`):
 
@@ -102,8 +103,8 @@ class Command(BaseCommand):
         if not rag_enabled():
             self.stdout.write(
                 self.style.WARNING(
-                    "RAG is disabled (RAG_ENABLED=false); nothing to ingest. "
-                    "Set RAG_ENABLED=true to enable it."
+                    "RAG is disabled (rag_enabled=false); nothing to ingest. "
+                    "Enable it in the runtime settings."
                 )
             )
             return

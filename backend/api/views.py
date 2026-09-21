@@ -11,14 +11,22 @@ Object-level roles are enforced by :class:`api.permissions.WorkspaceScopePermiss
 
 from http import HTTPStatus
 
+from django.conf import settings
 from django.http import HttpResponse
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from agents.models import AgentRun
 from agents.services import runs_accessible_to
+from configuration.services import (
+    effective_settings,
+    get_settings,
+    test_ollama,
+    update_settings,
+)
 from designs.models import ModelVersion
 from designs.services import (
     ARTIFACT_CONTENT_TYPES,
@@ -51,7 +59,7 @@ from projects.services import create_project
 from workspaces.models import Workspace, WorkspaceRole
 from workspaces.services import create_workspace, workspaces_for_user
 
-from .permissions import WorkspaceScopePermission
+from .permissions import IsStaff, WorkspaceScopePermission
 from .serializers import (
     AgentRunSerializer,
     ModelVersionSerializer,
@@ -60,6 +68,7 @@ from .serializers import (
     PrintJobSerializer,
     PrintJobTransitionSerializer,
     ProjectSerializer,
+    SettingsUpdateSerializer,
     VersionCreateSerializer,
     WorkspaceSerializer,
 )
@@ -311,3 +320,46 @@ class NotificationViewSet(
     def read_all(self, request):
         updated = mark_all_read(request.user)
         return Response({"updated": updated, "unread": unread_count(request.user)})
+
+
+def _settings_payload() -> dict:
+    """Shared response shape for ``GET``/``PATCH /api/v1/settings/``.
+
+    ``effective_settings()`` plus the read-only ``embedding_dim`` (baked into
+    the pgvector column, so never editable at runtime) and ``updated_at``.
+    """
+    payload = effective_settings()
+    payload["effective"]["embedding_dim"] = settings.EMBEDDING_DIM
+    payload["overrides"]["embedding_dim"] = None
+    payload["sources"]["embedding_dim"] = "env"
+    payload["read_only"] = ["embedding_dim"]
+    obj = get_settings()
+    payload["updated_at"] = obj.updated_at.isoformat() if obj.updated_at else None
+    return payload
+
+
+class SettingsAPIView(APIView):
+    """Global runtime settings (staff only, not workspace-scoped)."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        return Response(_settings_payload())
+
+    def patch(self, request):
+        serializer = SettingsUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            update_settings(user=request.user, **serializer.validated_data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        return Response(_settings_payload())
+
+
+class TestOllamaView(APIView):
+    """Probe the configured Ollama instance (staff only); never raises."""
+
+    permission_classes = [IsStaff]
+
+    def post(self, request):
+        return Response(test_ollama())

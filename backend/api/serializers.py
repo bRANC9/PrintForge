@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from agents.models import AgentRun
+from configuration.services import SETTING_NAMES
 from designs.models import ModelVersion
 from notifications.models import Notification
 from printers.models import Printer, PrintJob, PrintJobStatus
@@ -176,3 +177,19 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = ["id", "kind", "message", "url", "is_read", "created_at"]
         read_only_fields = fields
+
+
+class SettingsUpdateSerializer(serializers.Serializer):
+    """Dynamic ``{name: value, ...}`` payload for ``PATCH /api/v1/settings/``.
+
+    Unknown names are rejected here; value coercion/validation is handled by
+    ``configuration.services.update_settings``.
+    """
+
+    def to_internal_value(self, data):
+        if not isinstance(data, dict):
+            raise serializers.ValidationError("Expected an object of setting overrides.")
+        unknown = sorted(set(data) - set(SETTING_NAMES))
+        if unknown:
+            raise serializers.ValidationError({name: "Unknown setting." for name in unknown})
+        return dict(data)

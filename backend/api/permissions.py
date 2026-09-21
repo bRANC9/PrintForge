@@ -175,3 +175,17 @@ class WorkspaceScopePermission(permissions.BasePermission):
                 return Workspace.objects.filter(pk=workspace_id).first()
 
         return None
+
+
+class IsStaff(permissions.BasePermission):
+    """Allow only authenticated staff users.
+
+    Used for the global, non-workspace-scoped runtime settings API
+    (``/api/v1/settings/``).
+    """
+
+    message = "Staff access required."
+
+    def has_permission(self, request, view) -> bool:
+        user = getattr(request, "user", None)
+        return bool(user and user.is_authenticated and user.is_staff)

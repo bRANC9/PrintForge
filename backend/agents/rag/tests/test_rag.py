@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 import agents.rag as rag
+from embeddings import services
 from embeddings.services import RagDisabledError
+
+
+def _disable_rag(monkeypatch):
+    """Patch the runtime-settings resolver used by the RAG service."""
+    monkeypatch.setattr(services, "get_setting", lambda name: False)
 
 
 def test_facade_exposes_the_public_api():
@@ -20,13 +26,13 @@ def test_facade_exposes_the_public_api():
         assert hasattr(rag, name), name
 
 
-def test_facade_retrieve_is_empty_when_disabled(settings):
-    settings.RAG_ENABLED = False
+def test_facade_retrieve_is_empty_when_disabled(monkeypatch):
+    _disable_rag(monkeypatch)
     assert rag.retrieve("bármi") == []
 
 
-def test_facade_ingest_raises_when_disabled(settings):
-    settings.RAG_ENABLED = False
+def test_facade_ingest_raises_when_disabled(monkeypatch):
+    _disable_rag(monkeypatch)
     with pytest.raises(RagDisabledError):
         rag.ingest_document(source_type="web", title="t", content="c")
 

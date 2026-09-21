@@ -73,17 +73,35 @@ uv run celery -A config worker -l info
 
 ## Sandbox
 
-PrusaSlicer runs either on the host (`SLICER_MODE=local`, dev) or in the
-locked-down container (`SLICER_MODE=docker`, production) with:
+PrusaSlicer runs either on the host (``slicer_mode=local``, dev) or in the
+locked-down container (``slicer_mode=docker``, production) with:
 
 ```text
 --network none --read-only --tmpfs /tmp --cap-drop ALL
 --security-opt no-new-privileges --pids-limit 256 --memory 2g --cpus 2.0
 ```
 
-plus a hard `SLICER_TIMEOUT_SEC` timeout. Profile `settings_json` is validated
+plus a hard ``slicer_timeout_sec`` timeout. Profile `settings_json` is validated
 before it reaches the CLI; `subprocess` is always called with a list of
 arguments and `shell=False`. See `docker/slicer/README.md`.
+
+### Runtime settings
+
+`slicer_mode` and `slicer_timeout_sec` are resolved **at call time** through
+`configuration.services.get_setting` (DB override -> Django settings ->
+`os.environ` -> default), so an admin change applies to the next job with no
+worker restart and no import-time caching. Defaults: `local` / `300`.
+
+Transport overrides are env-only (read at call time):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PRUSASLICER_BINARY` | `prusa-slicer` | host binary used in `local` mode |
+| `SLICER_IMAGE` | `ghcr.io/branc9/printforge-prusaslicer:latest` | container image (wins over the legacy `PRUSASLICER_IMAGE`) |
+| `PRUSASLICER_IMAGE` | – | legacy image override |
+| `SLICER_DOCKER_BINARY` | `docker` | container runtime binary |
+| `SLICER_MEMORY_LIMIT` | `2g` | `--memory` value |
+| `SLICER_CPU_LIMIT` | `2.0` | `--cpus` value |
 
 > A later OrcaSlicer backend (wxWidgets/GL, often needs Xvfb) will implement the
 > same `SlicerBackend` contract; it is intentionally not implemented yet.

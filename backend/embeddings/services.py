@@ -15,10 +15,16 @@ Design constraints
   (``settings.DB_IS_POSTGRES``). The models are therefore imported lazily inside
   the functions, and every entry point is guarded, so
   ``import embeddings.services`` never breaks on the sqlite fallback.
-* **Feature flag.** Everything is gated by ``settings.RAG_ENABLED`` (default
-  ``False``). When it is off, :func:`retrieve` returns ``[]`` and
-  :func:`ingest_document` raises :class:`RagDisabledError` without ever touching
-  the database or a live embedding model.
+* **Feature flag.** Everything is gated by the runtime ``rag_enabled`` setting
+  (default ``False``), resolved through
+  :func:`configuration.services.get_setting`. When it is off, :func:`retrieve`
+  returns ``[]`` and :func:`ingest_document` raises :class:`RagDisabledError`
+  without ever touching the database or a live embedding model.
+* **Runtime settings.** The embedding model and the RAG flag are read at *call
+  time* from :func:`configuration.services.get_setting` (DB override -> Django
+  settings -> environment -> default), so an admin change takes effect without
+  a restart. ``EMBEDDING_DIM`` deliberately stays a Django/env setting because
+  it is baked into the pgvector column.
 
 The public API is re-exported by :mod:`agents.rag` for agent code.
 """
@@ -32,6 +38,8 @@ import urllib.request
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
+
+from configuration.services import get_setting
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids sqlite import issues
     from embeddings.models import KnowledgeDocument
@@ -75,8 +83,12 @@ class EmbeddingError(RagError):
 
 
 def rag_enabled() -> bool:
-    """Return whether the RAG feature flag is on (default ``False``)."""
-    return bool(getattr(settings, "RAG_ENABLED", False))
+    """Return whether the RAG feature flag is on.
+
+    Resolved at call time through ``configuration.services.get_setting`` so an
+    admin override takes effect without a restart (default ``False``).
+    """
+    return bool(get_setting("rag_enabled"))
 
 
 def postgres_available() -> bool:
@@ -85,7 +97,13 @@ def postgres_available() -> bool:
 
 
 def _setting(name: str, default: Any) -> Any:
+    """Read a Django setting (used for values that are *not* runtime-editable)."""
     return getattr(settings, name, default)
+
+
+def _embedding_model() -> str:
+    """Effective Ollama embedding model, resolved at call time (default bge-m3)."""
+    return str(get_setting("embedding_model") or DEFAULT_EMBEDDING_MODEL)
 
 
 def _models() -> tuple[type[KnowledgeDocument], type[Any]]:
@@ -111,7 +129,7 @@ def embed_text(text: str) -> list[float]:
         raise EmbeddingError("embed_text() requires a non-empty string")
 
     base_url = str(_setting("OLLAMA_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-    model = str(_setting("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL))
+    model = _embedding_model()
     url = f"{base_url}{EMBEDDINGS_PATH}"
     payload = {"model": model, "input": text}
 
@@ -291,7 +309,7 @@ def ingest_document(
     )
 
     chunks = chunk_text(content, chunk_size=chunk_size, overlap=overlap)
-    model_name = str(_setting("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL))
+    model_name = _embedding_model()
     EmbeddingChunk.objects.bulk_create(
         [
             EmbeddingChunk(

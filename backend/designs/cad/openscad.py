@@ -14,26 +14,35 @@ The generated ``.scad`` is treated as **untrusted**:
 * in ``docker`` mode the container runs with the sandbox flags from
   terv.md 20. fejezet (``--network none --read-only --tmpfs /tmp`` ...).
 
-Mode selection
---------------
-``OPENSCAD_MODE`` (env, also honoured from Django settings) picks:
+Runtime settings
+----------------
+Mode, timeout and the docker limits are resolved through
+``configuration.services.get_setting`` on **every access** (DB override ->
+Django settings -> env -> default), so the NAS operator can change them from
+the UI and the next job picks the new value up without a worker restart:
 
-* ``local``  -- run the ``OPENSCAD_BINARY`` directly (dev machines);
-* ``docker`` -- run ``OPENSCAD_IMAGE`` via ``OPENSCAD_DOCKER_BINARY`` with the
-  sandbox flags (production / CI, see ``docker/openscad/README.md``).
+* ``openscad_mode``         -- ``local`` or ``docker`` (default ``local``)
+* ``openscad_timeout_sec``  -- hard timeout per export (default ``60``)
+* ``openscad_memory_limit`` -- docker ``--memory`` (default ``1g``)
+* ``openscad_cpu_limit``    -- docker ``--cpus`` (default ``1.0``)
 
-Other knobs: ``OPENSCAD_TIMEOUT_SEC``, ``OPENSCAD_MEMORY_LIMIT``,
-``OPENSCAD_CPU_LIMIT``.
+Env-only overrides (not exposed in the configuration UI):
+
+* ``OPENSCAD_BINARY``        -- local binary (default ``openscad``)
+* ``OPENSCAD_IMAGE``         -- docker image
+  (default ``ghcr.io/branc9/printforge-openscad:latest``)
+* ``OPENSCAD_DOCKER_BINARY`` -- container runtime (default ``docker``)
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from string import Template
 from typing import Any
@@ -48,7 +57,10 @@ from .base import (
     UnsupportedFormatError,
 )
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
+    "DEFAULT_IMAGE",
     "SANDBOX_FLAGS",
     "HolderParameters",
     "OpenSCADBackend",
@@ -388,36 +400,76 @@ def render_scad(parameters: HolderParameters) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Default sandbox image published by infra-devops (``OPENSCAD_IMAGE`` overrides).
+DEFAULT_IMAGE = "ghcr.io/branc9/printforge-openscad:latest"
+
+# Runtime settings resolved through the configuration app (UI-editable).
+_MODE_SETTING = "openscad_mode"
+_TIMEOUT_SETTING = "openscad_timeout_sec"
+_MEMORY_SETTING = "openscad_memory_limit"
+_CPU_SETTING = "openscad_cpu_limit"
+
+# Env-only fallbacks for the same knobs (local dev / when configuration is absent).
+_ENV_NAMES = {
+    _MODE_SETTING: "OPENSCAD_MODE",
+    _TIMEOUT_SETTING: "OPENSCAD_TIMEOUT_SEC",
+    _MEMORY_SETTING: "OPENSCAD_MEMORY_LIMIT",
+    _CPU_SETTING: "OPENSCAD_CPU_LIMIT",
+}
+
+
+def _env_override(name: str, default: str) -> str:
+    """Read an env-only override (e.g. ``OPENSCAD_IMAGE``); empty means unset."""
+    value = os.environ.get(name)
+    return value if value else default
+
+
+def _legacy_setting(name: str, default: Any = None) -> Any:
+    """Fallback resolution without the configuration app: env -> settings -> default."""
+    env_name = _ENV_NAMES.get(name)
+    if env_name:
+        value = os.environ.get(env_name)
+        if value:
+            return value
+        value = getattr(settings, env_name, None)
+        if value is not None:
+            return value
+    return default
+
+
+def _read_runtime_setting(name: str, default: Any = None) -> Any:
+    """Effective runtime setting: DB override -> settings -> env -> default.
+
+    ``configuration.services.get_setting`` is imported lazily -- never at module
+    import time -- so a UI change applies to the next job without a restart and
+    tests can patch ``configuration.services.get_setting``. If the configuration
+    app is missing or a lookup fails, fall back to env/settings so CAD rendering
+    keeps working.
+    """
+    try:
+        from configuration.services import get_setting
+    except Exception:  # noqa: BLE001 - configuration app may land in parallel
+        logger.warning("configuration service unavailable; using env/settings for %r", name)
+        return _legacy_setting(name, default)
+    try:
+        value = get_setting(name)
+    except Exception:  # noqa: BLE001 - a settings lookup must not break CAD
+        logger.warning("get_setting(%r) failed; using env/settings", name)
+        return _legacy_setting(name, default)
+    return default if value is None else value
+
+
 @dataclass(frozen=True)
 class OpenSCADConfig:
     """Resolved runtime configuration for the backend."""
 
     mode: str = "local"
     binary: str = "openscad"
-    image: str = "printforge-openscad"
+    image: str = DEFAULT_IMAGE
     docker_binary: str = "docker"
     timeout_sec: float = 60.0
     memory_limit: str = "1g"
     cpu_limit: str = "1.0"
-
-
-def _resolve(name: str, default: str) -> str:
-    value = os.environ.get(name)
-    if value:
-        return value
-    return str(getattr(settings, name, default))
-
-
-def _config_from_environment() -> OpenSCADConfig:
-    return OpenSCADConfig(
-        mode=_resolve("OPENSCAD_MODE", "local").strip().lower(),
-        binary=_resolve("OPENSCAD_BINARY", "openscad"),
-        image=_resolve("OPENSCAD_IMAGE", "printforge-openscad"),
-        docker_binary=_resolve("OPENSCAD_DOCKER_BINARY", "docker"),
-        timeout_sec=float(_resolve("OPENSCAD_TIMEOUT_SEC", "60")),
-        memory_limit=_resolve("OPENSCAD_MEMORY_LIMIT", "1g"),
-        cpu_limit=_resolve("OPENSCAD_CPU_LIMIT", "1.0"),
-    )
 
 
 def _source_of(model: GeneratedModel | str) -> str:
@@ -429,7 +481,13 @@ def _source_of(model: GeneratedModel | str) -> str:
 
 
 class OpenSCADBackend(CADBackend):
-    """Render a parametric part and export it through the OpenSCAD CLI."""
+    """Render a parametric part and export it through the OpenSCAD CLI.
+
+    Runtime knobs are re-read from ``configuration.services.get_setting`` on
+    every ``config`` access, so nothing is cached at import time and a UI change
+    takes effect on the next job. Explicit constructor values (or a full
+    :class:`OpenSCADConfig`) win over the settings -- handy for tests.
+    """
 
     name = "openscad"
     supported_formats = ("stl",)
@@ -446,23 +504,45 @@ class OpenSCADBackend(CADBackend):
         memory_limit: str | None = None,
         cpu_limit: str | None = None,
     ) -> None:
-        resolved = config or _config_from_environment()
-        overrides = {
-            "mode": mode,
-            "binary": binary,
-            "image": image,
-            "docker_binary": docker_binary,
-            "timeout_sec": timeout_sec,
-            "memory_limit": memory_limit,
-            "cpu_limit": cpu_limit,
-        }
-        resolved = replace(
-            resolved, **{key: value for key, value in overrides.items() if value is not None}
+        if config is not None:
+            self._overrides: dict[str, Any] = {
+                field.name: getattr(config, field.name) for field in fields(config)
+            }
+        else:
+            overrides = {
+                "mode": mode,
+                "binary": binary,
+                "image": image,
+                "docker_binary": docker_binary,
+                "timeout_sec": timeout_sec,
+                "memory_limit": memory_limit,
+                "cpu_limit": cpu_limit,
+            }
+            self._overrides = {key: value for key, value in overrides.items() if value is not None}
+        # Fail fast on an invalid mode and read the current settings once.
+        self._effective_config()
+
+    @property
+    def config(self) -> OpenSCADConfig:
+        """Effective config, resolved fresh on every access (never cached)."""
+        return self._effective_config()
+
+    def _effective_config(self) -> OpenSCADConfig:
+        """Build the effective config from runtime settings + explicit overrides."""
+        base = OpenSCADConfig(
+            mode=str(_read_runtime_setting(_MODE_SETTING, "local")).strip().lower(),
+            binary=_env_override("OPENSCAD_BINARY", "openscad"),
+            image=_env_override("OPENSCAD_IMAGE", DEFAULT_IMAGE),
+            docker_binary=_env_override("OPENSCAD_DOCKER_BINARY", "docker"),
+            timeout_sec=float(_read_runtime_setting(_TIMEOUT_SETTING, 60)),
+            memory_limit=str(_read_runtime_setting(_MEMORY_SETTING, "1g")),
+            cpu_limit=str(_read_runtime_setting(_CPU_SETTING, "1.0")),
         )
-        resolved = replace(resolved, mode=resolved.mode.strip().lower())
-        if resolved.mode not in ("local", "docker"):
-            raise CADError(f"Unknown OPENSCAD_MODE {resolved.mode!r}; expected 'local' or 'docker'")
-        self.config = resolved
+        resolved = replace(base, **self._overrides)
+        mode = resolved.mode.strip().lower()
+        if mode not in ("local", "docker"):
+            raise CADError(f"Unknown openscad_mode {mode!r}; expected 'local' or 'docker'")
+        return replace(resolved, mode=mode)
 
     # -- CADBackend ---------------------------------------------------------
 
@@ -501,6 +581,7 @@ class OpenSCADBackend(CADBackend):
         if problems:
             raise OpenSCADValidationError("; ".join(problems))
 
+        config = self.config
         with tempfile.TemporaryDirectory(prefix="printforge-cad-") as tmp:
             input_dir = Path(tmp) / "in"
             output_dir = Path(tmp) / "out"
@@ -517,13 +598,11 @@ class OpenSCADBackend(CADBackend):
                     shell=False,
                     capture_output=True,
                     text=True,
-                    timeout=self.config.timeout_sec,
+                    timeout=config.timeout_sec,
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise OpenSCADTimeout(
-                    f"OpenSCAD timed out after {self.config.timeout_sec}s"
-                ) from exc
+                raise OpenSCADTimeout(f"OpenSCAD timed out after {config.timeout_sec}s") from exc
 
             if completed.returncode != 0:
                 detail = (completed.stderr or completed.stdout or "").strip()
@@ -538,27 +617,28 @@ class OpenSCADBackend(CADBackend):
 
     def build_args(self, input_dir: Path, output_dir: Path) -> list[str]:
         """Build the OpenSCAD command as a list (never a shell string)."""
-        if self.config.mode == "docker":
+        config = self.config
+        if config.mode == "docker":
             return [
-                self.config.docker_binary,
+                config.docker_binary,
                 "run",
                 "--rm",
                 *SANDBOX_FLAGS,
                 "--memory",
-                self.config.memory_limit,
+                config.memory_limit,
                 "--cpus",
-                self.config.cpu_limit,
+                config.cpu_limit,
                 "-v",
                 f"{input_dir}:/work:ro",
                 "-v",
                 f"{output_dir}:/out:rw",
-                self.config.image,
+                config.image,
                 "-o",
                 "/out/model.stl",
                 "/work/model.scad",
             ]
         return [
-            self.config.binary,
+            config.binary,
             "-o",
             str(output_dir / "model.stl"),
             str(input_dir / "model.scad"),

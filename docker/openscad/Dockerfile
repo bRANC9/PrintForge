@@ -25,9 +25,14 @@ ENV QT_QPA_PLATFORM=offscreen
 
 # Mount points used by the worker: /work (SCAD input, read-only) and /out (STL
 # output, read-write). Created here so they exist even without bind mounts.
-RUN mkdir -p /work /out && chown -R nobody:nogroup /work /out
+RUN mkdir -p /work /out
 
-USER nobody:nogroup
+# Run as the SAME user as the worker that creates the job dirs (root in the app
+# image). The bind mount replaces the image's /out with a host directory owned
+# by that user, so any other UID (e.g. nobody) cannot write the exported STL.
+# Isolation comes from the runtime flags, not from the image user:
+#   --network none --read-only --tmpfs /tmp --cap-drop ALL
+#   --security-opt no-new-privileges --pids-limit 256 --memory ... --cpus ...
 WORKDIR /work
 
 ENTRYPOINT ["openscad"]

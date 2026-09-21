@@ -15,8 +15,10 @@
             <a class="brand" href="{% url 'home' %}">PrintForge</a>
             <nav class="site-nav">
                 <a href="{% url 'projects:list' %}">Projektek</a>
-                {# TODO: switch to {% url 'printers:history' %} once the route exists. #}
-                <a href="/printers/history/">Nyomtatási előzmények</a>
+                <a href="{% url 'printers:history' %}">Nyomtatási előzmények</a>
+                {% if user.is_staff %}
+                    <a href="{% url 'configuration:settings' %}">Beállítások</a>
+                {% endif %}
                 {% if user.is_authenticated %}
                     <div class="notif" x-data="notificationsBell" @click.outside="close()">
                         <button type="button"
