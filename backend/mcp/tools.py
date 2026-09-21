@@ -34,7 +34,14 @@ def all_tools() -> dict[str, Tool]:
     return dict(_REGISTRY)
 
 
-def call(name: str, **kwargs):
-    if name not in _REGISTRY:
-        raise KeyError(f"Unknown MCP tool: {name}")
-    return _REGISTRY[name].handler(**kwargs)
+def call(tool_name: str, /, **kwargs):
+    # The tool identifier is positional-only so it never collides with a tool
+    # parameter literally named ``name`` (e.g. ``create_workspace``).
+    #
+    # TODO(phase-7): enforce the same workspace-role permissions here as for the
+    # web user (terv.md 20., 25. fejezet) before dispatching to the handler.
+    # This is the single chokepoint every MCP tool must flow through; tools may
+    # not opt out of it (`allow_shell` stays forbidden).
+    if tool_name not in _REGISTRY:
+        raise KeyError(f"Unknown MCP tool: {tool_name}")
+    return _REGISTRY[tool_name].handler(**kwargs)

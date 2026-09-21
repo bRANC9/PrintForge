@@ -1,0 +1,35 @@
+{# Three.js viewer partial. Include it ONCE inside an Alpine scope that exposes
+   `stlUrl`, `scadUrl`, `viewerLabel`, `viewerState`, `viewerMessage` and
+   `dimensions` (see `projectDetail` in static/js/app.js). The import map and
+   the `viewer.js` module live in the including page's `extra_head` block. #}
+<section class="panel viewer-panel">
+    <header class="viewer-toolbar">
+        <div>
+            <h2>3D előnézet</h2>
+            <p class="muted">
+                <span x-text="viewerLabel || 'Válassz verziót'"></span>
+                <span x-show="dimensions" x-text="'· ' + dimensions"></span>
+            </p>
+        </div>
+        <div class="viewer-actions">
+            <a class="btn"
+               :href="stlUrl || '#'"
+               :aria-disabled="stlUrl ? 'false' : 'true'"
+               @click="!stlUrl && $event.preventDefault()"
+               download>STL</a>
+            <a class="btn"
+               :href="scadUrl || '#'"
+               :aria-disabled="scadUrl ? 'false' : 'true'"
+               @click="!scadUrl && $event.preventDefault()"
+               download>SCAD</a>
+        </div>
+    </header>
+    <div class="viewer-canvas"
+         x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken }">
+        <div class="viewer-overlay" x-show="viewerState !== 'ready'" x-cloak>
+            <span class="spinner" x-show="viewerState === 'loading'" aria-hidden="true"></span>
+            <span x-text="viewerMessage || 'Nincs megjeleníthető modell.'"></span>
+        </div>
+    </div>
+    <p class="viewer-hint muted">Bal gomb: forgatás · Görgő: zoom · Jobb gomb: eltolás</p>
+</section>

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Projektek – PrintForge{% endblock %}
+{% block content %}
+    <div data-project-list x-data="projectList">
+        <header class="page-head">
+            <div>
+                <h1>Projektek</h1>
+                <p class="muted">AI-val generált parametrikus CAD modellek és verzióik.</p>
+            </div>
+            <input class="input"
+                   type="search"
+                   placeholder="Szűrés név szerint…"
+                   x-model="search">
+        </header>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted"
+           x-show="!loading && !error && !visibleProjects.length">Még nincs projekt ebben a workspace-ben.</p>
+        <div class="project-grid" x-show="!loading && visibleProjects.length">
+            <template x-for="project in visibleProjects" :key="project.id">
+                {# A /projects/<id>/ útvonalat a backend urls.py-nak kell biztosítania (projects:detail). #}
+                <a class="card project-card" :href="'/projects/' + project.id + '/'">
+                    <h2 x-text="project.name"></h2>
+                    <p class="muted" x-text="project.description || 'Nincs leírás.'"></p>
+                    <footer>
+                        <span class="badge"
+                              x-show="workspaceName(project.workspace)"
+                              x-text="workspaceName(project.workspace)"></span>
+                        <time class="muted" x-text="formatDate(project.updated_at)"></time>
+                    </footer>
+                </a>
+            </template>
+        </div>
+    </div>
+{% endblock %}

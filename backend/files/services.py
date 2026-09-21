@@ -3,6 +3,14 @@
 Phase 1 stores files on the local filesystem (a Docker volume on TrueNAS).
 The interface is intentionally narrow so a MinIO/S3 backend can be dropped in
 later without touching callers (see terv.md 3. fejezet, Storage).
+
+Storage contract (every backend returned by :func:`get_storage` implements it):
+
+- ``exists(relative_path) -> bool``
+- ``size(relative_path) -> int | None`` -- ``None`` when the file is missing
+- ``read_bytes(relative_path) -> bytes``
+- ``write_bytes(relative_path, data) -> Path``
+- ``delete(relative_path) -> None``
 """
 
 from pathlib import Path
@@ -21,6 +29,13 @@ class LocalStorage:
 
     def exists(self, relative_path: str) -> bool:
         return self.path(relative_path).exists()
+
+    def size(self, relative_path: str) -> int | None:
+        """Return the file size in bytes, or ``None`` when it does not exist."""
+        target = self.path(relative_path)
+        if not target.exists():
+            return None
+        return target.stat().st_size
 
     def read_bytes(self, relative_path: str) -> bytes:
         return self.path(relative_path).read_bytes()

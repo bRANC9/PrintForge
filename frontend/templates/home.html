@@ -4,4 +4,8 @@
     <h1>PrintForge</h1>
     <p>Self-hosted AI 3D print hub. Prompt → parametrikus CAD → STL → böngészős preview.</p>
     <p id="api-status" data-health-url="{% url 'api-health' %}">API állapot: ismeretlen</p>
+    {# A /projects/ útvonalat a backend urls.py-nak kell biztosítania (projects:list). #}
+    <p>
+        <a class="btn btn-primary" href="/projects/">Projektek megnyitása</a>
+    </p>
 {% endblock %}

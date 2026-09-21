@@ -1,0 +1,79 @@
+"""Shared fixtures for the top-level ``tests/`` tree.
+
+The colocated per-app tests (``backend/agents/llm/tests`` etc.) have their own
+``conftest`` scope and do not inherit these fixtures. Only reusable *data*
+fixtures live here; behaviour-specific setup stays next to the tests that need
+it.
+"""
+
+from __future__ import annotations
+
+import pytest
+from factories import (
+    ModelVersionFactory,
+    ProjectFactory,
+    UserFactory,
+    WorkspaceFactory,
+    WorkspaceMemberFactory,
+)
+from rest_framework.test import APIClient
+
+__all__ = [
+    "ModelVersionFactory",
+    "ProjectFactory",
+    "UserFactory",
+    "WorkspaceFactory",
+    "WorkspaceMemberFactory",
+]
+
+
+@pytest.fixture
+def user():
+    """A single persisted user."""
+    return UserFactory()
+
+
+@pytest.fixture
+def other_user():
+    """A second user, useful for 'not the caller' assertions."""
+    return UserFactory()
+
+
+@pytest.fixture
+def workspace(user):
+    """A workspace owned by :func:`user` (owner is an OWNER member)."""
+    return WorkspaceFactory(owner=user)
+
+
+@pytest.fixture
+def project(workspace):
+    """A project in :func:`workspace`, created by its owner."""
+    return ProjectFactory(workspace=workspace, created_by=workspace.owner)
+
+
+@pytest.fixture
+def version(project):
+    """A model version of :func:`project`, created by its creator."""
+    return ModelVersionFactory(project=project, created_by=project.created_by)
+
+
+@pytest.fixture
+def api_client():
+    """An unauthenticated DRF client."""
+    return APIClient()
+
+
+@pytest.fixture
+def auth_client(user):
+    """A DRF client authenticated as :func:`user`."""
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+@pytest.fixture
+def local_storage(tmp_path):
+    """A :class:`files.services.LocalStorage` rooted in the test's tmp dir."""
+    from files.services import LocalStorage
+
+    return LocalStorage(root=tmp_path)

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Projekt – PrintForge{% endblock %}
+{% block extra_head %}
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module" src="{% static 'js/viewer.js' %}"></script>
+{% endblock %}
+{% block content %}
+    {# A projekt azonosítója a data-project-id-ból, ennek hiányában az URL-ből jön. #}
+    <div data-project-detail
+         data-project-id="{{ project_id|default:'' }}"
+         x-data="projectDetail"
+         @viewer-state.document="handleViewerState($event)">
+        <p class="breadcrumb">
+            <a href="/projects/">← Projektek</a>
+        </p>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <template x-if="project">
+            <header class="page-head">
+                <div>
+                    <h1 x-text="project.name"></h1>
+                    <p class="muted" x-text="project.description || 'Nincs leírás.'"></p>
+                </div>
+            </header>
+        </template>
+        <div class="project-layout">
+            <section class="panel">
+                <h2>Verzió előzmények</h2>
+                <p class="muted" x-show="!versions.length">Még nincs verzió. Indíts egy generálást lentebb.</p>
+                <ol class="version-list" x-show="versions.length">
+                    <template x-for="version in versions" :key="version.id">
+                        <li :class="{ 'is-active': version.id === selectedVersionId }"
+                            @click="selectVersion(version)"
+                            @keydown.enter="selectVersion(version)"
+                            tabindex="0">
+                            <span class="version-tag" x-text="'v' + version.version"></span>
+                            <span class="version-prompt" x-text="version.prompt || 'Nincs prompt'"></span>
+                            <time class="muted" x-text="formatDate(version.created_at)"></time>
+                            <span class="badge" x-show="version.status" x-text="version.status"></span>
+                        </li>
+                    </template>
+                </ol>
+                <form class="prompt-form" @submit.prevent="submitPrompt()">
+                    <label for="prompt-input">Új verzió promptja</label>
+                    <textarea id="prompt-input"
+                              class="textarea"
+                              rows="4"
+                              x-model="prompt"
+                              :disabled="busy"
+                              placeholder="Pl. M5 csavarhelyek hozzáadása a belső falhoz"></textarea>
+                    <button type="submit"
+                            class="btn btn-primary"
+                            :disabled="busy || !prompt.trim()"
+                            x-text="busy ? 'Feldolgozás…' : 'Generálás'"></button>
+                </form>
+                <p class="status-line" x-show="statusText">
+                    <span class="spinner" x-show="polling" aria-hidden="true"></span>
+                    <span x-text="statusText"></span>
+                </p>
+                <template x-if="errors.length">
+                    <ul class="error-box">
+                        <template x-for="(item, index) in errors" :key="index">
+                            <li x-text="formatError(item)"></li>
+                        </template>
+                    </ul>
+                </template>
+            </section>
+            {% include "designs/viewer.html" %}
+        </div>
+    </div>
+{% endblock %}
