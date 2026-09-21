@@ -43,23 +43,28 @@ jobs whose project lives in a workspace the caller is a member of.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from django.db import transaction
 from django.db.models import QuerySet
 
 from files.services import get_storage
+from notifications.services import NotificationKind, notify_job_owner
 from workspaces.models import WorkspaceMember
 
 from .factory import get_printer_backend
 from .models import Printer, PrintJob, PrintJobStatus
 from .permissions import require_printer_operator
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "ACTIVE_STATUSES",
     "ALLOWED_TRANSITIONS",
     "CONTROL_STATUSES",
     "QUEUEABLE_STATUSES",
+    "STATUS_NOTIFICATION_KINDS",
     "InvalidTransitionError",
     "QueueError",
     "assign_filament",
@@ -156,6 +161,54 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Owner notifications (best-effort; never change the transition result)
+# ---------------------------------------------------------------------------
+
+#: Target status -> notification kind (terv.md 21. fejezet, Phase 7).
+#: Silent statuses (QUEUED, PREPARING, SLICING, READY, PAUSED) are absent on
+#: purpose. ``CANCELLED`` reuses ``PRINT_FAILED`` because there is no dedicated
+#: "cancelled" kind; the message distinguishes them.
+STATUS_NOTIFICATION_KINDS: dict[str, str] = {
+    PrintJobStatus.PRINTING: NotificationKind.PRINT_STARTED,
+    PrintJobStatus.COMPLETED: NotificationKind.PRINT_DONE,
+    PrintJobStatus.FAILED: NotificationKind.PRINT_FAILED,
+    PrintJobStatus.CANCELLED: NotificationKind.PRINT_FAILED,
+}
+
+_STATUS_NOTIFICATION_MESSAGES: dict[str, str] = {
+    PrintJobStatus.PRINTING: "A(z) #{id} feladat nyomtatása elindult.",
+    PrintJobStatus.COMPLETED: "A(z) #{id} feladat elkészült.",
+    PrintJobStatus.FAILED: "A(z) #{id} feladat sikertelen lett.",
+    PrintJobStatus.CANCELLED: "A(z) #{id} feladat le lett mondva.",
+}
+
+
+def _notify_job_owner(job: PrintJob, message: str, kind: str) -> None:
+    """Best-effort owner notification: never raises into the caller.
+
+    ``notify_job_owner`` already swallows its own errors; the guard here keeps
+    that guarantee even if an alternate implementation raises.
+    """
+    try:
+        notify_job_owner(job=job, message=message, kind=kind)
+    except Exception:  # noqa: BLE001 - notifications must not break the queue
+        logger.exception("Failed to notify the owner of PrintJob %s", getattr(job, "pk", job))
+
+
+def _notify_status_change(job: PrintJob, status: str) -> None:
+    """Emit the notification for a persisted ``status`` change, if any.
+
+    Called only after the new status has been saved and only on the success path
+    of :func:`transition`, so rejected transitions never notify. ``user`` is
+    irrelevant here: the owner is notified even for internal worker calls.
+    """
+    kind = STATUS_NOTIFICATION_KINDS.get(status)
+    if kind is None:
+        return
+    _notify_job_owner(job, _STATUS_NOTIFICATION_MESSAGES[status].format(id=job.pk), kind)
+
+
 def enqueue_job(
     *,
     project,
@@ -174,12 +227,15 @@ def enqueue_job(
     configuration FKs and are stored as given. The printer is *not* required to
     be active -- a queue may legitimately hold work for a printer that is
     temporarily offline.
+
+    After the job is persisted the owner gets a ``PRINT_QUEUED`` notification
+    (best-effort: a notification failure never fails the enqueue).
     """
     if model_version.project_id != project.pk:
         raise QueueError("model_version does not belong to the given project")
     if priority < 0:
         raise QueueError("priority must be >= 0")
-    return PrintJob.objects.create(
+    job = PrintJob.objects.create(
         project=project,
         model_version=model_version,
         printer=printer,
@@ -190,6 +246,12 @@ def enqueue_job(
         priority=priority,
         status=PrintJobStatus.QUEUED,
     )
+    _notify_job_owner(
+        job,
+        f"A(z) #{job.pk} feladat sorba állítva.",
+        NotificationKind.PRINT_QUEUED,
+    )
+    return job
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +340,11 @@ def transition(job: PrintJob, status, *, user=None) -> PrintJob:
     (:data:`CONTROL_STATUSES`), ``PRINTER_OPERATOR`` is required
     (terv.md 20.). The state machine is validated *before* the permission check,
     so an invalid move never leaks whether the caller could operate.
+
+    On success the job owner is notified according to
+    :data:`STATUS_NOTIFICATION_KINDS` (best-effort, after the new status is
+    persisted). Rejected transitions notify nobody, and a notification failure
+    never changes the transition result.
     """
     new_status = _coerce_status(status)
     current = job.status
@@ -295,6 +362,7 @@ def transition(job: PrintJob, status, *, user=None) -> PrintJob:
 
     job.status = new_status
     job.save(update_fields=["status", "updated_at"])
+    _notify_status_change(job, new_status)
     return job
 
 

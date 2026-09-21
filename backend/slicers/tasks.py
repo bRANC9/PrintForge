@@ -15,7 +15,7 @@ from celery import shared_task
 
 from printers.models import PrintJob
 
-from .services import slice_job
+from .services import notify_slice_failed, notify_slice_ready, slice_job
 
 __all__ = ["slice_print_job"]
 
@@ -28,10 +28,18 @@ def slice_print_job(job_id: int) -> dict[str, Any]:
 
     Returns a small result dict. A missing job is a no-op; any failure after
     the job is loaded is persisted as ``FAILED`` and re-raised so Celery can
-    retry and record the failure.
+    retry and record the failure. The job owner is notified (best-effort) once
+    the status/metadata writes are done, so a notification failure can never
+    alter the slicing outcome.
     """
     job = PrintJob.objects.filter(pk=job_id).first()
     if job is None:
         logger.warning("slice_print_job: PrintJob %s not found", job_id)
         return {"job_id": job_id, "status": "missing"}
-    return slice_job(job)
+    try:
+        result = slice_job(job)
+    except Exception as exc:
+        notify_slice_failed(job, exc)
+        raise
+    notify_slice_ready(job)
+    return result

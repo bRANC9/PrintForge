@@ -34,10 +34,18 @@ from .base import (
 from .models import FilamentProfile, PrinterProfile, ProcessProfile
 from .prusaslicer import PrusaSlicerBackend
 
+try:  # api-dev implements this contract in parallel; degrade gracefully without it
+    from notifications.services import NotificationKind, notify_job_owner
+except Exception:  # noqa: BLE001 - notifications are best-effort and must never block import
+    NotificationKind = None  # type: ignore[assignment]
+    notify_job_owner = None  # type: ignore[assignment]
+
 __all__ = [
     "filament_settings",
     "gcode_path",
     "get_backend",
+    "notify_slice_failed",
+    "notify_slice_ready",
     "printer_settings",
     "process_settings",
     "resolve_printer_profile",
@@ -50,6 +58,46 @@ logger = logging.getLogger(__name__)
 def get_backend() -> PrusaSlicerBackend:
     """Return the configured slicer backend (indirection point for tests)."""
     return PrusaSlicerBackend()
+
+
+# ---------------------------------------------------------------------------
+# Notifications (best-effort, never affects the slicing outcome)
+# ---------------------------------------------------------------------------
+
+
+def _notify_owner(job: PrintJob, *, kind: Any, message: str, url: str = "") -> None:
+    """Send an owner notification without ever raising into the slicing flow."""
+    if notify_job_owner is None:
+        logger.warning(
+            "notify_job_owner is unavailable; skipping notification for PrintJob %s", job.pk
+        )
+        return
+    try:
+        notify_job_owner(job=job, kind=kind, message=message, url=url)
+    except Exception:  # noqa: BLE001 - notifications must never break slicing
+        logger.exception("Failed to notify the owner of PrintJob %s", job.pk)
+
+
+def notify_slice_ready(job: PrintJob) -> None:
+    """Notify the job owner that slicing finished."""
+    _notify_owner(
+        job,
+        kind=getattr(NotificationKind, "SLICE_READY", "SLICE_READY"),
+        message=f"A(z) #{job.pk} nyomtatási feladat szeletelése elkészült.",
+        url="/printers/history/",
+    )
+
+
+def notify_slice_failed(job: PrintJob, error: BaseException) -> None:
+    """Notify the job owner that slicing failed, with a short reason."""
+    detail = str(error).strip().splitlines()
+    reason = detail[0] if detail else type(error).__name__
+    _notify_owner(
+        job,
+        kind=getattr(NotificationKind, "SLICE_FAILED", "SLICE_FAILED"),
+        message=f"A(z) #{job.pk} nyomtatási feladat szeletelése sikertelen: {reason}",
+        url="/printers/history/",
+    )
 
 
 # ---------------------------------------------------------------------------

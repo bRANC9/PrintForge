@@ -46,6 +46,28 @@ class FakeBackend:
         return FAKE_STL
 
 
+class RecordingNotifier:
+    """Records ``notify_project_members`` calls for assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs) -> list:
+        self.calls.append(kwargs)
+        return []
+
+
+class BoomBackend(FakeBackend):
+    """Fails during generation with a configurable error."""
+
+    def __init__(self, message: str = "openscad exploded") -> None:
+        super().__init__()
+        self.message = message
+
+    def generate(self, specification):  # noqa: ANN001
+        raise RuntimeError(self.message)
+
+
 @pytest.fixture
 def version():
     user = User.objects.create_user(username="ada", email="ada@example.com", password="pw")
@@ -123,3 +145,95 @@ def test_celery_task_handles_missing_version():
 
 def test_task_name_is_stable():
     assert tasks.render_model_stl.name == "designs.render_model_stl"
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
+def _use_backend(monkeypatch, backend, storage):
+    monkeypatch.setattr("designs.cad.pipeline.get_backend", lambda: backend)
+    monkeypatch.setattr("designs.cad.pipeline.get_storage", lambda: storage)
+
+
+def test_task_notifies_model_ready_on_success(version, tmp_path, monkeypatch):
+    storage = LocalStorage(root=tmp_path)
+    _use_backend(monkeypatch, FakeBackend(), storage)
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(tasks, "notify_project_members", notifier)
+
+    result = tasks.render_model_stl(version.pk)
+
+    assert result["status"] == "done"
+    assert len(notifier.calls) == 1
+    call = notifier.calls[0]
+    assert call["kind"] == tasks.NotificationKind.MODEL_READY
+    assert call["project"].pk == version.project_id
+    assert call["url"] == f"/projects/{version.project_id}/"
+    assert "Holder" in call["message"]
+    assert f"v{version.version}" in call["message"]
+
+
+def test_task_notifies_model_failed_on_failure(version, tmp_path, monkeypatch):
+    storage = LocalStorage(root=tmp_path)
+    _use_backend(monkeypatch, BoomBackend(), storage)
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(tasks, "notify_project_members", notifier)
+
+    with pytest.raises(RuntimeError, match="openscad exploded"):
+        tasks.render_model_stl(version.pk)
+
+    assert len(notifier.calls) == 1
+    call = notifier.calls[0]
+    assert call["kind"] == tasks.NotificationKind.MODEL_FAILED
+    assert call["project"].pk == version.project_id
+    assert call["url"] == f"/projects/{version.project_id}/"
+    assert "openscad exploded" in call["message"]
+
+
+def test_failure_notification_truncates_reason(version, tmp_path, monkeypatch):
+    storage = LocalStorage(root=tmp_path)
+    _use_backend(monkeypatch, BoomBackend("E" * 500), storage)
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(tasks, "notify_project_members", notifier)
+
+    with pytest.raises(RuntimeError):
+        tasks.render_model_stl(version.pk)
+
+    message = notifier.calls[0]["message"]
+    assert "E" * 200 in message
+    assert "E" * 201 not in message
+
+
+def test_notify_exception_does_not_break_success(version, tmp_path, monkeypatch):
+    storage = LocalStorage(root=tmp_path)
+    _use_backend(monkeypatch, FakeBackend(), storage)
+
+    def boom(**kwargs):
+        raise RuntimeError("notification backend down")
+
+    monkeypatch.setattr(tasks, "notify_project_members", boom)
+
+    result = tasks.render_model_stl(version.pk)
+
+    assert result["status"] == "done"
+    version.refresh_from_db()
+    assert version.validation_json["status"] == "done"
+
+
+def test_notify_exception_does_not_mask_failure(version, tmp_path, monkeypatch):
+    storage = LocalStorage(root=tmp_path)
+    _use_backend(monkeypatch, BoomBackend("openscad exploded"), storage)
+
+    def boom(**kwargs):
+        raise RuntimeError("notification backend down")
+
+    monkeypatch.setattr(tasks, "notify_project_members", boom)
+
+    # The original render error must survive, not the notification error.
+    with pytest.raises(RuntimeError, match="openscad exploded"):
+        tasks.render_model_stl(version.pk)
+
+    version.refresh_from_db()
+    assert version.validation_json["status"] == "failed"

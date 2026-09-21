@@ -1,15 +1,18 @@
-"""``run_agent_workflow`` persistence tests (no live LLM, no OpenSCAD).
+"""``run_agent_workflow`` persistence + notification tests.
 
-The graph dependencies are injected by monkeypatching
-:func:`agents.tasks.build_dependencies`, and the storage root is redirected to a
-temporary directory, so the real Celery task body runs synchronously.
+No live LLM, no OpenSCAD, no broker: the graph dependencies are injected by
+monkeypatching :func:`agents.tasks.build_dependencies`, the notification
+fan-out is recorded, and the storage root is redirected to a temporary
+directory, so the real Celery task body runs synchronously.
 """
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
+from django.conf import settings
 from factories import ProjectFactory
 
 from agents.graph import WorkflowDeps
@@ -17,10 +20,24 @@ from agents.graph.tests.fakes import FakeCADBackend, FakeProvider
 from agents.llm import LLMError
 from agents.models import AgentRun, AgentRunStatus
 from agents.spec import ModelSpecification
-from agents.tasks import run_agent_workflow
+from agents.tasks import NotificationKind, build_dependencies, run_agent_workflow
 from files.services import LocalStorage
 
 pytestmark = pytest.mark.django_db
+
+
+class NotifyRecorder:
+    """Records ``notify_project_members`` calls; optionally raises."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.error = error
+
+    def __call__(self, **kwargs: Any) -> list[Any]:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return []
 
 
 def _deps(
@@ -146,3 +163,92 @@ def test_task_marks_run_failed_when_persistence_fails(monkeypatch, tmp_path):
     assert error["stage"] == "persist"
     assert "disk full" in error["message"]
     assert project.versions.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
+def test_task_notifies_project_members_on_success(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    _install(monkeypatch, tmp_path, _deps())
+    recorder = NotifyRecorder()
+    monkeypatch.setattr("agents.tasks.notify_project_members", recorder)
+
+    run_id = run_agent_workflow(project.pk, "make a holder", project.created_by_id)
+
+    assert AgentRun.objects.get(pk=run_id).status == AgentRunStatus.DONE
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["kind"] == NotificationKind.AGENT_DONE
+    assert call["project"] == project
+    assert call["url"] == f"/projects/{project.pk}/"
+    assert call["exclude"].pk == project.created_by_id
+    assert "generated" in call["message"].lower()
+
+
+def test_task_notifies_project_members_on_failure(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    cad = FakeCADBackend(failures=99)
+    _install(monkeypatch, tmp_path, _deps(cad=cad))
+    recorder = NotifyRecorder()
+    monkeypatch.setattr("agents.tasks.notify_project_members", recorder)
+
+    run_id = run_agent_workflow(project.pk, "impossible part", project.created_by_id)
+
+    assert AgentRun.objects.get(pk=run_id).status == AgentRunStatus.FAILED
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["kind"] == NotificationKind.AGENT_FAILED
+    assert call["url"] == f"/projects/{project.pk}/"
+    assert call["exclude"].pk == project.created_by_id
+    assert "failed" in call["message"].lower()
+    assert "3 attempt(s)" in call["message"]  # the short structured reason
+
+
+def test_notification_failure_does_not_change_a_successful_run(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    _install(monkeypatch, tmp_path, _deps())
+    monkeypatch.setattr(
+        "agents.tasks.notify_project_members",
+        NotifyRecorder(error=RuntimeError("notify backend down")),
+    )
+
+    run_id = run_agent_workflow(project.pk, "make a holder", project.created_by_id)
+
+    run = AgentRun.objects.get(pk=run_id)
+    assert run.status == AgentRunStatus.DONE
+    assert project.versions.count() == 1
+    assert project.versions.get().validation_json["status"] == "done"
+
+
+def test_notification_failure_does_not_change_a_failed_run(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    cad = FakeCADBackend(failures=99)
+    _install(monkeypatch, tmp_path, _deps(cad=cad))
+    monkeypatch.setattr(
+        "agents.tasks.notify_project_members",
+        NotifyRecorder(error=RuntimeError("notify backend down")),
+    )
+
+    run_id = run_agent_workflow(project.pk, "impossible part", project.created_by_id)
+
+    assert AgentRun.objects.get(pk=run_id).status == AgentRunStatus.FAILED
+    assert project.versions.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# RAG wiring
+# ---------------------------------------------------------------------------
+
+
+def test_build_dependencies_injects_the_embeddings_retrieve_service():
+    from embeddings.services import retrieve as embeddings_retrieve
+
+    deps = build_dependencies()
+
+    # The Research node must receive the real RAG entry point explicitly; that
+    # function itself respects settings.RAG_ENABLED (returns [] when disabled).
+    assert deps.retrieve_fn is embeddings_retrieve
+    assert deps.max_attempts == settings.AGENT_MAX_ATTEMPTS

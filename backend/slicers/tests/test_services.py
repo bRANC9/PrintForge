@@ -6,6 +6,7 @@ import pytest
 from factories import ModelVersionFactory, ProjectFactory, UserFactory, WorkspaceFactory
 
 from files.services import LocalStorage
+from notifications.services import NotificationKind
 from printers.models import Printer, PrintJob, PrintJobStatus
 from slicers import services, tasks
 from slicers.base import SlicedResult, SlicerError
@@ -198,3 +199,84 @@ def test_celery_task_handles_missing_job():
 
 def test_task_name_is_stable():
     assert tasks.slice_print_job.name == "slicers.slice_print_job"
+
+
+# ---------------------------------------------------------------------------
+# Notifications (best-effort)
+# ---------------------------------------------------------------------------
+
+
+def test_task_notifies_owner_on_success(job, tmp_path, monkeypatch):
+    storage = _storage_with_model(job, tmp_path)
+    calls: list[dict] = []
+    monkeypatch.setattr(services, "get_backend", lambda: FakeBackend())
+    monkeypatch.setattr(services, "get_storage", lambda: storage)
+    monkeypatch.setattr(services, "notify_job_owner", lambda **kwargs: calls.append(kwargs))
+
+    tasks.slice_print_job(job.pk)
+
+    assert len(calls) == 1
+    assert calls[0]["kind"] == NotificationKind.SLICE_READY
+    assert calls[0]["job"].pk == job.pk
+    assert calls[0]["url"] == "/printers/history/"
+    assert str(job.pk) in calls[0]["message"]
+
+
+def test_task_notifies_owner_on_failure(job, tmp_path, monkeypatch):
+    storage = _storage_with_model(job, tmp_path)
+    calls: list[dict] = []
+    monkeypatch.setattr(services, "get_backend", lambda: BoomBackend())
+    monkeypatch.setattr(services, "get_storage", lambda: storage)
+    monkeypatch.setattr(services, "notify_job_owner", lambda **kwargs: calls.append(kwargs))
+
+    with pytest.raises(SlicerError):
+        tasks.slice_print_job(job.pk)
+
+    job.refresh_from_db()
+    assert job.status == PrintJobStatus.FAILED
+    assert len(calls) == 1
+    assert calls[0]["kind"] == NotificationKind.SLICE_FAILED
+    assert "slicer exploded" in calls[0]["message"]
+
+
+def test_notification_error_does_not_break_slicing(job, tmp_path, monkeypatch):
+    storage = _storage_with_model(job, tmp_path)
+
+    def boom(**kwargs):  # noqa: ANN003
+        raise RuntimeError("notification backend down")
+
+    monkeypatch.setattr(services, "get_backend", lambda: FakeBackend())
+    monkeypatch.setattr(services, "get_storage", lambda: storage)
+    monkeypatch.setattr(services, "notify_job_owner", boom)
+
+    result = tasks.slice_print_job(job.pk)
+
+    job.refresh_from_db()
+    assert result["status"] == "READY"
+    assert job.status == PrintJobStatus.READY
+    assert storage.exists(job.gcode.name)
+
+
+def test_notification_error_does_not_mask_slice_failure(job, tmp_path, monkeypatch):
+    storage = _storage_with_model(job, tmp_path)
+
+    def boom(**kwargs):  # noqa: ANN003
+        raise RuntimeError("notification backend down")
+
+    monkeypatch.setattr(services, "get_backend", lambda: BoomBackend())
+    monkeypatch.setattr(services, "get_storage", lambda: storage)
+    monkeypatch.setattr(services, "notify_job_owner", boom)
+
+    with pytest.raises(SlicerError, match="slicer exploded"):
+        tasks.slice_print_job(job.pk)
+
+    job.refresh_from_db()
+    assert job.status == PrintJobStatus.FAILED
+
+
+def test_missing_job_does_not_notify(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(services, "notify_job_owner", lambda **kwargs: calls.append(kwargs))
+
+    assert tasks.slice_print_job(999_999) == {"job_id": 999_999, "status": "missing"}
+    assert calls == []

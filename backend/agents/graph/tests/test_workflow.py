@@ -134,6 +134,36 @@ def test_research_retrieval_failure_is_best_effort():
     assert state["specification"] == DEFAULT_SPEC
 
 
+def test_research_with_rag_disabled_keeps_the_planner_spec():
+    """``RAG_ENABLED=false`` makes ``retrieve`` return ``[]`` without LLM/DB work.
+
+    The Research node must still succeed and pass the Planner specification on
+    to the CAD agent unchanged.
+    """
+    calls: list[tuple[str, int, str | None]] = []
+
+    def retrieve(query: str, limit: int = 8, company_id: str | None = None) -> list[dict]:
+        calls.append((query, limit, company_id))
+        return []  # exactly what embeddings.services.retrieve does when disabled
+
+    provider = FakeProvider(
+        plan={"specification": DEFAULT_SPEC, "needs_research": True, "research_query": "M5 sizes"},
+        enriched=ENRICHED_SPEC,
+    )
+    cad = FakeCADBackend()
+
+    state = run_workflow("x", deps=_deps(provider, cad, retrieve_fn=retrieve))
+
+    assert state["status"] == "done"
+    assert calls == [("M5 sizes", 5, None)]
+    assert state["research_used"] is False
+    assert state["research_sources"] == []
+    # The injected retrieve_fn was called, but no enrichment LLM call was made.
+    assert provider.calls == ["PlannerPlan"]
+    assert state["specification"] == DEFAULT_SPEC
+    assert cad.validated_models[0].specification == DEFAULT_SPEC
+
+
 # ---------------------------------------------------------------------------
 # Bounded retry policy
 # ---------------------------------------------------------------------------

@@ -11,11 +11,13 @@ it only enqueues :func:`run_agent_workflow`. The task:
    the storage backend and marks the run done through
    :func:`agents.services.finish_run`;
 4. on a bounded/terminal failure marks the run failed through
-   :func:`agents.services.fail_run` and returns the run id.
+   :func:`agents.services.fail_run` and returns the run id;
+5. dispatches in-app notifications through ``notifications.services``
+   (best-effort: a notification problem never changes the run outcome).
 
-The workflow dependencies (LLM provider + CAD backend) are built by
-:func:`build_dependencies`, which tests monkeypatch to inject fakes -- no live
-Ollama or OpenSCAD is ever required.
+The workflow dependencies (LLM provider + CAD backend + RAG ``retrieve``) are
+built by :func:`build_dependencies`, which tests monkeypatch to inject fakes --
+no live Ollama, OpenSCAD or pgvector is ever required.
 """
 
 from __future__ import annotations
@@ -35,7 +37,9 @@ from agents.services import fail_run, finish_run, start_run
 from designs.cad.openscad import OpenSCADBackend
 from designs.models import model_artifact_path
 from designs.services import create_next_version
+from embeddings.services import retrieve
 from files.services import get_storage
+from notifications.services import NotificationKind, notify_project_members
 from projects.models import Project
 
 __all__ = ["build_dependencies", "run_agent_workflow"]
@@ -52,12 +56,73 @@ def build_dependencies() -> WorkflowDeps:
     This is the single injection seam: tests monkeypatch ``build_dependencies``
     to return a :class:`~agents.graph.WorkflowDeps` with a fake provider and a
     fake CAD backend.
+
+    The Research node receives the real RAG entry point
+    (:func:`embeddings.services.retrieve`) explicitly. That function is guarded
+    by ``settings.RAG_ENABLED`` and by ``DB_IS_POSTGRES``: when RAG is disabled
+    it returns ``[]`` without touching a model or the database, and the Research
+    node keeps the Planner's specification untouched.
     """
     return WorkflowDeps(
         provider=get_provider(),
         cad_backend=OpenSCADBackend(),
+        retrieve_fn=retrieve,
         max_attempts=int(getattr(settings, "AGENT_MAX_ATTEMPTS", 3)),
     )
+
+
+def _failure_reason(error: str) -> str:
+    """Extract a short, human-readable reason from a structured error string."""
+    try:
+        payload = json.loads(error)
+    except (TypeError, ValueError):
+        return (error or "unknown error")[:200]
+    reason = payload.get("message") if isinstance(payload, dict) else None
+    return str(reason or "unknown error")[:200]
+
+
+def _notify_project(
+    *,
+    project: Project,
+    kind: Any,
+    message: str,
+    url: str,
+    exclude: User | None,
+) -> None:
+    """Best-effort notification fan-out.
+
+    ``notify_project_members`` is itself documented as best-effort, but the
+    agent workflow must never depend on that: problems here are swallowed and
+    only logged, so they can never change the run outcome.
+    """
+    try:
+        notify_project_members(
+            project=project,
+            kind=kind,
+            message=message,
+            url=url,
+            exclude=exclude,
+        )
+    except Exception:  # noqa: BLE001 - notifications must never break the workflow
+        logger.warning(
+            "Could not dispatch %s notification for project %s",
+            kind,
+            project.pk,
+            exc_info=True,
+        )
+
+
+def _fail_and_notify(*, run: Any, project: Project, user: User | None, error: str) -> int:
+    """Mark the run failed, notify the project members and return the run id."""
+    fail_run(run=run, error=error)
+    _notify_project(
+        project=project,
+        kind=NotificationKind.AGENT_FAILED,
+        message=f"Model generation failed: {_failure_reason(error)}",
+        url=f"/projects/{project.pk}/",
+        exclude=user,
+    )
+    return run.pk
 
 
 def _workflow_error(
@@ -166,15 +231,16 @@ def run_agent_workflow(project_id: int, prompt: str, user_id: int | None = None)
         )
     except Exception as exc:  # noqa: BLE001 - never leave a run RUNNING
         logger.exception("Agent workflow crashed for AgentRun %s", run.pk)
-        fail_run(
+        return _fail_and_notify(
             run=run,
+            project=project,
+            user=user,
             error=_workflow_error(
                 stage="workflow",
                 error_type=type(exc).__name__,
                 message=str(exc),
             ),
         )
-        return run.pk
 
     if state.get("status") == "done" and state.get("scad_source") and state.get("stl_bytes"):
         try:
@@ -187,25 +253,36 @@ def run_agent_workflow(project_id: int, prompt: str, user_id: int | None = None)
             )
         except Exception as exc:  # noqa: BLE001 - storage/DB failure must fail the run
             logger.exception("Could not persist ModelVersion for AgentRun %s", run.pk)
-            fail_run(
+            return _fail_and_notify(
                 run=run,
+                project=project,
+                user=user,
                 error=_workflow_error(
                     stage="persist",
                     error_type=type(exc).__name__,
                     message=str(exc),
                 ),
             )
-            return run.pk
 
         summary = _summarise_state(state)
         summary["version_id"] = version.pk
         summary["version"] = version.version
         finish_run(run=run, state=summary)
         logger.info("AgentRun %s produced ModelVersion %s", run.pk, version.pk)
+        # Only after the version + artifacts are stored and the run is DONE.
+        _notify_project(
+            project=project,
+            kind=NotificationKind.AGENT_DONE,
+            message=f'Model v{version.version} generated for "{project.name}".',
+            url=f"/projects/{project_id}/",
+            exclude=user,
+        )
         return run.pk
 
-    fail_run(
+    return _fail_and_notify(
         run=run,
+        project=project,
+        user=user,
         error=state.get("error")
         or _workflow_error(
             stage="workflow",
@@ -213,4 +290,3 @@ def run_agent_workflow(project_id: int, prompt: str, user_id: int | None = None)
             message="The workflow finished without a valid model.",
         ),
     )
-    return run.pk
