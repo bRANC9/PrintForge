@@ -73,8 +73,11 @@ docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
 ```
 
 For the TrueNAS SCALE **Custom App UI**, paste
-[`docker-compose.truenas.yml`](./docker-compose.truenas.yml) instead — a
-self-contained YAML (no build, no env-file, no relative mounts, literal values).
+[`docker-compose.truenas.yml`](./docker-compose.truenas.yml) instead — a minimal
+self-contained YAML (YAML anchors keep each value in one place; no build, no
+env-file, no relative mounts, no interpolation). Edit five values: the DB
+password, Django secret key, allowed hosts, `OLLAMA_BASE_URL` (defaults to the
+Docker host — change it if Ollama runs elsewhere) and the `/mnt/<POOL>/...` paths.
 
 `docker-compose.prod.yml` is hardened for production: `DJANGO_DEBUG` defaults to
 `false`, and the HTTPS flags (`DJANGO_SECURE_SSL_REDIRECT`,
@@ -91,8 +94,9 @@ the `worker` (Docker-out-of-Docker). This needs three things, all wired up:
 the app image ships the Docker CLI, `worker` mounts `/var/run/docker.sock`, and
 a scratch directory is bind-mounted at an identical absolute path with
 `TMPDIR` pointed at it (`SANDBOX_WORK_DIR`, e.g.
-`/mnt/<pool>/apps/printforge/scratch` on TrueNAS). The socket is the main
-security trade-off; see section 9 of the runbook.
+`/mnt/<pool>/apps/printforge/scratch` on TrueNAS). After install, set
+**CAD mód = docker** and **Slicing mód = docker** on the app's Settings page. The
+socket is the main security trade-off; see section 9 of the runbook.
 
 See [`docs/truenas-deploy.md`](docs/truenas-deploy.md) for the full runbook
 (pre-flight, dataset layout, `.env`, verification, reverse-proxy/HTTPS flags,

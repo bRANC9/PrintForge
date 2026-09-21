@@ -1,43 +1,26 @@
 # ===========================================================================
 # PrintForge - TrueNAS SCALE 25.10 "Custom App" (paste this YAML into the UI)
 # ===========================================================================
+# EDIT (one place each):
+#   1. POSTGRES_PASSWORD    (db)  -> strong password
+#   2. DJANGO_SECRET_KEY    (web) -> python3 -c "import secrets;print(secrets.token_urlsafe(64))"
+#   3. DJANGO_ALLOWED_HOSTS (web) -> NAS hostname / IP
+#   4. OLLAMA_BASE_URL      (web) -> Ollama host (default: the Docker host)
+#   5. /mnt/<POOL>/... paths      -> your pool dataset
 #
-# Self-contained and paste-ready: no image build, no env-file support, no
-# relative host mounts and no variable interpolation. All values are literal,
-# so the TrueNAS UI can consume it as-is. Every value you MUST change is marked
-# with "# EDIT:".
+# After install, set on the Settings page: CAD mod = docker, Slicing mod = docker
 #
-# BEFORE INSTALLING, edit:
-#   1. every "/mnt/<POOL>/..." path          -> your pool + dataset
-#   2. CHANGE_ME                             -> ONE strong password, used in
-#                                               both POSTGRES_PASSWORD and
-#                                               DATABASE_URL (keep them equal)
-#   3. CHANGE_ME (DJANGO_SECRET_KEY)         -> a long random string, e.g.
-#                                               python3 -c "import secrets;print(secrets.token_urlsafe(64))"
-#   4. DJANGO_ALLOWED_HOSTS                  -> the NAS hostname / IP
-#   5. DJANGO_CSRF_TRUSTED_ORIGINS           -> only when HTTPS is in front
-#   6. the published port, if 8080 is taken
-#
-# Notes:
-#   * The pgvector "vector" extension is created by the Django migration
-#     backend/embeddings/migrations/0001_enable_vector_extension.py, so the
-#     docker/db/init SQL mount is NOT needed in this file.
-#   * The entrypoint waits for the database and runs migrations on start.
-#   * Watchtower is already running on the host and updates these containers
-#     when a new ghcr.io/branc9/printforge:latest is published. Do NOT add a
-#     Watchtower service here.
-#   * Internal Ollama is an optional commented block at the bottom.
-#   * Known limitation: the CAD / slicing workers cannot run from this image
-#     yet (no OpenSCAD / PrusaSlicer, sandbox images not published). The UI/API
-#     work; model generation and slicing fail with a notification.
+# pgvector "vector" extension comes from the Django migration (no init SQL mount).
+# Watchtower (already on the host) updates these containers; do NOT add one here.
+# Internal Ollama is an optional commented block at the bottom.
 
 services:
   db:
     image: pgvector/pgvector:pg16
-    environment:
+    environment: &db-env
       POSTGRES_DB: printforge
       POSTGRES_USER: printforge
-      # EDIT: one strong password (must equal the password in DATABASE_URL below)
+      # EDIT: a strong password (web/worker get it through the anchor)
       POSTGRES_PASSWORD: CHANGE_ME
     volumes:
       # EDIT: absolute path on your pool
@@ -65,44 +48,20 @@ services:
   web:
     image: ghcr.io/branc9/printforge:latest
     command: ["/app/docker/django/entrypoint.sh", "web"]
-    environment:
-      DJANGO_DEBUG: "false"
+    environment: &app-env
+      <<: *db-env
       # EDIT: long random string (see the header for the generator command)
       DJANGO_SECRET_KEY: CHANGE_ME
-      # EDIT: your NAS hostname/IP (keep localhost for local checks)
+      # EDIT: your NAS hostname / IP (keep localhost for local checks)
       DJANGO_ALLOWED_HOSTS: CHANGE_ME,localhost
-      # EDIT: only behind HTTPS, e.g. "https://printforge.example.com"; else ""
-      DJANGO_CSRF_TRUSTED_ORIGINS: ""
-      # EDIT: the password must equal POSTGRES_PASSWORD above (single password)
-      DATABASE_URL: postgres://printforge:CHANGE_ME@db:5432/printforge
-      REDIS_URL: redis://redis:6379/0
-      # external Ollama; internal alternative: http://ollama:11434
+      # EDIT: the Ollama host. Default reaches Ollama on the Docker host; if
+      # Ollama runs on another machine, put its address here. For an internal
+      # Ollama container use http://ollama:11434 (see the block at the bottom).
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-      OLLAMA_MODEL: "qwen3-coder:30b"
-      EMBEDDING_MODEL: "bge-m3"
-      EMBEDDING_DIM: "1024"
-      RAG_ENABLED: "false"
-      STORAGE_BACKEND: local
       MEDIA_ROOT: /data/media
-      # EDIT (optional): gunicorn tuning. Lower GUNICORN_WORKERS on a small NAS,
-      # raise GUNICORN_TIMEOUT if a real request is slow. See docs/truenas-deploy.md.
-      GUNICORN_WORKERS: "2"
-      GUNICORN_THREADS: "4"
-      GUNICORN_WORKER_CLASS: gthread
-      GUNICORN_TIMEOUT: "60"
-      GUNICORN_GRACEFUL_TIMEOUT: "30"
-      GUNICORN_KEEPALIVE: "5"
-      GUNICORN_MAX_REQUESTS: "1000"
-      GUNICORN_MAX_REQUESTS_JITTER: "100"
-      GUNICORN_ACCESS_LOG: "false"
-      GUNICORN_LOG_LEVEL: info
-      # CAD / slicing sandbox (Docker-out-of-Docker); images are pulled on demand.
-      OPENSCAD_MODE: docker
-      OPENSCAD_IMAGE: ghcr.io/branc9/printforge-openscad:latest
-      SLICER_MODE: docker
-      SLICER_IMAGE: ghcr.io/branc9/printforge-prusaslicer:latest
-      # The PrusaSlicer backend reads PRUSASLICER_IMAGE; keep in sync with SLICER_IMAGE.
-      PRUSASLICER_IMAGE: ghcr.io/branc9/printforge-prusaslicer:latest
+    # Resolve the Docker host by name on Linux (TrueNAS); used by OLLAMA_BASE_URL.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # EDIT: absolute path on your pool
       - /mnt/<POOL>/apps/printforge/media:/data/media
@@ -116,10 +75,9 @@ services:
         condition: service_healthy
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\"",
-        ]
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')"
       interval: 15s
       timeout: 5s
       retries: 5
@@ -132,58 +90,22 @@ services:
     image: ghcr.io/branc9/printforge:latest
     command: ["/app/docker/django/entrypoint.sh", "worker"]
     environment:
-      DJANGO_DEBUG: "false"
-      # EDIT: same value as in web
-      DJANGO_SECRET_KEY: CHANGE_ME
-      # EDIT: same value as in web
-      DJANGO_ALLOWED_HOSTS: CHANGE_ME,localhost
-      # EDIT: same value as in web
-      DJANGO_CSRF_TRUSTED_ORIGINS: ""
-      # EDIT: same value as in web (must equal POSTGRES_PASSWORD above)
-      DATABASE_URL: postgres://printforge:CHANGE_ME@db:5432/printforge
-      REDIS_URL: redis://redis:6379/0
-      # external Ollama; internal alternative: http://ollama:11434
-      OLLAMA_BASE_URL: http://host.docker.internal:11434
-      OLLAMA_MODEL: "qwen3-coder:30b"
-      EMBEDDING_MODEL: "bge-m3"
-      EMBEDDING_DIM: "1024"
-      RAG_ENABLED: "false"
-      STORAGE_BACKEND: local
-      MEDIA_ROOT: /data/media
-      # EDIT (optional): gunicorn tuning. Lower GUNICORN_WORKERS on a small NAS,
-      # raise GUNICORN_TIMEOUT if a real request is slow. See docs/truenas-deploy.md.
-      GUNICORN_WORKERS: "2"
-      GUNICORN_THREADS: "4"
-      GUNICORN_WORKER_CLASS: gthread
-      GUNICORN_TIMEOUT: "60"
-      GUNICORN_GRACEFUL_TIMEOUT: "30"
-      GUNICORN_KEEPALIVE: "5"
-      GUNICORN_MAX_REQUESTS: "1000"
-      GUNICORN_MAX_REQUESTS_JITTER: "100"
-      GUNICORN_ACCESS_LOG: "false"
-      GUNICORN_LOG_LEVEL: info
-      # CAD / slicing sandbox (Docker-out-of-Docker); images are pulled on demand.
-      OPENSCAD_MODE: docker
-      OPENSCAD_IMAGE: ghcr.io/branc9/printforge-openscad:latest
-      SLICER_MODE: docker
-      SLICER_IMAGE: ghcr.io/branc9/printforge-prusaslicer:latest
-      # The PrusaSlicer backend reads PRUSASLICER_IMAGE; keep in sync with SLICER_IMAGE.
-      PRUSASLICER_IMAGE: ghcr.io/branc9/printforge-prusaslicer:latest
-      # EDIT: scratch dir for Docker-out-of-Docker jobs. The host daemon resolves
-      # sandbox -v paths on the host, so this must be the SAME absolute path as
-      # the volume below. Create the dataset (see docs/truenas-deploy.md).
+      <<: *app-env
+      # EDIT: scratch dir for Docker-out-of-Docker jobs; must be the SAME
+      # absolute path as the volume below (see docs/truenas-deploy.md)
       TMPDIR: /mnt/<POOL>/apps/printforge/scratch
+    # Resolve the Docker host by name on Linux (TrueNAS); used by OLLAMA_BASE_URL.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # EDIT: absolute path on your pool
       - /mnt/<POOL>/apps/printforge/media:/data/media
       # EDIT: scratch dir mounted at the IDENTICAL absolute path (host == container)
-      # so the sandbox launched via the socket can see the worker's job dirs.
       - /mnt/<POOL>/apps/printforge/scratch:/mnt/<POOL>/apps/printforge/scratch
       # SECURITY: mounting the Docker socket gives this container control of the
       # host Docker daemon (Docker-out-of-Docker). It is REQUIRED so the CAD/slicer
       # workers can launch ephemeral sandbox containers, and it is the main
-      # security trade-off of this deployment: any process in this container can
-      # start/stop/inspect ANY container on the host.
+      # security trade-off of this deployment.
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       db:
@@ -195,13 +117,10 @@ services:
     restart: unless-stopped
 
 # ===========================================================================
-# OPTIONAL: internal Ollama (only if Ollama runs on this same NAS)
-#
-# To enable:
-#   1. delete the leading "# " (hash + space) from every line below
-#   2. set OLLAMA_BASE_URL to http://ollama:11434 in BOTH web and worker above
-#   3. for an NVIDIA GPU, also delete the "# " on the inner deploy lines and
-#      make sure the NVIDIA container toolkit is configured for Docker
+# OPTIONAL: internal Ollama (only if it runs on this NAS). To enable: delete the
+# leading "# " below and change OLLAMA_BASE_URL in the web environment above to
+# http://ollama:11434 (worker inherits it). For an NVIDIA GPU also uncomment the
+# deploy block.
 # ===========================================================================
 #
 #   ollama:

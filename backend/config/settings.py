@@ -5,6 +5,7 @@ safe for local development only.
 """
 
 from pathlib import Path
+from urllib.parse import quote
 
 import environ
 
@@ -19,10 +20,34 @@ env = environ.Env(
 )
 environ.Env.read_env(REPO_ROOT / ".env")
 
-# Parse the database URL up front. Some apps depend on PostgreSQL-only features
-# (the `embeddings` app uses pgvector) and must only be registered when the
-# default database is PostgreSQL. See the Applications section below.
-_DATABASE_CONFIG = env.db_url("DATABASE_URL", default="sqlite:///" + str(BASE_DIR / "db.sqlite3"))
+
+def _fallback_database_url() -> str:
+    """Build the default DB URL when ``DATABASE_URL`` is not set.
+
+    PostgreSQL is derived from the standard ``POSTGRES_*`` variables only when
+    ``POSTGRES_PASSWORD`` is explicitly provided, so the password is written
+    once (e.g. in the TrueNAS compose file) and reused by ``web``/``worker``.
+    The password is URL-encoded so special characters do not break the URL.
+    With no ``POSTGRES_PASSWORD`` (local dev / tests) this keeps the sqlite
+    fallback unchanged.
+    """
+    password = env.str("POSTGRES_PASSWORD", default="")
+    if not password:
+        return "sqlite:///" + str(BASE_DIR / "db.sqlite3")
+
+    user = quote(env.str("POSTGRES_USER", default="printforge"), safe="")
+    host = env.str("POSTGRES_HOST", default="db")
+    port = env.int("POSTGRES_PORT", default=5432)
+    name = env.str("POSTGRES_DB", default="printforge")
+    return f"postgres://{user}:{quote(password, safe='')}@{host}:{port}/{name}"
+
+
+# Parse the database URL up front. ``DATABASE_URL`` wins when set; otherwise a
+# Postgres URL is derived from ``POSTGRES_*`` (or sqlite for local dev). Some
+# apps depend on PostgreSQL-only features (the `embeddings` app uses pgvector)
+# and must only be registered when the default database is PostgreSQL. See the
+# Applications section below.
+_DATABASE_CONFIG = env.db_url("DATABASE_URL", default=_fallback_database_url())
 DB_IS_POSTGRES = _DATABASE_CONFIG["ENGINE"] == "django.db.backends.postgresql"
 
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="insecure-dev-key-change-me")

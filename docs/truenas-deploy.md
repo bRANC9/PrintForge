@@ -87,39 +87,55 @@ Name the app `printforge`, then paste the contents of
 
 ### A3. Edit the marked values
 
-Every value you must change carries a `# EDIT:` comment. At minimum:
+The YAML uses plain anchors so each value is written **once** (`db` holds the DB
+credentials via `&db-env`; `web` holds the shared app env via `&app-env`, which
+`worker` inherits). Only these `# EDIT:` values need changing:
 
-| `# EDIT:` value | What to set |
-| --- | --- |
-| `POSTGRES_PASSWORD` | One strong password |
-| `DATABASE_URL` password | **The same password** (single password, two places) |
-| `DJANGO_SECRET_KEY` (web + worker) | `python3 -c "import secrets;print(secrets.token_urlsafe(64))"` |
-| `DJANGO_ALLOWED_HOSTS` (web + worker) | Your NAS hostname / IP |
-| `DJANGO_CSRF_TRUSTED_ORIGINS` | Only behind HTTPS, else leave `""` |
-| `/mnt/<POOL>/...` (pg, redis, media) | Your pool dataset paths |
-| `"8080:8000"` | A different host port if 8080 is taken |
+| Value | Where | What to set |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` | `db` | A strong password (web/worker inherit it) |
+| `DJANGO_SECRET_KEY` | `web` | `python3 -c "import secrets;print(secrets.token_urlsafe(64))"` |
+| `DJANGO_ALLOWED_HOSTS` | `web` | Your NAS hostname / IP |
+| `OLLAMA_BASE_URL` | `web` | Ollama host. Default reaches Ollama on the Docker host; change it if Ollama runs elsewhere (`http://ollama:11434` for internal Ollama) |
+| `/mnt/<POOL>/...` | `pg`, `redis`, `media`, `scratch` | Your pool dataset paths |
+| `"8080:8000"` | `web` | A different host port if 8080 is taken (optional) |
 
-Keep `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS` and `DJANGO_CSRF_TRUSTED_ORIGINS`
-**identical** in the `web` and `worker` blocks.
+`DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS` and `OLLAMA_BASE_URL` are edited in
+the `web` block only — `worker` inherits them through the anchor (the LLM calls
+run in the Celery worker).
 
 ### A4. Storage mapping in the UI
 
-After pasting, check the app's **Storage** section shows the three host-path
-mounts. If the UI asks you to add them, use these container paths:
+After pasting, check the app's **Storage** section shows the host-path mounts. If
+the UI asks you to add them, use these container paths:
 
 | Host path (your pool) | Container path |
 | --- | --- |
 | `/mnt/<POOL>/apps/printforge/pg` | `/var/lib/postgresql/data` |
 | `/mnt/<POOL>/apps/printforge/redis` | `/data` |
 | `/mnt/<POOL>/apps/printforge/media` | `/data/media` |
+| `/mnt/<POOL>/apps/printforge/scratch` | `/mnt/<POOL>/apps/printforge/scratch` (identical path) |
 
-If the database fails to initialise on first start, set the `pg` dataset owner to
-the postgres user (UID/GID `999`) so the container can write to it.
+The `scratch` mount must use the **identical absolute path** on both sides (that
+is what lets the sandbox, launched via the Docker socket, see the worker's job
+dirs). If the database fails to initialise on first start, set the `pg` dataset
+owner to the postgres user (UID/GID `999`) so the container can write to it.
 
-### A5. Install and create the admin user
+### A5. Install, set the sandbox modes, create the admin user
 
 Click **Install**. The entrypoint waits for the database and runs migrations on
-start. Then create the superuser:
+start.
+
+Then open the app's **Settings** page once and set:
+
+- **CAD mód = docker**
+- **Slicing mód = docker**
+
+This switches the CAD/slicing workers to the published sandbox images — no env
+change or restart needed. Ollama is already pointed at the Docker host via
+`OLLAMA_BASE_URL` (A3); change it there if Ollama runs elsewhere.
+
+Finally create the superuser:
 
 - **UI:** open the app → `web` container → three-dot menu → **Shell**, then run:
 
@@ -252,7 +268,8 @@ Terminate TLS at a reverse proxy (Caddy / Nginx / Traefik) or a Cloudflare
 Tunnel, forwarding to `web:8000` (or `http://<truenas-host>:8080`). The proxy
 must send `X-Forwarded-Proto: https` and the correct `Host` header.
 
-Add these to the `web` **and** `worker` environment:
+Add these to the `web` environment (in the Custom App YAML `worker` inherits
+them through the `&app-env` anchor; in Path B put them in `.env`):
 
 ```env
 DJANGO_ALLOWED_HOSTS=printforge.example.com
@@ -265,8 +282,8 @@ DJANGO_SECURE_PROXY_SSL_HEADER=true
 DJANGO_SECURE_HSTS_SECONDS=3600        # raise to 31536000 once confirmed
 ```
 
-- **Path A:** add them to the `environment:` block of `web` and `worker` in the
-  pasted YAML, then save/update the app.
+- **Path A:** add them to the `environment:` block of `web` in the pasted YAML,
+  then save/update the app.
 - **Path B:** add them to `.env`, then
   `docker compose --env-file ../.env -f docker-compose.prod.yml up -d`.
 
@@ -404,6 +421,15 @@ Everything the sandbox needs is baked into the images and the compose files:
   - **Path B (SSH):** set `SANDBOX_WORK_DIR=/mnt/<POOL>/apps/printforge/scratch`
     in `.env`; the compose file mounts it and sets `TMPDIR` from it.
 - **Docker socket** — mounted into `worker` only (see the security note above).
+- **Ollama URL** — `web` and `worker` get
+  `OLLAMA_BASE_URL=http://host.docker.internal:11434` (through the anchor) plus
+  `extra_hosts: host.docker.internal:host-gateway`, so the LLM calls made by the
+  Celery worker reach Ollama running on the Docker host. Change the value if
+  Ollama runs on another machine, or to `http://ollama:11434` for internal Ollama.
+- **Mode switch** — the backend defaults to `local`. Set **CAD mód = docker** and
+  **Slicing mód = docker** on the app's Settings page after install (see A5). The
+  sandbox image names already default to the published GHCR images, so no env is
+  needed for them.
 
 If a model/slice fails, check in this order:
 
@@ -465,8 +491,9 @@ dmesg | grep -i 'oom\|killed process' | tail
 
 **Apply:**
 
-- **Path A (Custom App):** edit the `GUNICORN_*` values in the `web` environment
-  of the pasted YAML, then save/update the app.
+- **Path A (Custom App):** the YAML no longer sets `GUNICORN_*` (the entrypoint
+  defaults apply). To override one, add it to the `web` environment in the pasted
+  YAML (worker inherits it through the anchor), then save/update the app.
 - **Path B (SSH):** edit them in `.env`, then
   `docker compose --env-file ../.env -f docker-compose.prod.yml up -d`.
 
