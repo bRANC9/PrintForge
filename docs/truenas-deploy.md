@@ -338,6 +338,62 @@ This is expected for the current release; the CAD and slicing workers will get
 their own image builds and Compose services in a later phase. Do not report the
 model-generation/slicing failures as a deployment bug.
 
+## 10. If gunicorn workers time out
+
+Symptom (from the `web` container logs):
+
+```text
+[CRITICAL] WORKER TIMEOUT (pid:...)
+Error handling request (no URI read)
+Worker (pid:...) was sent SIGKILL! Perhaps out of memory?
+```
+
+**What it means.** The worker was blocked in `recv()` waiting for bytes on a
+connection that never sent a request (an idle / keep-alive / health-probe
+connection) and hit gunicorn's `--timeout`; gunicorn then kills the stuck worker
+and restarts it. The *"Perhaps out of memory?"* text is gunicorn's **generic**
+message after a timeout — it does **not** by itself prove OOM. The defaults now
+use the `gthread` worker class with `--timeout 60` and `--keep-alive 5`, which
+tolerates this pattern.
+
+**Confirm whether it is a real OOM** (memory pressure, not idle connections):
+
+```bash
+# did the kernel kill it for memory?
+docker inspect <web-container> --format '{{.State.OOMKilled}}'   # true = real OOM
+docker inspect <web-container> --format '{{.State.ExitCode}}'    # 137 = SIGKILL
+
+# live memory of each container / the host
+docker stats --no-stream
+free -h
+dmesg | grep -i 'oom\|killed process' | tail
+```
+
+**Knobs to turn** (read by the entrypoint, no rebuild needed):
+
+| Variable | Default | When to change |
+| --- | --- | --- |
+| `GUNICORN_WORKERS` | `2` | Lower to `1` on a small NAS — each worker is a full Django process |
+| `GUNICORN_THREADS` | `4` | Concurrency per worker; raise before adding workers |
+| `GUNICORN_TIMEOUT` | `60` | Raise (e.g. `120`) if a real request is slow; keep it below the reverse-proxy timeout |
+| `GUNICORN_GRACEFUL_TIMEOUT` | `30` | Time allowed for a worker to finish on reload |
+| `GUNICORN_KEEPALIVE` | `5` | Seconds an idle keep-alive connection is held |
+| `GUNICORN_MAX_REQUESTS` / `_JITTER` | `1000` / `100` | Recycle workers to bound slow leaks |
+| `GUNICORN_ACCESS_LOG` | `false` | Set `true` to log every request — makes the next incident diagnosable |
+| `GUNICORN_WORKER_CLASS` | `gthread` | Leave as `gthread`; `sync` is what caused the timeouts |
+| `GUNICORN_LOG_LEVEL` | `info` | `debug` for more detail |
+
+**Apply:**
+
+- **Path A (Custom App):** edit the `GUNICORN_*` values in the `web` environment
+  of the pasted YAML, then save/update the app.
+- **Path B (SSH):** edit them in `.env`, then
+  `docker compose --env-file ../.env -f docker-compose.prod.yml up -d`.
+
+> If you run a reverse proxy or uptime monitor, make sure its read timeout is
+> **larger** than `GUNICORN_TIMEOUT`, otherwise the proxy drops slow requests
+> even while gunicorn is still working on them.
+
 ## Notes
 
 - Multi-arch is **not** enabled; the image is `linux/amd64` only, matching

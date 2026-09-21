@@ -27,4 +27,10 @@ WORKDIR /app/backend
 
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# Fallback only: the compose services run docker/django/entrypoint.sh, which
+# builds the gunicorn command from the GUNICORN_* env vars. Keep these values in
+# sync with the entrypoint defaults.
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", \
+     "--workers", "2", "--threads", "4", "--worker-class", "gthread", \
+     "--timeout", "60", "--graceful-timeout", "30", "--keep-alive", "5", \
+     "--max-requests", "1000", "--max-requests-jitter", "100", "--log-level", "info"]

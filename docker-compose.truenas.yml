@@ -84,6 +84,18 @@ services:
       RAG_ENABLED: "false"
       STORAGE_BACKEND: local
       MEDIA_ROOT: /data/media
+      # EDIT (optional): gunicorn tuning. Lower GUNICORN_WORKERS on a small NAS,
+      # raise GUNICORN_TIMEOUT if a real request is slow. See docs/truenas-deploy.md.
+      GUNICORN_WORKERS: "2"
+      GUNICORN_THREADS: "4"
+      GUNICORN_WORKER_CLASS: gthread
+      GUNICORN_TIMEOUT: "60"
+      GUNICORN_GRACEFUL_TIMEOUT: "30"
+      GUNICORN_KEEPALIVE: "5"
+      GUNICORN_MAX_REQUESTS: "1000"
+      GUNICORN_MAX_REQUESTS_JITTER: "100"
+      GUNICORN_ACCESS_LOG: "false"
+      GUNICORN_LOG_LEVEL: info
     volumes:
       # EDIT: absolute path on your pool
       - /mnt/<POOL>/apps/printforge/media:/data/media
@@ -131,6 +143,18 @@ services:
       RAG_ENABLED: "false"
       STORAGE_BACKEND: local
       MEDIA_ROOT: /data/media
+      # EDIT (optional): gunicorn tuning. Lower GUNICORN_WORKERS on a small NAS,
+      # raise GUNICORN_TIMEOUT if a real request is slow. See docs/truenas-deploy.md.
+      GUNICORN_WORKERS: "2"
+      GUNICORN_THREADS: "4"
+      GUNICORN_WORKER_CLASS: gthread
+      GUNICORN_TIMEOUT: "60"
+      GUNICORN_GRACEFUL_TIMEOUT: "30"
+      GUNICORN_KEEPALIVE: "5"
+      GUNICORN_MAX_REQUESTS: "1000"
+      GUNICORN_MAX_REQUESTS_JITTER: "100"
+      GUNICORN_ACCESS_LOG: "false"
+      GUNICORN_LOG_LEVEL: info
     volumes:
       # EDIT: absolute path on your pool
       - /mnt/<POOL>/apps/printforge/media:/data/media
