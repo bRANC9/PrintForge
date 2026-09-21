@@ -1,0 +1,86 @@
+"""CAD agent (terv.md 6., 7. fejezet).
+
+Input: the validated structured specification (plus, indirectly, whatever the
+Research agent enriched). Output: **OpenSCAD source**.
+
+Boundary (terv.md 7. fejezet): the CAD agent goes through
+``CADBackend.generate(specification)`` and returns OpenSCAD source only. It
+never builds a mesh/STL itself -- meshing is the OpenSCAD CLI's job and is
+triggered by the Validator node through ``CADBackend.export``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from designs.cad.base import CADBackend
+
+from .state import WorkflowState, append_history, failure_state
+
+__all__ = ["SpecReviser", "make_cad_node"]
+
+#: Optional retry hook: given ``(spec, validation_errors, attempt)`` it may
+#: return an adjusted specification for the next CAD attempt. ``None`` means
+#: the same specification is retried unchanged.
+SpecReviser = Callable[[dict[str, Any], list[str], int], dict[str, Any]]
+
+
+def make_cad_node(
+    *,
+    cad_backend: CADBackend,
+    reviser: SpecReviser | None = None,
+) -> Callable[[WorkflowState], dict[str, Any]]:
+    """Build the ``cad`` graph node bound to *cad_backend*.
+
+    Args:
+        cad_backend: Injected backend (``OpenSCADBackend`` in production, a
+            fake in tests). ``generate`` returns OpenSCAD source.
+        reviser: Optional hook used on a retry after a validation failure; it
+            receives the structured validator errors so a smarter CAD agent can
+            adjust the specification instead of re-emitting the same source.
+    """
+
+    def cad_node(state: WorkflowState) -> dict[str, Any]:
+        attempt = int(state.get("attempt", 0)) + 1
+        specification = dict(state.get("specification") or {})
+
+        validation = state.get("validation") or {}
+        validation_errors = [str(error) for error in validation.get("errors") or []]
+        if reviser is not None and validation_errors:
+            try:
+                revised = reviser(specification, validation_errors, attempt)
+            except Exception as exc:  # noqa: BLE001 - a broken reviser must not kill the run
+                revised = None
+                revision_note = f"reviser failed ({type(exc).__name__})"
+            else:
+                revision_note = "reviser applied" if revised else "reviser skipped"
+            if isinstance(revised, dict) and revised:
+                specification = revised
+        else:
+            revision_note = None
+
+        try:
+            # OpenSCAD source only -- never a mesh/STL.
+            scad_source = cad_backend.generate(specification)
+        except Exception as exc:  # noqa: BLE001 - any backend failure is terminal for CAD
+            return failure_state(
+                state,
+                stage="cad",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
+
+        entry = f"cad: generated OpenSCAD source (attempt {attempt})"
+        if revision_note:
+            entry = f"{entry}, {revision_note}"
+        return {
+            "specification": specification,
+            "scad_source": scad_source,
+            "attempt": attempt,
+            "status": "generated",
+            "error": None,
+            "history": append_history(state, entry),
+        }
+
+    return cad_node
