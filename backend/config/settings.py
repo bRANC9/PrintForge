@@ -76,6 +76,7 @@ LOCAL_APPS = [
     "printers",
     "slicers",
     "notifications",
+    "configuration",
     "api",
     "mcp",
 ]
