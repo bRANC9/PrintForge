@@ -71,9 +71,24 @@ docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
 ```
 
-See [`docs/truenas-deploy.md`](docs/truenas-deploy.md) for the full flow
-(dataset layout, `.env`, Watchtower behaviour, rollback via a pinned
-`PRINTFORGE_IMAGE`).
+`docker-compose.prod.yml` is hardened for production: `DJANGO_DEBUG` defaults to
+`false`, and the HTTPS flags (`DJANGO_SECURE_SSL_REDIRECT`,
+`DJANGO_SESSION_COOKIE_SECURE`, `DJANGO_CSRF_COOKIE_SECURE`,
+`DJANGO_SECURE_HSTS_SECONDS`, `DJANGO_SECURE_PROXY_SSL_HEADER`) default to off.
+Before the first `up`, set `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`,
+`DJANGO_ALLOWED_HOSTS` (and `DJANGO_CSRF_TRUSTED_ORIGINS` when behind TLS) — see
+the `.env.example` "PRODUCTION (TrueNAS)" block. The repo is private, so the
+GHCR package is private by default: either make it public or run
+`docker login ghcr.io` on the NAS (this also covers Watchtower's pulls).
+
+See [`docs/truenas-deploy.md`](docs/truenas-deploy.md) for the full runbook
+(pre-flight, dataset layout, `.env`, verification, reverse-proxy/HTTPS flags,
+Watchtower behaviour, rollback via a pinned `PRINTFORGE_IMAGE`).
+
+> Known limitation: the published image is the Django app only. OpenSCAD /
+> PrusaSlicer are not included and the sandbox images are not published yet, so
+> model generation and slicing fail (with a notification). The UI/API, auth and
+> RAG work.
 
 ## Local development (uv)
 

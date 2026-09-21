@@ -4,6 +4,15 @@
 #   External Ollama:  docker compose -f docker-compose.prod.yml up -d
 #   Internal Ollama:  docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
 #
+# REQUIRED in .env before the first `up` (this file ships no production secrets):
+#   DJANGO_SECRET_KEY            long random string
+#   POSTGRES_PASSWORD            strong password
+#   DJANGO_ALLOWED_HOSTS         NAS hostname/IP, comma-separated
+#   DJANGO_CSRF_TRUSTED_ORIGINS  https://<your-domain> when behind TLS
+#
+# The file still resolves without a .env (safe, non-secret defaults) so CI can
+# run `docker compose config`; those defaults are NOT safe for production.
+#
 # Same services, ports and env as docker-compose.yml, but web/worker are PULLED
 # from GHCR instead of built locally, and carry the Watchtower enable label so
 # the already-running Watchtower recreates them when a new :latest is published.
@@ -17,10 +26,17 @@
 name: printforge
 
 x-app-env: &app-env
-    DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+    DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
     DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-insecure-dev-key-change-me}
     DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
     DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-}
+    # HTTPS / reverse-proxy hardening. All off by default; enable them only when
+    # TLS actually terminates in front of the app (see docs/truenas-deploy.md).
+    DJANGO_SECURE_SSL_REDIRECT: ${DJANGO_SECURE_SSL_REDIRECT:-false}
+    DJANGO_SESSION_COOKIE_SECURE: ${DJANGO_SESSION_COOKIE_SECURE:-false}
+    DJANGO_CSRF_COOKIE_SECURE: ${DJANGO_CSRF_COOKIE_SECURE:-false}
+    DJANGO_SECURE_HSTS_SECONDS: ${DJANGO_SECURE_HSTS_SECONDS:-0}
+    DJANGO_SECURE_PROXY_SSL_HEADER: ${DJANGO_SECURE_PROXY_SSL_HEADER:-false}
     DATABASE_URL: ${DATABASE_URL:-postgres://printforge:printforge@db:5432/printforge}
     REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
