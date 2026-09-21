@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# uv
+.uv/
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
+/media/
+/backend/staticfiles/
+/backend/media/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local data (docker volumes on TrueNAS / dev)
+/data/
+
+# Test / coverage / lint
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Windows alternate data streams
+*:Zone.Identifier

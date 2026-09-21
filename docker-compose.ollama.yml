@@ -1,0 +1,30 @@
+# Override: run Ollama as an internal service.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
+#
+# On TrueNAS SCALE with an NVIDIA GPU, uncomment the `deploy` block below and
+# make sure the NVIDIA container toolkit is configured for Docker.
+
+name: printforge
+
+services:
+    ollama:
+        image: ollama/ollama:latest
+        volumes:
+            - ${DATA_ROOT:-./data}/ollama:/root/.ollama
+        restart: unless-stopped
+        # deploy:
+        #     resources:
+        #         reservations:
+        #             devices:
+        #                 - driver: nvidia
+        #                   count: all
+        #                   capabilities: [gpu]
+
+    web:
+        environment:
+            OLLAMA_BASE_URL: http://ollama:11434
+
+    worker:
+        environment:
+            OLLAMA_BASE_URL: http://ollama:11434

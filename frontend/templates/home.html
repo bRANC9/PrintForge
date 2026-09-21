@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}PrintForge – Kezdőlap{% endblock %}
+{% block content %}
+    <h1>PrintForge</h1>
+    <p>Self-hosted AI 3D print hub. Prompt → parametrikus CAD → STL → böngészős preview.</p>
+    <p id="api-status" data-health-url="{% url 'api-health' %}">API állapot: ismeretlen</p>
+{% endblock %}

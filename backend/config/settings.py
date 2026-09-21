@@ -1,0 +1,183 @@
+"""Django settings for PrintForge.
+
+Values come from environment variables (see .env.example). The defaults are
+safe for local development only.
+"""
+
+from pathlib import Path
+
+import environ
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+REPO_ROOT = BASE_DIR.parent
+
+env = environ.Env(
+    DJANGO_DEBUG=(bool, False),
+    DJANGO_ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
+    RAG_ENABLED=(bool, False),
+    EMBEDDING_DIM=(int, 1024),
+)
+environ.Env.read_env(REPO_ROOT / ".env")
+
+SECRET_KEY = env("DJANGO_SECRET_KEY", default="insecure-dev-key-change-me")
+DEBUG = env("DJANGO_DEBUG")
+ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
+CSRF_TRUSTED_ORIGINS = env.list("DJANGO_CSRF_TRUSTED_ORIGINS", default=[])
+
+# ---------------------------------------------------------------------------
+# Applications
+# ---------------------------------------------------------------------------
+
+DJANGO_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "django.contrib.postgres",
+]
+
+THIRD_PARTY_APPS = [
+    "rest_framework",
+]
+
+LOCAL_APPS = [
+    "accounts",
+    "workspaces",
+    "projects",
+    "designs",
+    "agents",
+    "files",
+    "printers",
+    "slicers",
+    "api",
+    "mcp",
+]
+
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+
+ROOT_URLCONF = "config.urls"
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [REPO_ROOT / "frontend" / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
+
+# ---------------------------------------------------------------------------
+# Database (PostgreSQL + pgvector in Docker; sqlite fallback for local tests)
+# ---------------------------------------------------------------------------
+
+DATABASES = {
+    "default": env.db_url("DATABASE_URL", default="sqlite:///" + str(BASE_DIR / "db.sqlite3")),
+}
+DATABASES["default"]["CONN_MAX_AGE"] = env.int("DB_CONN_MAX_AGE", default=60)
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+AUTH_USER_MODEL = "accounts.User"
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "home"
+LOGOUT_REDIRECT_URL = "home"
+
+# ---------------------------------------------------------------------------
+# Internationalization
+# ---------------------------------------------------------------------------
+
+LANGUAGE_CODE = "hu"
+TIME_ZONE = "Europe/Budapest"
+USE_I18N = True
+USE_TZ = True
+
+# ---------------------------------------------------------------------------
+# Static & media
+# ---------------------------------------------------------------------------
+
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [REPO_ROOT / "frontend" / "static"]
+
+MEDIA_URL = "media/"
+MEDIA_ROOT = env("MEDIA_ROOT", default=str(BASE_DIR / "media"))
+
+STORAGE_BACKEND = env("STORAGE_BACKEND", default="local")
+
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ---------------------------------------------------------------------------
+# Django REST Framework
+# ---------------------------------------------------------------------------
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 25,
+}
+
+# ---------------------------------------------------------------------------
+# Celery
+# ---------------------------------------------------------------------------
+
+CELERY_BROKER_URL = env("REDIS_URL", default="redis://redis:6379/0")
+CELERY_RESULT_BACKEND = env("REDIS_URL", default="redis://redis:6379/0")
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TIMEZONE = TIME_ZONE
+
+# ---------------------------------------------------------------------------
+# PrintForge settings
+# ---------------------------------------------------------------------------
+
+# LLM / Ollama
+OLLAMA_BASE_URL = env("OLLAMA_BASE_URL", default="http://localhost:11434")
+OLLAMA_MODEL = env("OLLAMA_MODEL", default="qwen3-coder:30b")
+
+# Embedding / RAG
+EMBEDDING_MODEL = env("EMBEDDING_MODEL", default="bge-m3")
+EMBEDDING_DIM = env("EMBEDDING_DIM")
+RAG_ENABLED = env("RAG_ENABLED")
+
+# OpenSCAD sandbox defaults (see terv.md 20. fejezet)
+OPENSCAD_TIMEOUT_SEC = env.int("OPENSCAD_TIMEOUT_SEC", default=60)
+OPENSCAD_MEMORY_LIMIT = env("OPENSCAD_MEMORY_LIMIT", default="1g")
+OPENSCAD_CPU_LIMIT = env("OPENSCAD_CPU_LIMIT", default="1.0")
