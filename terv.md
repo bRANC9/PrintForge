@@ -1503,3 +1503,56 @@ tags_source:         manual | ai | empty
 - Nem generálunk hosszú marketing-szöveget; rövid, technikai leírás a
   cél.
 
+---
+
+# 30. CAD primitívek (prompt-függő geometria)
+
+A 8. fejezet structured specification-je eleinte egyetlen paraméteres
+**telefontartó**-templátot tudott csak leírni, ezért bármely prompt
+gyakorlatilag ugyanazt a modellt adta. A 30. fejezet ezt nyitja ki:
+a specifikáció `primitives` listát kap, amiből az LLM (kód nélkül) valódi
+geometriát ír le.
+
+- Primitivek: `box`, `cylinder`, `sphere`, `cone`; `role: add | subtract`;
+  `position` = a primitív középpontja mm-ben; `rotation` fokban.
+- A CAD backend CSG-vel renderel:
+  `difference() { union() { <add> } <subtract> }`.
+- Üres `primitives` esetén a korábbi telefontartó-templát fut (backward
+  compatible, bájt-azonos kimenet).
+- A Planner/Editor a primitívekből állítja össze a tárgyat (a tálcán állva,
+  min Z = 0); a `dimensions`/`wall_thickness`/`mounting` mezők
+  kompatibilitásból megmaradnak.
+- A vizuális annotációs `operations` (lásd a vizuális szerkesztés tervét)
+  a primitív-bázisra rétegződik.
+
+Részletek: [`docs/cad-primitives.md`](./docs/cad-primitives.md).
+
+---
+
+# 31. Vision önellenőrzés
+
+A pipeline a validálás után **visszaellenőrzi saját magát**, ha a választott
+LLM vision-képes:
+
+```text
+cad -> validate -> review
+review --(nem egyezik, van kísérlet)--> cad (LLM reviserrel)
+review --(egyezik / nincs vision / kimerült)--> END
+```
+
+- A `review` node az STL-ből előnézeti PNG-t renderel
+  (`designs/cad/preview.py`, trimesh + Pillow, headless), és ha a provider
+  `supports_vision()`, strukturált `ReviewResult`-ot kér tőle
+  (`matches`, `issues`, `summary`).
+- Ha nem egyezik és van kísérlet, a review hibái bekerülnek a
+  `validation.errors`-be, és egy **LLM-alapú reviser** javítja a
+  specifikációt; a CAD újrafut. A retry továbbra is korlátos
+  (`AGENT_MAX_ATTEMPTS`).
+- Ha nincs vision / nincs preview / a review meghiúsul: a run **nem bukik
+  el**, csak figyelmeztetés kerül a history-ba.
+- Az előnézeti kép a `ModelVersion.preview_image` mezőbe kerül, és a
+  `GET /api/v1/versions/{id}/artifact/preview/` végponton letölthető
+  (inline `image/png`).
+
+Részletek: [`docs/vision-self-check.md`](./docs/vision-self-check.md).
+
