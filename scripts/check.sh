@@ -28,7 +28,14 @@ run "ruff check"   "cd $BACKEND && uv run ruff check ."
 run "ruff format"  "cd $BACKEND && uv run ruff format --check ."
 run "djlint"       "cd $BACKEND && uv run djlint ../frontend/templates --check"
 run "django check" "cd $BACKEND && uv run python manage.py check"
-run "pytest"       "cd $BACKEND && uv run pytest"
+# Prefer parallel (pytest-xdist: one test DB per worker); fall back to serial
+# when xdist is not installed. Override: PYTEST_ARGS="-n 4 --dist load".
+if (cd "$BACKEND" && uv run python -c "import xdist" >/dev/null 2>&1); then
+    DEFAULT_PYTEST_ARGS="-n auto --dist loadscope -p no:cacheprovider"
+else
+    DEFAULT_PYTEST_ARGS=""
+fi
+run "pytest"       "cd $BACKEND && uv run pytest ${PYTEST_ARGS:-$DEFAULT_PYTEST_ARGS}"
 
 printf '\n\033[1m===== SUMMARY =====\033[0m\n'
 for row in "${RESULTS[@]}"; do

@@ -11,6 +11,17 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := all
 
+# Full-suite pytest flags. Prefer parallel (pytest-xdist gives each worker its
+# own test DB); fall back to serial when xdist is not installed. Override any
+# time:  make test PYTEST_ARGS=
+PYTEST_HAS_XDIST := $(shell cd backend && uv run python -c "import xdist" >/dev/null 2>&1 && echo yes)
+ifeq ($(PYTEST_HAS_XDIST),yes)
+PYTEST_ARGS ?= -n auto --dist loadscope -p no:cacheprovider
+else
+PYTEST_ARGS ?=
+endif
+export PYTEST_ARGS
+
 .PHONY: all help fix check test lint
 
 all: ## Auto-fix (ruff, djlint) then run every gate and print a summary
@@ -26,8 +37,8 @@ fix: ## Apply safe auto-fixes: ruff check --fix, ruff format, djlint --reformat
 check: ## Run every read-only gate (ruff, djlint, django check, pytest) + summary
 	@bash scripts/check.sh
 
-test: ## Run the backend test suite (pytest)
-	@cd backend && uv run pytest
+test: ## Run the backend test suite (pytest, parallel by default)
+	@cd backend && uv run pytest $(PYTEST_ARGS)
 
 lint: ## Run read-only lint/format checks (ruff + djlint)
 	@cd backend && uv run ruff check . && uv run ruff format --check . && uv run djlint ../frontend/templates --check
