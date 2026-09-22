@@ -63,6 +63,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DEFAULT_IMAGE",
     "MAX_OPERATIONS",
+    "MAX_PRIMITIVES",
+    "PRIMITIVE_ROLES",
+    "PRIMITIVE_TYPES",
     "SANDBOX_FLAGS",
     "HolderParameters",
     "OpenSCADBackend",
@@ -71,8 +74,11 @@ __all__ = [
     "OpenSCADTimeout",
     "OpenSCADValidationError",
     "RenderOperation",
+    "RenderPrimitive",
     "build_parameters",
     "parse_operations",
+    "parse_primitives",
+    "render_primitives",
     "render_scad",
     "scan_for_forbidden",
     "strip_scad_comments",
@@ -501,6 +507,165 @@ def parse_operations(specification: dict[str, Any] | None) -> list[RenderOperati
 
 
 # ---------------------------------------------------------------------------
+# Prompt-driven CSG primitives (docs/cad-primitives.md 1 / 2)
+# ---------------------------------------------------------------------------
+
+# Bounds mirror ``agents.spec`` (which the CAD package must not import, to keep
+# it decoupled from ``llm-provider``). Every primitive value is re-coerced and
+# re-bounded here because the LLM payload is untrusted.
+#: Smallest printable primitive edge/diameter (below a 0.4 mm nozzle this is not printable).
+MIN_PRIMITIVE_MM = 0.4
+#: Upper bound for a primitive size to catch unit mistakes (cm vs mm).
+MAX_PRIMITIVE_MM = 1000.0
+#: Bounds for a primitive centre in model coordinates (mm).
+MAX_PRIMITIVE_POSITION_MM = 1000.0
+#: Bounds for a primitive rotation in degrees (XYZ order).
+MAX_PRIMITIVE_ROTATION_DEG = 360.0
+#: Hard cap on the number of rendered primitives: unbounded lists are a DoS vector.
+MAX_PRIMITIVES = 64
+
+PRIMITIVE_TYPES: tuple[str, ...] = ("box", "cylinder", "sphere", "cone")
+PRIMITIVE_ROLES: tuple[str, ...] = ("add", "subtract")
+_ADDITIVE_ROLES = frozenset({"add"})
+#: Required size fields per primitive type; missing ones are a specification error.
+_REQUIRED_SIZES: dict[str, tuple[str, ...]] = {
+    "box": ("width", "depth", "height"),
+    "cylinder": ("diameter", "height"),
+    "sphere": ("diameter",),
+    "cone": ("diameter", "height"),
+}
+
+
+@dataclass(frozen=True)
+class RenderPrimitive:
+    """A validated, bounded CSG primitive ready for rendering.
+
+    ``position`` is the centre of the shape and ``rotation`` is in degrees
+    (XYZ order). Unused size fields stay ``None`` so the renderer can rely on
+    the per-type required fields (mirrors ``agents.spec.Primitive``).
+    """
+
+    type: str
+    role: str
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    width: float | None = None
+    depth: float | None = None
+    height: float | None = None
+    diameter: float | None = None
+    label: str = ""
+
+    @property
+    def is_additive(self) -> bool:
+        """True for ``role="add"`` (union-ed onto the base)."""
+        return self.role in _ADDITIVE_ROLES
+
+
+def _primitive_vec3(
+    item: dict[str, Any],
+    field: str,
+    path: str,
+    *,
+    limit: float,
+) -> tuple[float, float, float]:
+    """Parse an optional ``{x, y, z}`` primitive vector, defaulting to origin."""
+    value = item.get(field)
+    if value is None:
+        return (0.0, 0.0, 0.0)
+    if not isinstance(value, dict):
+        raise SpecificationError(f"{path}.{field}: must be an object with x, y, z")
+    components = tuple(
+        _op_float(value, axis, f"{path}.{field}", minimum=-limit, maximum=limit)
+        for axis in ("x", "y", "z")
+    )
+    return components  # type: ignore[return-value]
+
+
+def _parse_primitive(item: Any, index: int) -> RenderPrimitive:
+    path = f"primitives[{index}]"
+    if not isinstance(item, dict):
+        raise SpecificationError(f"{path} must be an object")
+
+    type_value = item.get("type")
+    if type_value is None:
+        raise SpecificationError(f"Missing required field '{path}.type'")
+    kind = str(type_value).strip().lower()
+    if kind not in PRIMITIVE_TYPES:
+        raise SpecificationError(
+            f"{path}.type: must be one of {list(PRIMITIVE_TYPES)} (got {type_value!r})"
+        )
+
+    role_value = item.get("role", "add")
+    role = "add" if role_value is None else str(role_value).strip().lower()
+    if role not in PRIMITIVE_ROLES:
+        raise SpecificationError(
+            f"{path}.role: must be one of {list(PRIMITIVE_ROLES)} (got {role_value!r})"
+        )
+
+    position = _primitive_vec3(item, "position", path, limit=MAX_PRIMITIVE_POSITION_MM)
+    rotation = _primitive_vec3(item, "rotation", path, limit=MAX_PRIMITIVE_ROTATION_DEG)
+
+    width = _op_optional_float(
+        item, "width", path, minimum=MIN_PRIMITIVE_MM, maximum=MAX_PRIMITIVE_MM
+    )
+    depth = _op_optional_float(
+        item, "depth", path, minimum=MIN_PRIMITIVE_MM, maximum=MAX_PRIMITIVE_MM
+    )
+    height = _op_optional_float(
+        item, "height", path, minimum=MIN_PRIMITIVE_MM, maximum=MAX_PRIMITIVE_MM
+    )
+    diameter = _op_optional_float(
+        item, "diameter", path, minimum=MIN_PRIMITIVE_MM, maximum=MAX_PRIMITIVE_MM
+    )
+
+    sizes: dict[str, float | None] = {
+        "width": width,
+        "depth": depth,
+        "height": height,
+        "diameter": diameter,
+    }
+    missing = [name for name in _REQUIRED_SIZES[kind] if sizes[name] is None]
+    if missing:
+        names = ", ".join(f"'{name}'" for name in missing)
+        raise SpecificationError(f"{path}: {names} required for a '{kind}' primitive")
+
+    return RenderPrimitive(
+        type=kind,
+        role=role,
+        position=position,
+        rotation=rotation,
+        width=width,
+        depth=depth,
+        height=height,
+        diameter=diameter,
+        label=_sanitize_label(item.get("label", "")),
+    )
+
+
+def parse_primitives(specification: dict[str, Any] | None) -> list[RenderPrimitive]:
+    """Validate ``specification['primitives']`` and return bounded primitives.
+
+    Missing/``None``/empty ``primitives`` yields ``[]`` so the historical
+    holder-token render is preserved byte-for-byte. An unknown ``type``/``role``,
+    a missing per-type size or an out-of-bounds number all raise
+    :class:`SpecificationError`, which ``validate()`` surfaces as blocking
+    problems. The LLM never supplies OpenSCAD code: only these coerced numbers
+    reach the renderer.
+    """
+    spec: dict[str, Any] = specification if isinstance(specification, dict) else {}
+    raw = spec.get("primitives")
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise SpecificationError("Field 'primitives' must be a list")
+    if len(raw) > MAX_PRIMITIVES:
+        raise SpecificationError(
+            f"Field 'primitives' must have at most {MAX_PRIMITIVES} entries (got {len(raw)})"
+        )
+    return [_parse_primitive(item, index) for index, item in enumerate(raw)]
+
+
+# ---------------------------------------------------------------------------
 # Template
 # ---------------------------------------------------------------------------
 
@@ -580,14 +745,17 @@ def _num(value: float) -> str:
 
 
 def render_scad(
-    parameters: HolderParameters, operations: Sequence[RenderOperation] | None = None
+    parameters: HolderParameters,
+    operations: Sequence[RenderOperation] | None = None,
+    primitives: Sequence[RenderPrimitive] | None = None,
 ) -> str:
     """Render the self-contained OpenSCAD template for validated parameters.
 
-    Without operations the output is byte-for-byte the base part. With features
-    the holder is wrapped as
-    ``difference() { union() { holder(); <adds> } <subs> }`` so subtractive
-    operations are cut from both the base and any added bosses.
+    With no primitives the output is byte-for-byte the historical holder part
+    (plus the ``operations`` layer when present). With primitives the base part
+    is the primitive CSG; the same ``operations`` layer is then composited on
+    top, so subtractive operations cut the primitive base exactly like the
+    holder template.
     """
     rendered = _SCAD_TEMPLATE.substitute(
         object_name=parameters.object_name,
@@ -601,10 +769,17 @@ def render_scad(
         hole_count=str(parameters.hole_count),
     )
     features = list(operations or [])
+    parts = list(primitives or [])
+    if not parts:
+        if not features:
+            # No primitives and no operations: preserve the historical render exactly.
+            return rendered + "\n" + _HOLDER_CALL
+        return rendered + "\n" + render_operations(features) + "\n"
+
+    base = render_primitives(parts)
     if not features:
-        # No operations: preserve the historical render exactly.
-        return rendered + "\n" + _HOLDER_CALL
-    return rendered + "\n" + render_operations(features) + "\n"
+        return rendered + "\n" + base + "\n"
+    return rendered + "\n" + render_operations(features, base=base) + "\n"
 
 
 #: Extent the local cutters overshoot their surface so booleans are robust.
@@ -722,11 +897,81 @@ def _render_operation(operation: RenderOperation, indent: str) -> str:
     return f"{comment}\n{indent}multmatrix({matrix}) {_local_geometry(operation)}"
 
 
-def render_operations(operations: Sequence[RenderOperation]) -> str:
-    """Render the ``difference``/``union`` block combining base + features."""
+def _required_primitive(value: float | None, primitive: RenderPrimitive, field: str) -> float:
+    if value is None:
+        raise SpecificationError(
+            f"Primitive '{primitive.type}' is missing required field '{field}'"
+        )
+    return value
+
+
+def _render_primitive(primitive: RenderPrimitive, indent: str) -> str:
+    """OpenSCAD statement for a primitive placed at its centre of mass."""
+    px, py, pz = primitive.position
+    rx, ry, rz = primitive.rotation
+    translate = f"translate([{_num(px)}, {_num(py)}, {_num(pz)}])"
+    rotate = f"rotate([{_num(rx)}, {_num(ry)}, {_num(rz)}])"
+    if primitive.type == "box":
+        width = _required_primitive(primitive.width, primitive, "width")
+        depth = _required_primitive(primitive.depth, primitive, "depth")
+        height = _required_primitive(primitive.height, primitive, "height")
+        geometry = (
+            f"{translate} {rotate} "
+            f"translate([{_num(-width / 2)}, {_num(-depth / 2)}, {_num(-height / 2)}]) "
+            f"cube([{_num(width)}, {_num(depth)}, {_num(height)}]);"
+        )
+    elif primitive.type == "cylinder":
+        diameter = _required_primitive(primitive.diameter, primitive, "diameter")
+        height = _required_primitive(primitive.height, primitive, "height")
+        geometry = (
+            f"{translate} {rotate} cylinder(d={_num(diameter)}, h={_num(height)}, center=true);"
+        )
+    elif primitive.type == "sphere":
+        diameter = _required_primitive(primitive.diameter, primitive, "diameter")
+        geometry = f"{translate} sphere(d={_num(diameter)});"
+    else:  # cone
+        diameter = _required_primitive(primitive.diameter, primitive, "diameter")
+        height = _required_primitive(primitive.height, primitive, "height")
+        geometry = (
+            f"{translate} {rotate} "
+            f"cylinder(d1={_num(diameter)}, d2=0, h={_num(height)}, center=true);"
+        )
+    comment = f"{indent}// primitive: {primitive.type}"
+    if primitive.label:
+        comment += f" -- {primitive.label}"
+    return f"{comment}\n{indent}{geometry}"
+
+
+def render_primitives(primitives: Sequence[RenderPrimitive]) -> str:
+    """Render the primitive CSG base.
+
+    Emits ``difference() { union() { <adds> } <subtracts> }`` so ``role="add"``
+    union-ed material has the ``role="subtract"`` shapes cut out of it.
+    """
+    adds = [primitive for primitive in primitives if primitive.is_additive]
+    subs = [primitive for primitive in primitives if not primitive.is_additive]
+    lines = ["difference() {", "    union() {"]
+    for primitive in adds:
+        lines.append(_render_primitive(primitive, "        "))
+    lines.append("    }")
+    for primitive in subs:
+        lines.append(_render_primitive(primitive, "    "))
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def render_operations(operations: Sequence[RenderOperation], *, base: str = "holder();") -> str:
+    """Render the ``difference``/``union`` block combining base + features.
+
+    ``base`` is the top-level statement (or block) the operations are applied
+    to. It defaults to the holder call, preserving the historical output. With
+    primitives the caller passes their CSG block so the annotation layer is
+    composited on top of it identically.
+    """
     adds = [operation for operation in operations if operation.is_additive]
     subs = [operation for operation in operations if operation.kind in _SUBTRACTIVE_KINDS]
-    lines = ["difference() {", "    union() {", "        holder();"]
+    lines = ["difference() {", "    union() {"]
+    lines.extend(f"        {line}" for line in base.splitlines())
     for operation in adds:
         lines.append(_render_operation(operation, "        "))
     lines.append("    }")
@@ -891,7 +1136,8 @@ class OpenSCADBackend(CADBackend):
         """Validate ``specification`` and render self-contained OpenSCAD source."""
         parameters = build_parameters(specification)
         operations = parse_operations(specification)
-        return render_scad(parameters, operations)
+        primitives = parse_primitives(specification)
+        return render_scad(parameters, operations, primitives)
 
     def validate(self, model: GeneratedModel | str) -> list[str]:
         """Return blocking safety/parameter problems (empty list == valid)."""
@@ -912,6 +1158,10 @@ class OpenSCADBackend(CADBackend):
                     )
             try:
                 parse_operations(model.specification)
+            except SpecificationError as exc:
+                problems.append(str(exc))
+            try:
+                parse_primitives(model.specification)
             except SpecificationError as exc:
                 problems.append(str(exc))
         return problems

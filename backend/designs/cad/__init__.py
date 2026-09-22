@@ -4,6 +4,8 @@ Public entry points:
 
 - :class:`~designs.cad.base.CADBackend` -- backend-agnostic interface.
 - :class:`~designs.cad.openscad.OpenSCADBackend` -- OpenSCAD CLI implementation.
+- :func:`~designs.cad.preview.render_stl_preview` -- headless STL -> PNG preview
+  used by the vision review node.
 - :func:`~designs.cad.pipeline.render_version` -- run the pipeline for a
   ``designs.ModelVersion`` and persist artifacts through ``files.services``.
 
@@ -17,11 +19,14 @@ does not import ``agents.spec`` (owned by ``llm-provider``).
 
 from .base import CADBackend, CADError, GeneratedModel, SpecificationError
 from .openscad import OpenSCADBackend
+from .preview import PreviewRenderError, render_stl_preview
 
 __all__ = [
     "CADBackend",
     "CADError",
     "GeneratedModel",
     "OpenSCADBackend",
+    "PreviewRenderError",
     "SpecificationError",
+    "render_stl_preview",
 ]
