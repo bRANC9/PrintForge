@@ -21,6 +21,10 @@
             `${API_BASE}/versions/${encodeURIComponent(versionId)}/artifact/${encodeURIComponent(kind)}/`,
         // Phase 7 (multi-user): print history + notifications.
         printJobs: () => `${API_BASE}/print-jobs/`,
+        printJobStart: (jobId) => `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/start/`,
+        printJobCancel: (jobId) => `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/cancel/`,
+        printJobTransition: (jobId) =>
+            `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/transition/`,
         // Printer registry + live status (terv.md 13.).
         printers: () => `${API_BASE}/printers/`,
         printerStatus: (printerId) =>
@@ -181,6 +185,10 @@
             request(endpoints.versions(projectId), { method: "POST", body: { prompt } }),
         versionStatus: (versionId) => request(endpoints.versionStatus(versionId)),
         listPrintJobs: async () => unwrapList(await request(endpoints.printJobs())),
+        startPrintJob: (jobId) => request(endpoints.printJobStart(jobId), { method: "POST" }),
+        cancelPrintJob: (jobId) => request(endpoints.printJobCancel(jobId), { method: "POST" }),
+        transitionPrintJob: (jobId, status) =>
+            request(endpoints.printJobTransition(jobId), { method: "POST", body: { status } }),
         listPrinters: async () => unwrapList(await request(endpoints.printers())),
         printerStatus: (printerId) => request(endpoints.printerStatus(printerId)),
         listNotifications: async () => unwrapList(await request(endpoints.notifications())),
@@ -694,10 +702,15 @@
      * GET /api/v1/print-jobs/ (paginated, includes *_name display fields).
      */
     function printHistoryComponent() {
+        const CANCELLABLE = ["QUEUED", "PREPARING", "SLICING", "READY", "PRINTING", "PAUSED"];
+        const REQUEUEABLE = ["FAILED", "CANCELLED"];
+
         return mergeLiveProperties(projectDetailUrlMixin(), {
             jobs: [],
             loading: true,
             error: "",
+            notice: "",
+            actionBusyId: null,
 
             formatDate,
             displayName,
@@ -706,6 +719,48 @@
             versionLabel(job) {
                 if (job && job.version !== null && job.version !== undefined) return `v${job.version}`;
                 return labelFor(job ? job.model_version : null);
+            },
+
+            canStart(job) {
+                return job.status === "READY";
+            },
+            canComplete(job) {
+                return job.status === "PRINTING";
+            },
+            canCancel(job) {
+                return CANCELLABLE.includes(job.status);
+            },
+            canRequeue(job) {
+                return REQUEUEABLE.includes(job.status);
+            },
+
+            replaceJob(updated) {
+                const index = this.jobs.findIndex((row) => row.id === updated.id);
+                if (index >= 0) this.jobs.splice(index, 1, updated);
+            },
+
+            /** ``action`` is ``start`` / ``cancel`` or a target status. */
+            async runAction(job, action) {
+                if (this.actionBusyId) return;
+                this.actionBusyId = job.id;
+                this.error = "";
+                this.notice = "";
+                try {
+                    let updated;
+                    if (action === "start") {
+                        updated = await api.startPrintJob(job.id);
+                    } else if (action === "cancel") {
+                        updated = await api.cancelPrintJob(job.id);
+                    } else {
+                        updated = await api.transitionPrintJob(job.id, action);
+                    }
+                    this.replaceJob(updated);
+                    this.notice = `#${job.id} állapota: ${updated.status}`;
+                } catch (error) {
+                    this.error = error.message || String(error);
+                } finally {
+                    this.actionBusyId = null;
+                }
             },
 
             async init() {

@@ -14,6 +14,7 @@
         <template x-if="error">
             <p class="error-box" x-text="error"></p>
         </template>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
         <p class="muted" x-show="loading">Betöltés…</p>
         <p class="muted" x-show="!loading && !error && !jobs.length">Még nincs nyomtatási feladat.</p>
         <div class="table-wrap" x-show="!loading && jobs.length">
@@ -29,6 +30,7 @@
                         <th>Prioritás</th>
                         <th>Létrehozva</th>
                         <th>Módosítva</th>
+                        <th>Műveletek</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -50,6 +52,28 @@
                             <td x-text="job.priority"></td>
                             <td class="muted" x-text="formatDate(job.created_at)"></td>
                             <td class="muted" x-text="formatDate(job.updated_at)"></td>
+                            <td class="row-actions">
+                                <button type="button"
+                                        class="btn btn-small"
+                                        x-show="canStart(job)"
+                                        :disabled="actionBusyId === job.id"
+                                        @click="runAction(job, 'start')">Indítás</button>
+                                <button type="button"
+                                        class="btn btn-small"
+                                        x-show="canComplete(job)"
+                                        :disabled="actionBusyId === job.id"
+                                        @click="runAction(job, 'COMPLETED')">Kész</button>
+                                <button type="button"
+                                        class="btn btn-small"
+                                        x-show="canRequeue(job)"
+                                        :disabled="actionBusyId === job.id"
+                                        @click="runAction(job, 'QUEUED')">Újrasorol</button>
+                                <button type="button"
+                                        class="btn btn-small btn-danger"
+                                        x-show="canCancel(job)"
+                                        :disabled="actionBusyId === job.id"
+                                        @click="runAction(job, 'cancel')">Mégse</button>
+                            </td>
                         </tr>
                     </template>
                 </tbody>
