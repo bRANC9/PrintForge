@@ -689,6 +689,17 @@ ul.error-box {
     max-width: 420px;
 }
 
+.form-row .input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.form-row .input-row .input {
+    max-width: 340px;
+}
+
 .form-row.is-inline {
     flex-direction: row;
     align-items: center;

@@ -847,6 +847,9 @@
             updatedAt: "",
             form: emptyForm(),
             baseline: emptyForm(),
+            models: [],
+            modelsLoading: false,
+            modelsError: "",
 
             readOnlyNotes: {
                 embedding_dim:
@@ -863,6 +866,27 @@
                 return value === null || value === undefined ? "" : value;
             },
 
+            /**
+             * Installed Ollama models, plus the current value when it is not
+             * installed (so a dropdown never hides an existing override).
+             */
+            modelOptionsFor(current) {
+                const options = Array.isArray(this.models) ? this.models.slice() : [];
+                const names = options.map((model) => model.name);
+                if (current && !names.includes(current)) {
+                    options.unshift({ name: current, missing: true });
+                }
+                return options;
+            },
+
+            get ollamaModelOptions() {
+                return this.modelOptionsFor(this.form.ollama_model);
+            },
+
+            get embeddingModelOptions() {
+                return this.modelOptionsFor(this.form.embedding_model);
+            },
+
             formatDate,
 
             async init() {
@@ -874,12 +898,30 @@
                 this.error = "";
                 this.forbidden = false;
                 try {
-                    this.applyResponse(await api.getSettings());
+                    const [data] = await Promise.all([api.getSettings(), this.loadModels()]);
+                    this.applyResponse(data);
                 } catch (error) {
                     if (error.status === 403) this.forbidden = true;
                     this.error = error.message || String(error);
                 } finally {
                     this.loading = false;
+                }
+            },
+
+            /** Populate the model dropdowns from the installed Ollama models. */
+            async loadModels() {
+                this.modelsLoading = true;
+                this.modelsError = "";
+                try {
+                    const payload = (await api.listOllamaModels()) || {};
+                    this.models = Array.isArray(payload.models) ? payload.models : [];
+                    if (payload.error) this.modelsError = payload.error;
+                } catch (error) {
+                    // The settings endpoint already decides the forbidden view;
+                    // here a failure only means the suggestions are unavailable.
+                    this.modelsError = error.message || String(error);
+                } finally {
+                    this.modelsLoading = false;
                 }
             },
 
