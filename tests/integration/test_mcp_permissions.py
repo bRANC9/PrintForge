@@ -57,6 +57,19 @@ def test_viewer_may_record_a_download(project, viewer):
     assert result["download_count"] == 1
 
 
+def test_viewer_may_read_projects_and_versions(project, viewer):
+    version = ModelVersionFactory(project=project)
+
+    listed = call("list_projects", workspace_id=project.workspace_id, user_id=viewer.id)
+    assert {"id": project.id, "name": project.name} in listed
+
+    detail = call("get_model_version", version_id=version.id, user_id=viewer.id)
+    assert detail["version_id"] == version.id
+
+    exported = call("export_model_stl", version_id=version.id, user_id=viewer.id)
+    assert exported == {"path": None, "exists": False, "size": 0}
+
+
 def test_viewer_is_denied_every_member_tool(project, viewer):
     version = ModelVersionFactory(project=project)
     printer = PrinterFactory()
@@ -71,6 +84,14 @@ def test_viewer_is_denied_every_member_tool(project, viewer):
         (
             "generate_project_description",
             {"project_id": project.id, "user_id": viewer.id},
+        ),
+        (
+            "create_project",
+            {"workspace_id": project.workspace_id, "user_id": viewer.id, "name": "Nope"},
+        ),
+        (
+            "generate_model_from_prompt",
+            {"project_id": project.id, "user_id": viewer.id, "prompt": "x"},
         ),
         (
             "create_build_plate",
@@ -102,13 +123,28 @@ def test_viewer_is_denied_every_member_tool(project, viewer):
 
 def test_non_member_is_denied_on_project_tools(project):
     outsider = UserFactory()
+    version = ModelVersionFactory(project=project)
 
-    with pytest.raises(PermissionDenied):
-        call("publish_project", project_id=project.id, user_id=outsider.id)
-    with pytest.raises(PermissionDenied):
-        call("record_download", project_id=project.id, user_id=outsider.id)
-    with pytest.raises(PermissionDenied):
-        call("rate_project", project_id=project.id, user_id=outsider.id, score=5)
+    denied = [
+        ("publish_project", {"project_id": project.id, "user_id": outsider.id}),
+        ("record_download", {"project_id": project.id, "user_id": outsider.id}),
+        ("rate_project", {"project_id": project.id, "user_id": outsider.id, "score": 5}),
+        ("list_projects", {"workspace_id": project.workspace_id, "user_id": outsider.id}),
+        (
+            "create_project",
+            {"workspace_id": project.workspace_id, "user_id": outsider.id, "name": "Nope"},
+        ),
+        (
+            "generate_model_from_prompt",
+            {"project_id": project.id, "user_id": outsider.id, "prompt": "x"},
+        ),
+        ("get_model_version", {"version_id": version.id, "user_id": outsider.id}),
+        ("export_model_stl", {"version_id": version.id, "user_id": outsider.id}),
+    ]
+
+    for tool, kwargs in denied:
+        with pytest.raises(PermissionDenied):
+            call(tool, **kwargs)
 
 
 def test_member_can_write_community_metadata(project, member):
@@ -120,3 +156,11 @@ def test_member_can_write_community_metadata(project, member):
 
     rated = call("rate_project", project_id=project.id, user_id=member.id, score=5)
     assert rated["summary"] == {"average": 5.0, "count": 1}
+
+    created = call(
+        "create_project",
+        workspace_id=project.workspace_id,
+        user_id=member.id,
+        name="Made by member",
+    )
+    assert created["name"] == "Made by member"

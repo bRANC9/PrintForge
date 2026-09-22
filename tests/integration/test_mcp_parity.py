@@ -98,7 +98,7 @@ def test_dispatcher_routes_a_tool_without_a_name_parameter():
     workspace = WorkspaceFactory()
     ProjectFactory(workspace=workspace, name="Routed")
 
-    result = call("list_projects", workspace_id=workspace.id)
+    result = call("list_projects", workspace_id=workspace.id, user_id=workspace.owner_id)
 
     assert result == [{"id": workspace.projects.get().id, "name": "Routed"}]
 
@@ -165,7 +165,7 @@ def test_list_projects_tool_matches_workspace_service():
     workspace = WorkspaceFactory()
     ProjectFactory.create_batch(3, workspace=workspace)
 
-    result = call("list_projects", workspace_id=workspace.id)
+    result = call("list_projects", workspace_id=workspace.id, user_id=workspace.owner_id)
     direct = [{"id": p.id, "name": p.name} for p in projects_for_workspace(workspace)]
 
     assert result == direct
@@ -183,7 +183,12 @@ def test_generate_model_from_prompt_tool_delegates_to_services(queued):
         patch("mcp.tools_impl.create_next_version", wraps=create_next_version) as create,
         patch("mcp.tools_impl.start_render", wraps=start_render) as render,
     ):
-        result = call("generate_model_from_prompt", project_id=project.id, prompt="a box")
+        result = call(
+            "generate_model_from_prompt",
+            project_id=project.id,
+            prompt="a box",
+            user_id=project.created_by_id,
+        )
 
     create.assert_called_once_with(project=project, prompt="a box")
     version = ModelVersion.objects.get(project=project)
@@ -207,7 +212,9 @@ def test_get_model_version_tool_matches_services():
     version = ModelVersionFactory(validation_json={"status": "done", "stage": "done", "errors": []})
 
     with patch("mcp.tools_impl.version_status", wraps=version_status) as spy:
-        result = call("get_model_version", version_id=version.id)
+        result = call(
+            "get_model_version", version_id=version.id, user_id=version.project.created_by_id
+        )
 
     spy.assert_called_once_with(version)
     assert result["version_id"] == version.id
@@ -236,7 +243,9 @@ def test_export_model_stl_tool_matches_storage_services(settings, tmp_path):
     version.stl_file.name = relative
     version.save(update_fields=["stl_file"])
 
-    result = call("export_model_stl", version_id=version.id)
+    result = call(
+        "export_model_stl", version_id=version.id, user_id=version.project.created_by_id
+    )
 
     direct_path = artifact_path(version, "stl")
     assert direct_path == relative
@@ -247,7 +256,9 @@ def test_export_model_stl_tool_matches_missing_artifact(settings, tmp_path):
     settings.MEDIA_ROOT = str(tmp_path)
     version = ModelVersionFactory()
 
-    result = call("export_model_stl", version_id=version.id)
+    result = call(
+        "export_model_stl", version_id=version.id, user_id=version.project.created_by_id
+    )
 
     assert artifact_path(version, "stl") is None
     assert result == {"path": None, "exists": False, "size": 0}

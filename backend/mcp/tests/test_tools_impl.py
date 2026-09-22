@@ -50,7 +50,12 @@ def test_generate_model_from_prompt_creates_and_enqueues(project, monkeypatch):
     queued: list[int] = []
     monkeypatch.setattr(render_model_stl, "delay", queued.append)
 
-    result = call("generate_model_from_prompt", project_id=project.id, prompt="a box")
+    result = call(
+        "generate_model_from_prompt",
+        project_id=project.id,
+        prompt="a box",
+        user_id=project.created_by_id,
+    )
 
     version = ModelVersion.objects.get(pk=result["version_id"])
     assert result == {"version_id": version.id, "version": 1, "status": "queued"}
@@ -62,8 +67,18 @@ def test_generate_model_from_prompt_creates_and_enqueues(project, monkeypatch):
 def test_generate_model_from_prompt_increments_version(project, monkeypatch):
     monkeypatch.setattr(render_model_stl, "delay", lambda version_id: None)
 
-    first = call("generate_model_from_prompt", project_id=project.id, prompt="first")
-    second = call("generate_model_from_prompt", project_id=project.id, prompt="second")
+    first = call(
+        "generate_model_from_prompt",
+        project_id=project.id,
+        prompt="first",
+        user_id=project.created_by_id,
+    )
+    second = call(
+        "generate_model_from_prompt",
+        project_id=project.id,
+        prompt="second",
+        user_id=project.created_by_id,
+    )
 
     assert first["version"] == 1
     assert second["version"] == 2
@@ -78,7 +93,7 @@ def test_get_model_version_returns_metadata_and_json(project):
         validation_json={"status": "done", "errors": []},
     )
 
-    result = call("get_model_version", version_id=version.id)
+    result = call("get_model_version", version_id=version.id, user_id=project.created_by_id)
 
     assert result["version_id"] == version.id
     assert result["project_id"] == project.id
@@ -97,7 +112,7 @@ def test_export_model_stl_reports_storage(project, settings, tmp_path):
     version.stl_file.name = relative_path
     version.save(update_fields=["stl_file"])
 
-    result = call("export_model_stl", version_id=version.id)
+    result = call("export_model_stl", version_id=version.id, user_id=project.created_by_id)
 
     assert result == {"path": relative_path, "exists": True, "size": len(payload)}
 
@@ -106,6 +121,6 @@ def test_export_model_stl_missing_artifact(project, settings, tmp_path):
     settings.MEDIA_ROOT = str(tmp_path)
     version = ModelVersion.objects.create(project=project, version=1)
 
-    result = call("export_model_stl", version_id=version.id)
+    result = call("export_model_stl", version_id=version.id, user_id=project.created_by_id)
 
     assert result == {"path": None, "exists": False, "size": 0}

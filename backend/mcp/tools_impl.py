@@ -6,11 +6,13 @@ shell out (terv.md 25. fejezet); CAD work is only *enqueued* and runs in a
 worker.
 
 Permission note: tools are dispatched through :func:`mcp.tools.call`, the single
-seam where workspace-role checks are enforced. Tools declare an ``authorize``
-gate (see the community/build-plate tools below) that is invoked before the
-handler and delegates to :mod:`api.permissions`, so MCP callers are subject to
-exactly the same roles as the web user (terv.md 20., 25.3). Nothing here may
-bypass that gate or re-enable shell access; ``allow_shell`` stays forbidden.
+seam where workspace-role checks are enforced. Every tool declares an
+``authorize`` gate that is invoked before the handler and delegates to
+:mod:`api.permissions`, so MCP callers are subject to exactly the same roles as
+the web user (terv.md 20., 25.3). Only ``create_workspace`` (open creation, like
+``WorkspaceViewSet.permission_open_create``) and ``search_public_projects``
+(anonymous public library) are intentionally ungated. Nothing here may bypass
+the gate or re-enable shell access; ``allow_shell`` stays forbidden.
 """
 
 from accounts.models import User
@@ -43,7 +45,12 @@ from slicers.models import BuildPlate, PrinterProfile
 from workspaces.models import Workspace, WorkspaceRole
 from workspaces.services import create_workspace
 
-from .permissions import require_build_plate_role, require_project_role
+from .permissions import (
+    require_build_plate_role,
+    require_project_role,
+    require_version_role,
+    require_workspace_role_by_id,
+)
 from .tools import register
 
 #: Maximum number of rows a single community search may return.
@@ -55,10 +62,27 @@ MAX_SEARCH_LIMIT = 100
 # ---------------------------------------------------------------------------
 #
 # Each gate receives the tool's keyword arguments and raises ``PermissionDenied``
-# before the handler runs. The roles mirror the DRF API exactly: community
-# writes and build-plate edits are MEMBER+, reading/recording a download is
-# VIEWER+ (``ProjectViewSet``/``BuildPlateViewSet`` use the default
-# read=VIEWER / write=MEMBER split).
+# before the handler runs. The roles mirror the DRF API exactly: writes are
+# MEMBER+ and reads/downloads are VIEWER+ (``ProjectViewSet``/``BuildPlateViewSet``
+# use the default read=VIEWER / write=MEMBER split). Only ``create_workspace``
+# (open creation, like ``WorkspaceViewSet.permission_open_create``) and
+# ``search_public_projects`` (anonymous public library) are intentionally ungated.
+
+
+def _workspace_member(*, workspace_id: int, user_id: int, **_kwargs) -> None:
+    require_workspace_role_by_id(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        minimum=WorkspaceRole.MEMBER,
+    )
+
+
+def _workspace_viewer(*, workspace_id: int, user_id: int, **_kwargs) -> None:
+    require_workspace_role_by_id(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        minimum=WorkspaceRole.VIEWER,
+    )
 
 
 def _project_member(*, project_id: int, user_id: int, **_kwargs) -> None:
@@ -72,6 +96,14 @@ def _project_member(*, project_id: int, user_id: int, **_kwargs) -> None:
 def _project_viewer(*, project_id: int, user_id: int, **_kwargs) -> None:
     require_project_role(
         project_id=project_id,
+        user_id=user_id,
+        minimum=WorkspaceRole.VIEWER,
+    )
+
+
+def _version_viewer(*, version_id: int, user_id: int, **_kwargs) -> None:
+    require_version_role(
+        version_id=version_id,
         user_id=user_id,
         minimum=WorkspaceRole.VIEWER,
     )
@@ -92,7 +124,11 @@ def create_workspace_tool(*, name: str, owner_id: int) -> dict:
     return {"id": workspace.id, "name": workspace.name}
 
 
-@register("create_project", "Create a project inside a workspace")
+@register(
+    "create_project",
+    "Create a project inside a workspace (requires MEMBER)",
+    authorize=_workspace_member,
+)
 def create_project_tool(
     *, workspace_id: int, name: str, user_id: int, description: str = ""
 ) -> dict:
@@ -107,8 +143,12 @@ def create_project_tool(
     return {"id": project.id, "name": project.name, "workspace_id": workspace.id}
 
 
-@register("list_projects", "List projects in a workspace")
-def list_projects_tool(*, workspace_id: int) -> list[dict]:
+@register(
+    "list_projects",
+    "List projects in a workspace (requires VIEWER)",
+    authorize=_workspace_viewer,
+)
+def list_projects_tool(*, workspace_id: int, user_id: int) -> list[dict]:
     workspace = Workspace.objects.get(pk=workspace_id)
     projects = projects_for_workspace(workspace)
     return [{"id": p.id, "name": p.name} for p in projects]
@@ -116,9 +156,10 @@ def list_projects_tool(*, workspace_id: int) -> list[dict]:
 
 @register(
     "generate_model_from_prompt",
-    "Create the next model version for a project and enqueue STL rendering",
+    "Create the next model version for a project and enqueue STL rendering (requires MEMBER)",
+    authorize=_project_member,
 )
-def generate_model_from_prompt_tool(*, project_id: int, prompt: str) -> dict:
+def generate_model_from_prompt_tool(*, project_id: int, prompt: str, user_id: int) -> dict:
     project = Project.objects.get(pk=project_id)
     version = create_next_version(project=project, prompt=prompt)
     start_render(version)
@@ -131,9 +172,10 @@ def generate_model_from_prompt_tool(*, project_id: int, prompt: str) -> dict:
 
 @register(
     "get_model_version",
-    "Return a model version's metadata plus specification/validation JSON",
+    "Return a model version's metadata plus specification/validation JSON (requires VIEWER)",
+    authorize=_version_viewer,
 )
-def get_model_version_tool(*, version_id: int) -> dict:
+def get_model_version_tool(*, version_id: int, user_id: int) -> dict:
     version = ModelVersion.objects.get(pk=version_id)
     return {
         "version_id": version.id,
@@ -151,9 +193,10 @@ def get_model_version_tool(*, version_id: int) -> dict:
 
 @register(
     "export_model_stl",
-    "Return the stored STL artifact (path, exists, size) for a model version",
+    "Return the stored STL artifact (path, exists, size) for a model version (requires VIEWER)",
+    authorize=_version_viewer,
 )
-def export_model_stl_tool(*, version_id: int) -> dict:
+def export_model_stl_tool(*, version_id: int, user_id: int) -> dict:
     version = ModelVersion.objects.get(pk=version_id)
     relative_path = artifact_path(version, "stl")
     if not relative_path:
