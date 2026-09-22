@@ -10,7 +10,8 @@ from __future__ import annotations
 from .base import PrinterBackend
 from .creality_k2 import CrealityK2Backend
 from .moonraker import MoonrakerBackend
-from .stubs import BambuBackend, OctoPrintBackend
+from .octoprint import OctoPrintBackend
+from .stubs import BambuBackend
 
 __all__ = [
     "BACKEND_REGISTRY",
