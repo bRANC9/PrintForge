@@ -39,6 +39,24 @@ __all__ = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _fast_password_hasher(settings):
+    """Use MD5 for password hashing inside the test run.
+
+    Django's default PBKDF2 hasher is deliberately slow (~1s per call). The
+    factories create a fresh user (with a password) for most tests, and that
+    single ``set_password`` call dominated per-test setup. MD5 makes hashing
+    effectively free while still exercising the real ``User.set_password`` /
+    ``check_password`` code paths.
+
+    This is **test-only**: it overrides ``PASSWORD_HASHERS`` at runtime through
+    pytest-django's ``settings`` fixture, so production configuration
+    (``config/settings.py``) keeps the secure PBKDF2 default. The colocated
+    ``backend/*/tests`` get the same fixture from ``backend/conftest.py``.
+    """
+    settings.PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+
+
 @pytest.fixture
 def user():
     """A single persisted user."""
