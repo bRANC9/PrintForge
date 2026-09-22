@@ -19,6 +19,7 @@ from accounts.models import User
 from designs.models import ModelVersion
 from designs.services import (
     artifact_path,
+    create_annotation_edit,
     create_next_version,
     start_render,
     version_status,
@@ -107,6 +108,14 @@ def _version_viewer(*, version_id: int, user_id: int, **_kwargs) -> None:
         version_id=version_id,
         user_id=user_id,
         minimum=WorkspaceRole.VIEWER,
+    )
+
+
+def _version_member(*, base_version_id: int, user_id: int, **_kwargs) -> None:
+    require_version_role(
+        version_id=base_version_id,
+        user_id=user_id,
+        minimum=WorkspaceRole.MEMBER,
     )
 
 
@@ -206,6 +215,54 @@ def export_model_stl_tool(*, version_id: int, user_id: int) -> dict:
     storage = get_storage()
     size = storage.size(relative_path)
     return {"path": relative_path, "exists": size is not None, "size": size or 0}
+
+
+@register(
+    "edit_model_from_annotations",
+    (
+        "Enqueue an annotation-driven (visual prompt) edit of a model version via the "
+        "agent workflow (requires MEMBER)"
+    ),
+    authorize=_version_member,
+)
+def edit_model_from_annotations_tool(
+    *,
+    base_version_id: int,
+    prompt: str,
+    annotations: list[dict],
+    user_id: int,
+) -> dict:
+    """Mirror ``POST /api/v1/versions/{id}/annotations/`` (docs/visual-editing.md 3.4).
+
+    Thin wrapper over :func:`designs.services.create_annotation_edit`: the agent
+    task creates the derived version and records ``parent_version`` /
+    ``annotations_json`` on it, so this returns the base id and ``queued=True``
+    rather than a new version. Only light shape validation happens here -- the
+    DRF serializer owns the full payload shape; this must not import DRF.
+    ``RenderEnqueueError`` propagates, mirroring the API's ``503``.
+    """
+    if (
+        not isinstance(annotations, list)
+        or not annotations
+        or not all(isinstance(annotation, dict) for annotation in annotations)
+    ):
+        raise ValueError("annotations must be a non-empty list of objects")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must not be empty")
+
+    version = ModelVersion.objects.get(pk=base_version_id)
+    user = User.objects.get(pk=user_id)
+    create_annotation_edit(
+        base_version=version,
+        prompt=prompt,
+        annotations=annotations,
+        created_by=user,
+    )
+    return {
+        "base_version_id": version.id,
+        "project_id": version.project_id,
+        "queued": True,
+    }
 
 
 # ---------------------------------------------------------------------------

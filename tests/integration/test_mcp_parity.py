@@ -23,9 +23,11 @@ from factories import (
 )
 
 from agents.llm import LLMError
+from agents.tasks import run_agent_workflow
 from designs.models import ModelVersion
 from designs.services import (
     artifact_path,
+    create_annotation_edit,
     create_next_version,
     start_render,
     version_status,
@@ -63,6 +65,7 @@ PARITY_TOOLS = {
     "create_project",
     "list_projects",
     "generate_model_from_prompt",
+    "edit_model_from_annotations",
     "get_model_version",
     "export_model_stl",
     # Phase 8 community (terv.md 25.3): same services as the JSON API.
@@ -87,6 +90,31 @@ def queued(monkeypatch):
     ids: list[int] = []
     monkeypatch.setattr(render_model_stl, "delay", ids.append)
     return ids
+
+
+@pytest.fixture
+def queued_edits(monkeypatch):
+    """Capture annotation-edit workflows instead of talking to the broker."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        run_agent_workflow,
+        "delay",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+    return calls
+
+
+#: One visual prompt: a 3D point plus the natural-language instruction for it.
+ANNOTATION_EDITS = [
+    {
+        "id": "c1",
+        "kind": "point",
+        "point": [35.0, 12.5, 8.0],
+        "normal": [0.0, 0.0, 1.0],
+        "faces": [],
+        "instruction": "4 mm-es átmenő lyuk",
+    }
+]
 
 
 def test_every_registered_tool_has_a_parity_test():
@@ -203,6 +231,77 @@ def test_generate_model_from_prompt_tool_delegates_to_services(queued):
     }
     assert version_status(version)["status"] == "queued"
     assert queued == [version.id]
+
+
+# ---------------------------------------------------------------------------
+# edit_model_from_annotations
+# ---------------------------------------------------------------------------
+
+
+def test_edit_model_from_annotations_tool_delegates_to_service(queued_edits):
+    version = ModelVersionFactory(project=ProjectFactory())
+    user = _member_of(version.project)
+
+    with patch("mcp.tools_impl.create_annotation_edit", wraps=create_annotation_edit) as service:
+        result = call(
+            "edit_model_from_annotations",
+            base_version_id=version.id,
+            prompt="A kijelölt peremre tegyél egy 4 mm-es lyukat.",
+            annotations=ANNOTATION_EDITS,
+            user_id=user.id,
+        )
+
+    service.assert_called_once_with(
+        base_version=version,
+        prompt="A kijelölt peremre tegyél egy 4 mm-es lyukat.",
+        annotations=ANNOTATION_EDITS,
+        created_by=user,
+    )
+    assert result == {
+        "base_version_id": version.id,
+        "project_id": version.project_id,
+        "queued": True,
+    }
+    # The service enqueues the agent workflow; no Celery/Redis is touched.
+    assert queued_edits == [
+        {
+            "project_id": version.project_id,
+            "prompt": "A kijelölt peremre tegyél egy 4 mm-es lyukat.",
+            "user_id": user.id,
+            "base_version_id": version.id,
+            "annotations": ANNOTATION_EDITS,
+        }
+    ]
+
+
+def test_edit_model_from_annotations_tool_rejects_a_non_member():
+    version = ModelVersionFactory()
+    outsider = UserFactory()
+
+    with pytest.raises(PermissionDenied):
+        call(
+            "edit_model_from_annotations",
+            base_version_id=version.id,
+            prompt="nope",
+            annotations=ANNOTATION_EDITS,
+            user_id=outsider.id,
+        )
+
+
+def test_edit_model_from_annotations_tool_requires_annotations(queued_edits):
+    version = ModelVersionFactory()
+    user = _member_of(version.project)
+
+    with pytest.raises(ValueError):
+        call(
+            "edit_model_from_annotations",
+            base_version_id=version.id,
+            prompt="empty prompt",
+            annotations=[],
+            user_id=user.id,
+        )
+
+    assert queued_edits == []
 
 
 # ---------------------------------------------------------------------------
