@@ -796,6 +796,85 @@ ul.error-box {
     color: var(--accent-2);
 }
 
+.badge.is-danger {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+/* Model advisor (Ollama page) --------------------------------------------- */
+
+[data-ollama-advisor] {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    margin-top: 1.25rem;
+}
+
+[data-ollama-advisor] .panel h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.05rem;
+}
+
+[data-ollama-advisor] .panel h3 {
+    margin: 1.25rem 0 0.5rem;
+    font-size: 0.95rem;
+}
+
+.chip {
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.chip:hover {
+    color: var(--text);
+    border-color: var(--accent);
+}
+
+.chip.is-active {
+    border-color: var(--accent);
+    color: var(--accent-2);
+    background: rgba(90, 160, 255, 0.1);
+}
+
+.tabs {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+}
+
+.tier-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.tier-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+[data-ollama-advisor] .input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+[data-ollama-advisor] .input-row .input {
+    max-width: 320px;
+}
+
 /* Pull progress ----------------------------------------------------------- */
 
 .pull-list {

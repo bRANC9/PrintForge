@@ -26,15 +26,19 @@ from agents.services import runs_accessible_to
 from configuration.models import OllamaPull
 from configuration.services import (
     OllamaError,
+    RemoteCatalogError,
     delete_ollama_model,
     effective_settings,
     get_setting,
     get_settings,
+    list_ollama_library_models,
     list_ollama_models,
     list_pulls,
+    model_recommendations,
     ollama_version,
     pull_ollama_model,
     pull_status,
+    search_huggingface_models,
     test_ollama,
     update_settings,
 )
@@ -101,6 +105,8 @@ from .serializers import (
     ModelVersionSerializer,
     NotificationSerializer,
     OllamaModelNameSerializer,
+    OllamaRecommendationQuerySerializer,
+    OllamaRemoteQuerySerializer,
     PlateItemSerializer,
     PrinterSerializer,
     PrintJobCreateSerializer,
@@ -763,6 +769,54 @@ class OllamaModelUseView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         return Response({"ok": True, "ollama_model": name})
+
+
+class OllamaRecommendationsView(APIView):
+    """VRAM-based model advisor (staff only).
+
+    Combines the curated catalog, the installed models and a memory estimate;
+    never 500s when Ollama is unreachable (installed list degrades to empty).
+    """
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        serializer = OllamaRecommendationQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        return Response(
+            model_recommendations(
+                vram_gb=data["vram_gb"],
+                context=data.get("context", 8192),
+                category=data.get("category", ""),
+            )
+        )
+
+
+class OllamaRemoteModelsView(APIView):
+    """Proxy the ollama.com / Hugging Face model catalogs (staff only)."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        serializer = OllamaRemoteQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        source = data["source"]
+        try:
+            if source == "ollama":
+                models = list_ollama_library_models(limit=data["limit"])
+            else:
+                models = search_huggingface_models(
+                    data.get("q", ""),
+                    limit=min(data["limit"], 10),
+                )
+        except RemoteCatalogError as exc:
+            return Response(
+                {"source": source, "models": [], "error": str(exc)},
+                status=HTTPStatus.OK,
+            )
+        return Response({"source": source, "models": models, "error": None})
 
 
 class OllamaPullsView(APIView):

@@ -20,8 +20,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from django.conf import settings as django_settings
@@ -30,6 +33,7 @@ from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.utils import timezone
 
+from . import model_catalog
 from .models import AppSettings, OllamaPull, OllamaPullStatus
 from .tasks import pull_ollama_model_task
 
@@ -38,16 +42,20 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "SETTING_NAMES",
     "OllamaError",
+    "RemoteCatalogError",
     "delete_ollama_model",
     "effective_settings",
     "get_setting",
     "get_settings",
     "invalidate_settings_cache",
+    "list_ollama_library_models",
     "list_ollama_models",
     "list_pulls",
+    "model_recommendations",
     "ollama_version",
     "pull_ollama_model",
     "pull_status",
+    "search_huggingface_models",
     "show_ollama_model",
     "test_ollama",
     "update_settings",
@@ -444,4 +452,187 @@ def pull_status(pull: OllamaPull) -> dict:
         "created_at": pull.created_at.isoformat() if pull.created_at else None,
         "started_at": pull.started_at.isoformat() if pull.started_at else None,
         "completed_at": pull.completed_at.isoformat() if pull.completed_at else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Model advisor: VRAM recommendation + remote catalogs (ollama.com / HF)
+# ---------------------------------------------------------------------------
+
+
+class RemoteCatalogError(RuntimeError):
+    """A remote model catalog (ollama.com / huggingface.co) could not be read."""
+
+
+#: Timeout for the remote catalog HTTP calls.
+_REMOTE_TIMEOUT = 8
+
+#: ollama.com exposes an OpenAI-ish list of (mostly cloud) models at these URLs.
+OLLAMA_LIBRARY_URL = "https://ollama.com/api/tags"
+HUGGINGFACE_MODELS_URL = "https://huggingface.co/api/models"
+HUGGINGFACE_MODEL_URL = "https://huggingface.co/api/models/{repo}"
+
+#: GGUF quantization token at the end of a filename (``...-Q4_K_M.gguf``).
+_QUANT_TOKEN = re.compile(
+    r"(?:^|[-_/])"
+    r"(Q\d(?:_[A-Za-z0-9]+)*|IQ\d(?:_[A-Za-z0-9]+)*|BF16|FP16|F16|F32|MXFP4)"
+    r"\.gguf$",
+    re.IGNORECASE,
+)
+
+
+def _remote_json(url: str, *, timeout: int = _REMOTE_TIMEOUT) -> Any:
+    """GET ``url`` and decode JSON, raising :class:`RemoteCatalogError`."""
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "PrintForge/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except Exception as exc:  # noqa: BLE001 - normalise every transport error
+        raise RemoteCatalogError(f"{type(exc).__name__}: {exc}") from exc
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise RemoteCatalogError("The remote catalog returned invalid JSON.") from exc
+
+
+def list_ollama_library_models(*, limit: int = 50) -> list[dict]:
+    """Return the model list published by ollama.com (cloud/featured)."""
+    data = _remote_json(OLLAMA_LIBRARY_URL)
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        raise RemoteCatalogError("Unexpected response from ollama.com/api/tags.")
+    result: list[dict] = []
+    for item in models[: max(int(limit), 1)]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("model") or ""
+        if not name:
+            continue
+        size = item.get("size")
+        result.append(
+            {
+                "name": name,
+                "pull_name": name,
+                "size": size,
+                "size_human": _human_size(size),
+                "modified_at": item.get("modified_at"),
+                "source": "ollama",
+            }
+        )
+    return result
+
+
+def _hf_quants(repo: str) -> list[str]:
+    """Extract the available GGUF quantization tags for a Hugging Face repo."""
+    try:
+        data = _remote_json(HUGGINGFACE_MODEL_URL.format(repo=repo))
+    except RemoteCatalogError:
+        return []
+    siblings = data.get("siblings") if isinstance(data, dict) else None
+    if not isinstance(siblings, list):
+        return []
+    quants: list[str] = []
+    for sibling in siblings:
+        filename = (sibling or {}).get("rfilename") or ""
+        match = _QUANT_TOKEN.search(filename)
+        if match:
+            quant = match.group(1).upper()
+            if quant not in quants:
+                quants.append(quant)
+    return quants
+
+
+def _preferred_quant(quants: list[str]) -> str:
+    """Prefer a good size/quality default, else the first available quant."""
+    for candidate in ("Q4_K_M", "Q4_K_S", "Q5_K_M", "Q8_0"):
+        if candidate in quants:
+            return candidate
+    return quants[0] if quants else ""
+
+
+def search_huggingface_models(query: str = "", *, limit: int = 10) -> list[dict]:
+    """Search Hugging Face for GGUF models runnable via ``hf.co/<repo>``.
+
+    The quant list comes from a second request per repo (the search response
+    does not embed the file list); those lookups run in a small thread pool.
+    """
+    params = {
+        "filter": "gguf",
+        "sort": "downloads",
+        "direction": "-1",
+        "limit": str(max(int(limit), 1)),
+    }
+    if query:
+        params["search"] = query
+    url = f"{HUGGINGFACE_MODELS_URL}?{urllib.parse.urlencode(params)}"
+    data = _remote_json(url)
+    if not isinstance(data, list):
+        raise RemoteCatalogError("Unexpected response from huggingface.co/api/models.")
+
+    result: list[dict] = []
+    for item in data[: max(int(limit), 1)]:
+        repo = (item or {}).get("id") or ""
+        if not repo:
+            continue
+        result.append(
+            {
+                "name": repo,
+                "downloads": item.get("downloads"),
+                "likes": item.get("likes"),
+                "quants": [],
+                "source": "huggingface",
+            }
+        )
+
+    if result:
+        with ThreadPoolExecutor(max_workers=min(4, len(result))) as pool:
+            for entry, quants in zip(
+                result,
+                pool.map(lambda e: _hf_quants(e["name"]), result),
+                strict=True,
+            ):
+                entry["quants"] = quants
+                chosen = _preferred_quant(quants)
+                entry["pull_name"] = f"hf.co/{entry['name']}" + (f":{chosen}" if chosen else "")
+    return result
+
+
+def model_recommendations(
+    *,
+    vram_gb: float,
+    context: int = 8192,
+    category: str = "",
+    installed: list[dict] | None = None,
+) -> dict:
+    """Rank catalog + installed models against a VRAM budget.
+
+    ``installed`` is normally read from the live Ollama instance; a failed
+    lookup degrades to an empty list instead of breaking the advisor.
+    """
+    if vram_gb is None or float(vram_gb) <= 0:
+        raise ValueError("vram_gb must be a positive number.")
+    if installed is None:
+        try:
+            installed = list_ollama_models()
+        except OllamaError:
+            installed = []
+    categories = [category] if category else None
+    return {
+        "vram_gb": float(vram_gb),
+        "context": int(context),
+        "category": category,
+        "vram_tiers": list(model_catalog.VRAM_TIERS),
+        "recommendations": model_catalog.recommend(
+            float(vram_gb),
+            context=int(context),
+            categories=categories,
+            installed=installed,
+        ),
+        "tiers": model_catalog.recommendation_tiers(
+            context=int(context),
+            categories=categories,
+        ),
     }

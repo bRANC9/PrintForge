@@ -10,7 +10,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from configuration.models import OllamaPull, OllamaPullStatus
-from configuration.services import OllamaError, get_setting
+from configuration.services import OllamaError, RemoteCatalogError, get_setting
 
 pytestmark = pytest.mark.django_db
 
@@ -199,6 +199,85 @@ def test_pulls_list_and_detail(staff):
     assert detail.json()["name"] == "a:1b"
 
     assert client.get("/api/v1/ollama/pulls/999999/").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /recommendations/  and  GET /remote/
+# ---------------------------------------------------------------------------
+
+
+def test_advisor_endpoints_require_staff(member):
+    client = auth(member)
+
+    assert client.get("/api/v1/ollama/recommendations/?vram_gb=8").status_code == 403
+    assert client.get("/api/v1/ollama/remote/?source=ollama").status_code == 403
+
+
+def test_recommendations_returns_the_service_payload(staff, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"vram_gb": 8.0, "context": 8192, "recommendations": [], "tiers": []}
+
+    monkeypatch.setattr("api.views.model_recommendations", fake)
+
+    response = auth(staff).get("/api/v1/ollama/recommendations/?vram_gb=8&context=16384")
+
+    assert response.status_code == 200
+    assert captured["vram_gb"] == 8.0
+    assert captured["context"] == 16384
+    assert response.json()["vram_gb"] == 8.0
+
+
+def test_recommendations_requires_a_positive_vram(staff):
+    assert auth(staff).get("/api/v1/ollama/recommendations/").status_code == 400
+    assert auth(staff).get("/api/v1/ollama/recommendations/?vram_gb=0").status_code == 400
+
+
+def test_remote_ollama_source(staff, monkeypatch):
+    monkeypatch.setattr(
+        "api.views.list_ollama_library_models",
+        lambda *, limit: [{"name": "glm-5", "pull_name": "glm-5", "source": "ollama"}],
+    )
+
+    response = auth(staff).get("/api/v1/ollama/remote/?source=ollama&limit=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "ollama"
+    assert body["error"] is None
+    assert body["models"][0]["name"] == "glm-5"
+
+
+def test_remote_huggingface_source(staff, monkeypatch):
+    captured = {}
+
+    def fake(query, *, limit):
+        captured.update({"query": query, "limit": limit})
+        return [{"name": "unsloth/x-GGUF", "pull_name": "hf.co/unsloth/x-GGUF:Q4_K_M"}]
+
+    monkeypatch.setattr("api.views.search_huggingface_models", fake)
+
+    response = auth(staff).get("/api/v1/ollama/remote/?source=huggingface&q=qwen&limit=30")
+
+    assert response.status_code == 200
+    assert captured == {"query": "qwen", "limit": 10}
+    assert response.json()["models"][0]["pull_name"].startswith("hf.co/")
+
+
+def test_remote_degrades_on_catalog_error(staff, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RemoteCatalogError("connection refused")
+
+    monkeypatch.setattr("api.views.list_ollama_library_models", boom)
+
+    response = auth(staff).get("/api/v1/ollama/remote/?source=ollama")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["models"] == []
+    assert "connection refused" in body["error"]
 
 
 # ---------------------------------------------------------------------------

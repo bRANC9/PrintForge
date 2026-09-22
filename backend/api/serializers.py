@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from accounts.models import User
 from agents.models import AgentRun
+from configuration import model_catalog
 from configuration.services import SETTING_NAMES
 from designs.models import ModelVersion
 from notifications.models import Notification
@@ -449,6 +450,32 @@ def validate_ollama_model_name(value: str) -> str:
     if any(segment in ("", ".", "..") for segment in value.split("/")):
         raise serializers.ValidationError("Invalid model name.")
     return value
+
+
+class OllamaRecommendationQuerySerializer(serializers.Serializer):
+    """Query params for the VRAM-based model advisor."""
+
+    vram_gb = serializers.FloatField(min_value=1, max_value=2048)
+    context = serializers.IntegerField(
+        min_value=512,
+        max_value=131072,
+        required=False,
+        default=8192,
+    )
+    category = serializers.ChoiceField(
+        choices=list(model_catalog.CATEGORIES),
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+
+
+class OllamaRemoteQuerySerializer(serializers.Serializer):
+    """Query params for the remote catalog proxy (ollama.com / Hugging Face)."""
+
+    source = serializers.ChoiceField(choices=["ollama", "huggingface"])
+    q = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    limit = serializers.IntegerField(min_value=1, max_value=50, required=False, default=20)
 
 
 class OllamaModelNameSerializer(serializers.Serializer):

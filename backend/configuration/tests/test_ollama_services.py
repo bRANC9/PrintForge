@@ -9,11 +9,13 @@ from configuration.models import OllamaPull, OllamaPullStatus
 from configuration.services import (
     OllamaError,
     delete_ollama_model,
+    list_ollama_library_models,
     list_ollama_models,
     list_pulls,
     ollama_version,
     pull_ollama_model,
     pull_status,
+    search_huggingface_models,
     show_ollama_model,
 )
 
@@ -94,6 +96,66 @@ def test_list_ollama_models_defaults_capabilities_to_empty(monkeypatch):
     models = list_ollama_models()
 
     assert models[0]["capabilities"] == []
+
+
+def test_list_ollama_library_models_normalizes(monkeypatch):
+    monkeypatch.setattr(
+        "configuration.services._remote_json",
+        lambda *a, **k: {
+            "models": [
+                {"name": "glm-5", "size": 5 * 1024**3, "modified_at": "2026-01-01T00:00:00Z"},
+                {"model": "kimi-k3", "size": 0},
+                {"name": ""},
+            ]
+        },
+    )
+
+    models = list_ollama_library_models(limit=5)
+
+    assert models[0] == {
+        "name": "glm-5",
+        "pull_name": "glm-5",
+        "size": 5 * 1024**3,
+        "size_human": "5.0 GB",
+        "modified_at": "2026-01-01T00:00:00Z",
+        "source": "ollama",
+    }
+    assert models[1]["name"] == "kimi-k3"
+
+
+def test_search_huggingface_models_extracts_quant_tags(monkeypatch):
+    def fake_json(url, **kwargs):
+        if "?" in url:  # the search request
+            return [{"id": "unsloth/x-GGUF", "downloads": 10, "likes": 1}]
+        return {  # the per-repo file list
+            "siblings": [
+                {"rfilename": "x-Q4_K_M.gguf"},
+                {"rfilename": "x-Q8_0.gguf"},
+                {"rfilename": "x-00001-of-00002.gguf"},
+            ]
+        }
+
+    monkeypatch.setattr("configuration.services._remote_json", fake_json)
+
+    models = search_huggingface_models("x", limit=1)
+
+    assert models[0]["quants"] == ["Q4_K_M", "Q8_0"]
+    assert models[0]["pull_name"] == "hf.co/unsloth/x-GGUF:Q4_K_M"
+    assert models[0]["source"] == "huggingface"
+
+
+def test_search_huggingface_models_without_quants(monkeypatch):
+    def fake_json(url, **kwargs):
+        if "?" in url:
+            return [{"id": "u/plain-GGUF"}]
+        return {"siblings": [{"rfilename": "plain-00001-of-00002.gguf"}]}
+
+    monkeypatch.setattr("configuration.services._remote_json", fake_json)
+
+    models = search_huggingface_models(limit=1)
+
+    assert models[0]["quants"] == []
+    assert models[0]["pull_name"] == "hf.co/u/plain-GGUF"
 
 
 def test_show_ollama_model_posts_the_name(monkeypatch):

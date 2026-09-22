@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Ollama modellek – PrintForge{% endblock %}
 {% block content %}
-    <div data-ollama-models x-data="ollamaModels">
+    <div data-ollama-models
+         x-data="ollamaModels"
+         @ollama-pull-started.window="loadAll()">
         <header class="page-head">
             <div>
                 <h1>Ollama modellek</h1>
@@ -16,12 +18,8 @@
                 <button type="button" class="btn" @click="loadAll()" :disabled="loading">Frissítés</button>
             </div>
         </header>
-        <p class="error-box"
-           x-show="forbidden"
-           x-cloak>Nincs jogosultságod az Ollama kezeléséhez (csak adminisztrátoroknak).</p>
-        <p class="warning-box"
-           x-show="serverError"
-           x-cloak>Az Ollama nem érhető el: <span x-text="serverError"></span></p>
+        <p class="error-box" x-show="forbidden" x-cloak>Nincs jogosultságod az Ollama kezeléséhez (csak adminisztrátoroknak).</p>
+        <p class="warning-box" x-show="serverError" x-cloak>Az Ollama nem érhető el: <span x-text="serverError"></span></p>
         <p class="error-box" x-show="error && !forbidden" x-cloak x-text="error"></p>
         <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
         <p class="muted" x-show="loading">Betöltés…</p>
@@ -83,9 +81,7 @@
                                                         class="btn btn-small btn-danger"
                                                         @click="deleteModel(model)"
                                                         :disabled="busyModel === model.name">Igen, törlés</button>
-                                                <button type="button"
-                                                        class="btn btn-small"
-                                                        @click="confirmDelete = ''">Mégse</button>
+                                                <button type="button" class="btn btn-small" @click="confirmDelete = ''">Mégse</button>
                                             </span>
                                         </template>
                                         <template x-if="confirmDelete !== model.name">
@@ -134,5 +130,190 @@
                 </ul>
             </section>
         </div>
+    </div>
+    <div data-ollama-advisor x-data="ollamaAdvisor" x-cloak>
+        <p class="error-box" x-show="forbidden" x-cloak>Nincs jogosultságod a modell ajánlóhoz (csak adminisztrátoroknak).</p>
+        <section class="panel" x-show="!forbidden">
+            <h2>Modell ajánló</h2>
+            <p class="muted">Add meg a GPU VRAM méretét. A becslés a modellsúlyokból, a KV-cache-ből és egy runtime pufferből számol (konzervatív).</p>
+            <div class="form-row">
+                <label for="advisor-vram">VRAM (GB)</label>
+                <div class="input-row">
+                    <input id="advisor-vram"
+                           class="input"
+                           type="number"
+                           min="1"
+                           max="2048"
+                           step="1"
+                           x-model.number="vram"
+                           @change="loadRecommendations()">
+                    <template x-for="tier in vramTiers" :key="tier">
+                        <button type="button"
+                                class="chip"
+                                :class="{ 'is-active': Number(vram) === tier }"
+                                @click="setVram(tier)"
+                                x-text="tier + ' GB'"></button>
+                    </template>
+                </div>
+            </div>
+            <div class="form-row is-inline">
+                <label for="advisor-context">Kontextus</label>
+                <select id="advisor-context"
+                        class="input"
+                        x-model.number="context"
+                        @change="loadRecommendations()">
+                    <template x-for="item in contexts" :key="item.value">
+                        <option :value="item.value" x-text="item.label"></option>
+                    </template>
+                </select>
+                <label for="advisor-category">Kategória</label>
+                <select id="advisor-category"
+                        class="input"
+                        x-model="category"
+                        @change="loadRecommendations()">
+                    <template x-for="item in categories" :key="item.value">
+                        <option :value="item.value" x-text="item.label"></option>
+                    </template>
+                </select>
+            </div>
+            <p class="muted" x-show="recLoading">Betöltés…</p>
+            <p class="error-box" x-show="recError" x-cloak x-text="recError"></p>
+            <div class="table-wrap" x-show="!recLoading && recommendations.length">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Modell</th>
+                            <th>Kategória</th>
+                            <th>Param</th>
+                            <th>Javasolt kvantálás</th>
+                            <th>Becsült memória</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="model in recommendations" :key="model.name">
+                            <tr :class="{ 'is-active-row': model.installed }">
+                                <td>
+                                    <span x-text="model.name"></span>
+                                    <span class="badge is-ok" x-show="model.installed">telepítve</span>
+                                    <span class="badge"
+                                          :class="model.fits ? 'is-ok' : 'is-danger'"
+                                          x-text="model.fits ? 'elfér' : 'nem fér el'"></span>
+                                </td>
+                                <td class="muted" x-text="model.category"></td>
+                                <td class="muted" x-text="model.params_b ? model.params_b + 'B' : '—'"></td>
+                                <td x-text="model.suggested_quant || '—'"></td>
+                                <td x-text="model.estimated_gb !== null && model.estimated_gb !== undefined ? '~' + model.estimated_gb + ' GB' : '—'">
+                                </td>
+                                <td class="row-actions">
+                                    <button type="button"
+                                            class="btn btn-small"
+                                            @click="pullModel(model.name)"
+                                            :disabled="model.installed || pulling === model.name"
+                                            x-text="model.installed ? 'Telepítve' : (pulling === model.name ? 'Indítás…' : 'Letöltés')">
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+            <h3>Ajánlás VRAM szintek szerint</h3>
+            <ul class="tier-list">
+                <template x-for="tier in tiers" :key="tier.vram_gb">
+                    <li>
+                        <span class="badge" x-text="tier.vram_gb + ' GB'"></span>
+                        <template x-if="tier.model">
+                            <span>
+                                <strong x-text="tier.model.name"></strong>
+                                <span class="muted"
+                                      x-text="'· ' + tier.model.suggested_quant + ' · ~' + tier.model.estimated_gb + ' GB'"></span>
+                            </span>
+                        </template>
+                        <template x-if="!tier.model">
+                            <span class="muted">—</span>
+                        </template>
+                    </li>
+                </template>
+            </ul>
+            <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        </section>
+        <section class="panel" x-show="!forbidden">
+            <h2>Elérhető modellek</h2>
+            <p class="muted">
+                Külső katalógusok. Az ollama.com a hivatalos (főleg cloud) lista; a Hugging Face GGUF modellek
+                <code>hf.co/&lt;repo&gt;</code> néven húzhatók.
+            </p>
+            <div class="tabs">
+                <button type="button"
+                        class="chip"
+                        :class="{ 'is-active': source === 'ollama' }"
+                        @click="setSource('ollama')">ollama.com</button>
+                <button type="button"
+                        class="chip"
+                        :class="{ 'is-active': source === 'huggingface' }"
+                        @click="setSource('huggingface')">Hugging Face</button>
+            </div>
+            <form class="input-row"
+                  x-show="source === 'huggingface'"
+                  @submit.prevent="loadRemote()">
+                <input class="input"
+                       type="search"
+                       placeholder="pl. qwen2.5-coder"
+                       x-model="query">
+                <button type="submit" class="btn btn-small" :disabled="remoteLoading">Keresés</button>
+            </form>
+            <p class="muted" x-show="remoteLoading">Betöltés…</p>
+            <p class="error-box" x-show="remoteError" x-cloak x-text="remoteError"></p>
+            <div class="table-wrap" x-show="!remoteLoading && remote.length">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Modell</th>
+                            <th x-show="source === 'ollama'">Méret</th>
+                            <th x-show="source === 'huggingface'">Letöltés / Like</th>
+                            <th x-show="source === 'huggingface'">Kvantálás</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="model in remote" :key="model.name">
+                            <tr>
+                                <td>
+                                    <span x-text="model.name"></span>
+                                </td>
+                                <td class="muted"
+                                    x-show="source === 'ollama'"
+                                    x-text="model.size_human || '—'"></td>
+                                <td class="muted"
+                                    x-show="source === 'huggingface'"
+                                    x-text="(model.downloads || 0).toLocaleString('hu-HU') + ' / ' + (model.likes || 0)">
+                                </td>
+                                <td x-show="source === 'huggingface'">
+                                    <select class="input"
+                                            x-show="model.quants && model.quants.length"
+                                            x-model="quantChoice[model.name]">
+                                        <template x-for="quant in model.quants" :key="quant">
+                                            <option :value="quant" x-text="quant"></option>
+                                        </template>
+                                    </select>
+                                    <span class="muted" x-show="!model.quants || !model.quants.length">—</span>
+                                </td>
+                                <td class="row-actions">
+                                    <button type="button"
+                                            class="btn btn-small"
+                                            @click="pullModel(remotePullName(model))"
+                                            :disabled="pulling === remotePullName(model)"
+                                            x-text="pulling === remotePullName(model) ? 'Indítás…' : 'Letöltés'">
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+            <p class="muted"
+               x-show="!remoteLoading && !remote.length && !remoteError">Nincs találat.</p>
+        </section>
     </div>
 {% endblock %}

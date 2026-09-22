@@ -43,7 +43,23 @@
         ollamaModelPull: () => `${API_BASE}/ollama/models/pull/`,
         ollamaPulls: () => `${API_BASE}/ollama/pulls/`,
         ollamaPull: (pullId) => `${API_BASE}/ollama/pulls/${encodeURIComponent(pullId)}/`,
+        // Model advisor: VRAM recommendation + remote catalogs.
+        ollamaRecommendations: () => `${API_BASE}/ollama/recommendations/`,
+        ollamaRemote: () => `${API_BASE}/ollama/remote/`,
     };
+
+    /** Append a query object to a URL, skipping empty values. */
+    function withQuery(url, params) {
+        const search = new URLSearchParams();
+        Object.keys(params || {}).forEach((key) => {
+            const value = params[key];
+            if (value !== "" && value !== null && value !== undefined) {
+                search.set(key, value);
+            }
+        });
+        const query = search.toString();
+        return query ? `${url}?${query}` : url;
+    }
 
     const NOTIFICATION_POLL_MS = 60000;
     const OLLAMA_POLL_MS = 2000;
@@ -210,6 +226,8 @@
         deleteOllamaModel: (name) => request(endpoints.ollamaModelDelete(name), { method: "DELETE" }),
         useOllamaModel: (name) =>
             request(endpoints.ollamaModelUse(), { method: "POST", body: { name } }),
+        ollamaRecommendations: (params) => request(withQuery(endpoints.ollamaRecommendations(), params)),
+        ollamaRemote: (params) => request(withQuery(endpoints.ollamaRemote(), params)),
     };
 
     function statusKind(status) {
@@ -1266,6 +1284,162 @@
     }
 
     /**
+     * Model advisor (staff-only): VRAM-based recommendation plus the remote
+     * ollama.com / Hugging Face catalogs.
+     *
+     * GET /api/v1/ollama/recommendations/?vram_gb=&context=&category=
+     * GET /api/v1/ollama/remote/?source=ollama|huggingface&q=&limit=
+     * POST /api/v1/ollama/models/pull/  (shared with the model list)
+     */
+    function ollamaAdvisorComponent() {
+        const VRAM_TIERS = [4, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64];
+        const CONTEXTS = [
+            { value: 4096, label: "4k" },
+            { value: 8192, label: "8k" },
+            { value: 16384, label: "16k" },
+            { value: 32768, label: "32k" },
+        ];
+        const CATEGORIES = [
+            { value: "", label: "Mind" },
+            { value: "coding", label: "Kód" },
+            { value: "chat", label: "Chat" },
+            { value: "reasoning", label: "Reasoning" },
+            { value: "vision", label: "Vision" },
+            { value: "embedding", label: "Embedding" },
+        ];
+        const HF_QUANT_PREFERENCE = ["Q4_K_M", "Q4_K_S", "Q5_K_M", "Q8_0"];
+
+        return {
+            vram: 8,
+            context: 8192,
+            category: "",
+            vramTiers: VRAM_TIERS,
+            contexts: CONTEXTS,
+            categories: CATEGORIES,
+
+            recommendations: [],
+            tiers: [],
+            recLoading: true,
+            recError: "",
+
+            source: "ollama",
+            remote: [],
+            remoteLoading: false,
+            remoteError: "",
+            query: "",
+            quantChoice: {},
+
+            pulling: "",
+            notice: "",
+            forbidden: false,
+
+            formatBytes,
+
+            async init() {
+                await Promise.all([this.loadRecommendations(), this.loadRemote()]);
+            },
+
+            setVram(value) {
+                this.vram = value;
+                this.loadRecommendations();
+            },
+
+            async loadRecommendations() {
+                const vram = Number(this.vram);
+                if (!Number.isFinite(vram) || vram <= 0) {
+                    this.recError = "Adj meg egy pozitív VRAM értéket.";
+                    return;
+                }
+                this.recLoading = true;
+                this.recError = "";
+                try {
+                    const data =
+                        (await api.ollamaRecommendations({
+                            vram_gb: vram,
+                            context: this.context,
+                            category: this.category,
+                        })) || {};
+                    this.recommendations = data.recommendations || [];
+                    this.tiers = data.tiers || [];
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.recError = error.message || String(error);
+                } finally {
+                    this.recLoading = false;
+                }
+            },
+
+            setSource(source) {
+                this.source = source;
+                if (source === "ollama" && !this.remote.length) {
+                    this.loadRemote();
+                }
+            },
+
+            async loadRemote() {
+                this.remoteLoading = true;
+                this.remoteError = "";
+                try {
+                    const data =
+                        (await api.ollamaRemote({
+                            source: this.source,
+                            q: this.source === "huggingface" ? this.query.trim() : "",
+                            limit: this.source === "huggingface" ? 10 : 40,
+                        })) || {};
+                    this.remote = data.models || [];
+                    this.remoteError = data.error || "";
+                    if (this.source === "huggingface") this.seedQuantChoices();
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.remoteError = error.message || String(error);
+                } finally {
+                    this.remoteLoading = false;
+                }
+            },
+
+            /** Default each HF repo to a sensible quantization. */
+            seedQuantChoices() {
+                const choices = {};
+                for (const model of this.remote) {
+                    const quants = Array.isArray(model.quants) ? model.quants : [];
+                    let chosen = HF_QUANT_PREFERENCE.find((q) => quants.includes(q));
+                    if (!chosen) chosen = quants[0] || "";
+                    choices[model.name] = chosen;
+                }
+                this.quantChoice = choices;
+            },
+
+            remotePullName(model) {
+                if (!model) return "";
+                if (model.source === "huggingface") {
+                    const quant = this.quantChoice[model.name];
+                    return `hf.co/${model.name}` + (quant ? `:${quant}` : "");
+                }
+                return model.pull_name || model.name;
+            },
+
+            async pullModel(name) {
+                const target = (name || "").trim();
+                if (!target || this.pulling) return;
+                this.pulling = target;
+                this.notice = "";
+                this.recError = "";
+                this.remoteError = "";
+                try {
+                    await api.pullOllamaModel(target);
+                    this.notice = `Letöltés elindítva: ${target}`;
+                    this.$dispatch("ollama-pull-started");
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.remoteError = error.message || String(error);
+                } finally {
+                    this.pulling = "";
+                }
+            },
+        };
+    }
+
+    /**
      * Alpine directive that keeps the imperative Three.js viewer in sync with
      * reactive state:  x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken }"
      */
@@ -1302,6 +1476,7 @@
         Alpine.data("printHistory", printHistoryComponent);
         Alpine.data("settingsPage", settingsPageComponent);
         Alpine.data("ollamaModels", ollamaModelsComponent);
+        Alpine.data("ollamaAdvisor", ollamaAdvisorComponent);
         registerStlViewerDirective(Alpine);
     });
 
