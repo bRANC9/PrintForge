@@ -8,7 +8,15 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agents.spec import Dimensions, EditOperation, ModelSpecification, Mounting, Vec3
+from agents.spec import (
+    Dimensions,
+    EditOperation,
+    ModelSpecification,
+    Mounting,
+    Primitive,
+    ReviewResult,
+    Vec3,
+)
 
 VALID: dict[str, Any] = {
     "object": "phone_holder",
@@ -86,6 +94,7 @@ def test_to_json_schema_lists_all_fields():
         "mounting",
         "material",
         "operations",
+        "primitives",
     ):
         assert field in schema["properties"]
 
@@ -247,3 +256,207 @@ def test_json_schema_exposes_bounded_edit_operation():
 
 def test_example_helper_is_unchanged_by_operations_field():
     assert ModelSpecification.example() == VALID
+
+
+# ---------------------------------------------------------------------------
+# Prompt-driven CSG primitives (docs/cad-primitives.md 1).
+# ---------------------------------------------------------------------------
+
+VALID_BOX: dict[str, Any] = {
+    "type": "box",
+    "role": "add",
+    "position": {"x": 10.0, "y": 20.0, "z": 5.0},
+    "rotation": {"x": 0.0, "y": 0.0, "z": 45.0},
+    "width": 40.0,
+    "depth": 30.0,
+    "height": 10.0,
+    "label": "base plate",
+}
+
+VALID_CYLINDER: dict[str, Any] = {
+    "type": "cylinder",
+    "role": "subtract",
+    "position": {"x": 0.0, "y": 0.0, "z": 3.0},
+    "diameter": 4.0,
+    "height": 8.0,
+    "label": "M4 hole",
+}
+
+
+def test_spec_without_primitives_defaults_to_empty_list():
+    model = ModelSpecification.model_validate(VALID)
+    assert model.primitives == []
+    # Empty primitives are omitted from the payload exactly like empty operations.
+    assert "primitives" not in model.model_dump()
+
+
+def test_spec_with_valid_box_primitive_validates():
+    model = ModelSpecification.model_validate(spec(primitives=[VALID_BOX]))
+    assert len(model.primitives) == 1
+    primitive = model.primitives[0]
+    assert primitive.type == "box"
+    assert primitive.role == "add"
+    assert primitive.position.x == pytest.approx(10.0)
+    assert primitive.position.y == pytest.approx(20.0)
+    assert primitive.position.z == pytest.approx(5.0)
+    assert primitive.rotation.z == pytest.approx(45.0)
+    assert primitive.width == pytest.approx(40.0)
+    assert primitive.depth == pytest.approx(30.0)
+    assert primitive.height == pytest.approx(10.0)
+    assert primitive.diameter is None
+    assert primitive.label == "base plate"
+    # A non-empty primitive list is serialised for the CAD backend.
+    dumped = model.model_dump()
+    assert dumped["primitives"][0]["type"] == "box"
+    assert dumped["primitives"][0]["position"] == {"x": 10.0, "y": 20.0, "z": 5.0}
+
+
+def test_spec_with_valid_cylinder_primitive_validates():
+    model = ModelSpecification.model_validate(spec(primitives=[VALID_CYLINDER]))
+    primitive = model.primitives[0]
+    assert primitive.type == "cylinder"
+    assert primitive.role == "subtract"
+    assert primitive.position.z == pytest.approx(3.0)
+    assert primitive.diameter == pytest.approx(4.0)
+    assert primitive.height == pytest.approx(8.0)
+    assert primitive.width is None
+    assert primitive.depth is None
+
+
+def test_primitive_defaults_are_centred_and_additive():
+    primitive = Primitive.model_validate({"type": "sphere", "diameter": 20.0})
+    assert primitive.role == "add"
+    assert primitive.position.model_dump() == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert primitive.rotation.model_dump() == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert primitive.label == ""
+
+
+def test_primitive_with_bad_type_is_rejected():
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({"type": "torus", "diameter": 5.0})
+
+
+def test_primitive_with_bad_role_is_rejected():
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_BOX, "role": "cut"})
+
+
+@pytest.mark.parametrize("field", ["width", "depth", "height", "diameter"])
+@pytest.mark.parametrize("value", [0.0, 0.3, 1000.1, 10_000.0])
+def test_primitive_size_out_of_bounds_is_rejected(field, value):
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({"type": "box", field: value})
+
+
+def test_primitive_size_bounds_are_inclusive():
+    small = Primitive.model_validate({"type": "box", "width": 0.4, "depth": 0.4, "height": 0.4})
+    assert small.width == pytest.approx(0.4)
+    large = Primitive.model_validate({"type": "cylinder", "diameter": 1000.0, "height": 1000.0})
+    assert large.diameter == pytest.approx(1000.0)
+
+
+def test_primitive_label_max_length_is_enforced():
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_BOX, "label": "x" * 121})
+
+
+def test_primitive_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_BOX, "radius": 2.0})
+
+
+def test_json_schema_exposes_bounded_primitive():
+    schema = ModelSpecification.to_json_schema()
+    assert "primitives" in schema["properties"]
+    primitive_schema = schema["$defs"]["Primitive"]
+    assert primitive_schema["additionalProperties"] is False
+    assert primitive_schema["properties"]["type"]["enum"] == [
+        "box",
+        "cylinder",
+        "sphere",
+        "cone",
+    ]
+    assert primitive_schema["properties"]["role"]["enum"] == ["add", "subtract"]
+    # Optional numeric sizes are exposed as ``anyOf`` (number | null).
+    number_schema = primitive_schema["properties"]["width"]["anyOf"][0]
+    assert number_schema["minimum"] == 0.4
+    assert number_schema["maximum"] == 1000.0
+    assert primitive_schema["properties"]["label"]["maxLength"] == 120
+    assert schema["properties"]["primitives"]["maxItems"] == 64
+
+
+def test_example_helper_is_unchanged_by_primitives_field():
+    assert ModelSpecification.example() == VALID
+
+
+# ---------------------------------------------------------------------------
+# Vision self-check review contract (docs/vision-self-check.md 3).
+# ---------------------------------------------------------------------------
+
+VALID_REVIEW: dict[str, Any] = {
+    "matches": False,
+    "issues": ["wall is too thin", "mounting holes are missing"],
+    "summary": "The preview does not match: walls and mounting holes differ.",
+}
+
+
+def test_valid_review_round_trips():
+    review = ReviewResult.model_validate(VALID_REVIEW)
+    assert review.matches is False
+    assert review.issues == ["wall is too thin", "mounting holes are missing"]
+    assert review.summary == "The preview does not match: walls and mounting holes differ."
+    assert review.model_dump() == VALID_REVIEW
+
+
+def test_review_defaults_are_empty():
+    review = ReviewResult.model_validate({"matches": True})
+    assert review.matches is True
+    assert review.issues == []
+    assert review.summary == ""
+    assert review.model_dump() == {"matches": True, "issues": [], "summary": ""}
+
+
+def test_review_strips_whitespace():
+    review = ReviewResult.model_validate({"matches": True, "summary": "  ok  "})
+    assert review.summary == "ok"
+
+
+def test_review_missing_matches_is_rejected():
+    with pytest.raises(ValidationError):
+        ReviewResult.model_validate({"issues": ["x"], "summary": "y"})
+
+
+def test_review_too_many_issues_is_rejected():
+    with pytest.raises(ValidationError):
+        ReviewResult.model_validate({"matches": False, "issues": ["x"] * 21})
+
+
+def test_review_issue_count_boundary_is_inclusive():
+    review = ReviewResult.model_validate({"matches": False, "issues": ["x"] * 20})
+    assert len(review.issues) == 20
+
+
+def test_review_summary_too_long_is_rejected():
+    with pytest.raises(ValidationError):
+        ReviewResult.model_validate({"matches": False, "summary": "x" * 501})
+
+
+def test_review_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        ReviewResult.model_validate({**VALID_REVIEW, "confidence": 0.9})
+
+
+def test_review_to_json_schema_lists_all_fields():
+    schema = ReviewResult.to_json_schema()
+    assert schema["title"] == "ReviewResult"
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {"matches", "issues", "summary"}
+    assert schema["properties"]["matches"]["type"] == "boolean"
+    assert schema["properties"]["issues"]["type"] == "array"
+    assert schema["properties"]["issues"]["maxItems"] == 20
+    assert schema["properties"]["summary"]["maxLength"] == 500
+    assert schema["required"] == ["matches"]
+
+
+def test_review_model_json_schema_matches_helper():
+    assert ReviewResult.model_json_schema() == ReviewResult.to_json_schema()

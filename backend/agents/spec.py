@@ -54,6 +54,25 @@ MAX_OPERATION_DIAMETER_MM = 200.0
 #: Maximum length of the optional human-readable operation label.
 MAX_OPERATION_LABEL = 120
 
+# ---------------------------------------------------------------------------
+# Bounds for prompt-driven CSG primitives (docs/cad-primitives.md 1).
+# ---------------------------------------------------------------------------
+
+#: Smallest printable primitive edge/diameter (below a 0.4 mm nozzle this is not printable).
+MIN_PRIMITIVE_MM = 0.4
+#: Upper bound for a primitive size to catch unit mistakes (cm vs mm).
+MAX_PRIMITIVE_MM = 1000.0
+#: Bounds for a primitive centre in model coordinates (mm).
+MIN_PRIMITIVE_POSITION_MM = -1000.0
+MAX_PRIMITIVE_POSITION_MM = 1000.0
+#: Bounds for a primitive rotation in degrees (XYZ order).
+MIN_PRIMITIVE_ROTATION_DEG = -360.0
+MAX_PRIMITIVE_ROTATION_DEG = 360.0
+#: Maximum length of the optional human-readable primitive label.
+MAX_PRIMITIVE_LABEL = 120
+#: Maximum number of primitives in a single specification.
+MAX_PRIMITIVE_COUNT = 64
+
 
 class Mounting(BaseModel):
     """How the part is fastened (terv.md 8.)."""
@@ -90,6 +109,87 @@ class Vec3(BaseModel):
     x: float
     y: float
     z: float
+
+
+def _zero_vec3() -> Vec3:
+    """Return a fresh origin vector (``Field(default_factory=...)`` helper)."""
+    return Vec3(x=0.0, y=0.0, z=0.0)
+
+
+def _check_vec3_range(name: str, value: Vec3, low: float, high: float) -> None:
+    """Reject a :class:`Vec3` with any component outside ``[low, high]``."""
+    for axis, component in (("x", value.x), ("y", value.y), ("z", value.z)):
+        if not low <= component <= high:
+            raise ValueError(f"{name}.{axis} must be between {low} and {high}, got {component}")
+
+
+class Primitive(BaseModel):
+    """One validated CSG primitive the LLM composes into a model.
+
+    The LLM emits primitives -- never OpenSCAD code -- and the CAD backend
+    re-validates and clamps every value before building the union/difference
+    tree (docs/cad-primitives.md 1). ``position`` is the centre of the shape in
+    model coordinates and ``rotation`` is in degrees, applied in XYZ order.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    type: Literal["box", "cylinder", "sphere", "cone"] = Field(
+        description="Primitive shape.",
+    )
+    role: Literal["add", "subtract"] = Field(
+        default="add",
+        description='"add" contributes material, "subtract" removes it.',
+    )
+    position: Vec3 = Field(
+        default_factory=_zero_vec3,
+        description="Centre of the primitive in model coordinates (mm).",
+    )
+    rotation: Vec3 = Field(
+        default_factory=_zero_vec3,
+        description="Rotation in degrees, XYZ order.",
+    )
+    width: float | None = Field(
+        default=None,
+        ge=MIN_PRIMITIVE_MM,
+        le=MAX_PRIMITIVE_MM,
+        description="Box X size in mm.",
+    )
+    depth: float | None = Field(
+        default=None,
+        ge=MIN_PRIMITIVE_MM,
+        le=MAX_PRIMITIVE_MM,
+        description="Box Y size in mm.",
+    )
+    height: float | None = Field(
+        default=None,
+        ge=MIN_PRIMITIVE_MM,
+        le=MAX_PRIMITIVE_MM,
+        description="Box Z size / cylinder or cone height in mm.",
+    )
+    diameter: float | None = Field(
+        default=None,
+        ge=MIN_PRIMITIVE_MM,
+        le=MAX_PRIMITIVE_MM,
+        description="Cylinder, sphere or cone diameter in mm.",
+    )
+    label: str = Field(
+        default="",
+        max_length=MAX_PRIMITIVE_LABEL,
+        description="Optional short human-readable label.",
+    )
+
+    @field_validator("position")
+    @classmethod
+    def _bound_position(cls, value: Vec3) -> Vec3:
+        _check_vec3_range("position", value, MIN_PRIMITIVE_POSITION_MM, MAX_PRIMITIVE_POSITION_MM)
+        return value
+
+    @field_validator("rotation")
+    @classmethod
+    def _bound_rotation(cls, value: Vec3) -> Vec3:
+        _check_vec3_range("rotation", value, MIN_PRIMITIVE_ROTATION_DEG, MAX_PRIMITIVE_ROTATION_DEG)
+        return value
 
 
 class EditOperation(BaseModel):
@@ -175,6 +275,14 @@ class ModelSpecification(BaseModel):
         default_factory=list,
         description="Validated parametric features applied to the base part (visual prompts).",
     )
+    primitives: list[Primitive] = Field(
+        default_factory=list,
+        max_length=MAX_PRIMITIVE_COUNT,
+        description=(
+            "Validated CSG primitives composed by the LLM; empty keeps the built-in template "
+            "(docs/cad-primitives.md 1)."
+        ),
+    )
 
     @field_validator("material")
     @classmethod
@@ -183,18 +291,21 @@ class ModelSpecification(BaseModel):
         return value.strip().upper()
 
     @model_serializer(mode="wrap")
-    def _omit_empty_operations(
+    def _omit_empty_collections(
         self, handler: Callable[[ModelSpecification], dict[str, Any]]
     ) -> dict[str, Any]:
-        """Keep the base specification canonical by omitting an empty ``operations``.
+        """Keep the base specification canonical by omitting empty optional lists.
 
-        The field always exists on the model and in the JSON schema; it is only
-        left out of the serialised payload when there are no features, so a spec
-        without operations round-trips byte-for-byte to the terv.md 8. example.
+        Both fields always exist on the model and in the JSON schema; they are
+        only left out of the serialised payload when empty, so a spec without
+        features or primitives round-trips byte-for-byte to the terv.md 8.
+        example and the CAD backend keeps its legacy template behaviour.
         """
         data = handler(self)
         if not self.operations:
             data.pop("operations", None)
+        if not self.primitives:
+            data.pop("primitives", None)
         return data
 
     @classmethod
@@ -209,9 +320,9 @@ class ModelSpecification(BaseModel):
     def example(cls) -> dict[str, Any]:
         """Return the terv.md 8. example as a validated, normalised dict.
 
-        The base example carries no features, so the empty ``operations`` field
-        is omitted by the model serializer and the payload stays byte-for-byte
-        the terv.md 8. example.
+        The base example carries no features or primitives, so the empty
+        ``operations``/``primitives`` fields are omitted by the model serializer
+        and the payload stays byte-for-byte the terv.md 8. example.
         """
         return cls.model_validate(
             {
@@ -223,3 +334,46 @@ class ModelSpecification(BaseModel):
                 "material": "PETG",
             }
         ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Vision self-check review contract (docs/vision-self-check.md 3).
+# ---------------------------------------------------------------------------
+
+#: Maximum number of issues a single review may report.
+MAX_REVIEW_ISSUES = 20
+#: Maximum length of the review summary.
+MAX_REVIEW_SUMMARY = 500
+
+
+class ReviewResult(BaseModel):
+    """Structured verdict returned by the vision self-check.
+
+    The review node asks a vision-capable provider to compare the rendered
+    preview against the original request and returns this validated payload.
+    Like :class:`ModelSpecification`, it is a strict contract: no extra keys,
+    whitespace-trimmed strings and bounded collections (docs/vision-self-check.md
+    3). ``matches`` is required; ``issues``/``summary`` are optional and
+    default to empty.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    matches: bool = Field(
+        description="True when the rendered preview matches the original request.",
+    )
+    issues: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_REVIEW_ISSUES,
+        description="Concrete discrepancies; empty when the preview matches.",
+    )
+    summary: str = Field(
+        default="",
+        max_length=MAX_REVIEW_SUMMARY,
+        description="Short human-readable summary of the verdict.",
+    )
+
+    @classmethod
+    def to_json_schema(cls) -> dict[str, Any]:
+        """Return the JSON Schema used to prompt the vision LLM."""
+        return cls.model_json_schema()
