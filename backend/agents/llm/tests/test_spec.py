@@ -409,6 +409,30 @@ def test_json_schema_exposes_bounded_primitive():
     assert schema["properties"]["primitives"]["maxItems"] == 64
 
 
+def test_json_schema_documents_per_type_primitive_field_requirements():
+    """The schema the LLM sees must spell out which primitive types need which sizes.
+
+    Regression guard for a local model emitting a ``box`` primitive without
+    ``depth``/``height``: the requirement has to be explicit in the
+    structured-output schema, not only enforced downstream.
+    """
+    properties = ModelSpecification.to_json_schema()["$defs"]["Primitive"]["properties"]
+    assert properties["width"]["description"] == "Box size along X in mm (required for type box)."
+    assert properties["depth"]["description"] == "Box size along Y in mm (required for type box)."
+    assert properties["height"]["description"] == (
+        "Box size along Z, or the cylinder/cone height, in mm "
+        "(required for box, cylinder and cone)."
+    )
+    assert properties["diameter"]["description"] == (
+        "Cylinder/sphere/cone diameter in mm (required for cylinder, sphere and cone)."
+    )
+    assert properties["position"]["description"] == (
+        "Primitive centre in mm; the part rests on the build plate (minimum Z = 0)."
+    )
+    assert properties["rotation"]["description"] == "XYZ rotation in degrees."
+    assert properties["role"]["description"] == "add adds material, subtract cuts it away."
+
+
 def test_example_helper_is_unchanged_by_primitives_field():
     assert ModelSpecification.example() == VALID
 

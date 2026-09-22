@@ -139,39 +139,44 @@ class Primitive(BaseModel):
     )
     role: Literal["add", "subtract"] = Field(
         default="add",
-        description='"add" contributes material, "subtract" removes it.',
+        description="add adds material, subtract cuts it away.",
     )
     position: Vec3 = Field(
         default_factory=_zero_vec3,
-        description="Centre of the primitive in model coordinates (mm).",
+        description="Primitive centre in mm; the part rests on the build plate (minimum Z = 0).",
     )
     rotation: Vec3 = Field(
         default_factory=_zero_vec3,
-        description="Rotation in degrees, XYZ order.",
+        description="XYZ rotation in degrees.",
     )
     width: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description="Box X size in mm.",
+        description="Box size along X in mm (required for type box).",
     )
     depth: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description="Box Y size in mm.",
+        description="Box size along Y in mm (required for type box).",
     )
     height: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description="Box Z size / cylinder or cone height in mm.",
+        description=(
+            "Box size along Z, or the cylinder/cone height, in mm "
+            "(required for box, cylinder and cone)."
+        ),
     )
     diameter: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description="Cylinder, sphere or cone diameter in mm.",
+        description=(
+            "Cylinder/sphere/cone diameter in mm (required for cylinder, sphere and cone)."
+        ),
     )
     label: str = Field(
         default="",
