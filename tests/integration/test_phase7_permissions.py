@@ -566,3 +566,18 @@ def test_print_history_renders_for_authenticated_user(client, user):
     response = client.get("/printers/history/")
 
     assert response.status_code == 200
+
+
+def test_printer_list_page_requires_login(client):
+    response = client.get("/printers/")
+
+    assert response.status_code == 302
+    assert "/login/" in response["Location"]
+
+
+def test_printer_list_page_renders_for_authenticated_user(client, user):
+    client.force_login(user)
+
+    response = client.get("/printers/")
+
+    assert response.status_code == 200

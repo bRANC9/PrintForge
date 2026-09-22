@@ -116,6 +116,19 @@ class TagSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class PrinterSerializer(serializers.ModelSerializer):
+    """Read-only printer registry row.
+
+    Deliberately omits ``host`` and ``api_key``: the host is operational detail
+    and the key is a secret that must never leave the server.
+    """
+
+    class Meta:
+        model = Printer
+        fields = ["id", "name", "backend", "is_active", "created_at"]
+        read_only_fields = fields
+
+
 class RatingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Rating

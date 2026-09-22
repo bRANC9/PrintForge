@@ -86,6 +86,7 @@ __all__ = [
     "job_target_kind",
     "jobs_for_user",
     "next_job",
+    "printer_cfs_slots",
     "printer_status",
     "queue_for_printer",
     "set_slicing_metadata",
@@ -508,6 +509,11 @@ def cancel_job(job: PrintJob, *, user=None, backend=None) -> PrintJob:
 def printer_status(printer: Printer):
     """Return the live :class:`~printers.base.PrinterStatus` via the adapter."""
     return get_printer_backend(printer).status()
+
+
+def printer_cfs_slots(printer: Printer):
+    """Return the adapter's CFS slots (empty list for printers without a CFS)."""
+    return get_printer_backend(printer).cfs_slots()
 
 
 @transaction.atomic

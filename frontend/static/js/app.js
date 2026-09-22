@@ -21,6 +21,10 @@
             `${API_BASE}/versions/${encodeURIComponent(versionId)}/artifact/${encodeURIComponent(kind)}/`,
         // Phase 7 (multi-user): print history + notifications.
         printJobs: () => `${API_BASE}/print-jobs/`,
+        // Printer registry + live status (terv.md 13.).
+        printers: () => `${API_BASE}/printers/`,
+        printerStatus: (printerId) =>
+            `${API_BASE}/printers/${encodeURIComponent(printerId)}/status/`,
         notifications: () => `${API_BASE}/notifications/`,
         notificationRead: (notificationId) =>
             `${API_BASE}/notifications/${encodeURIComponent(notificationId)}/read/`,
@@ -177,6 +181,8 @@
             request(endpoints.versions(projectId), { method: "POST", body: { prompt } }),
         versionStatus: (versionId) => request(endpoints.versionStatus(versionId)),
         listPrintJobs: async () => unwrapList(await request(endpoints.printJobs())),
+        listPrinters: async () => unwrapList(await request(endpoints.printers())),
+        printerStatus: (printerId) => request(endpoints.printerStatus(printerId)),
         listNotifications: async () => unwrapList(await request(endpoints.notifications())),
         markNotificationRead: (notificationId) =>
             request(endpoints.notificationRead(notificationId), { method: "POST" }),

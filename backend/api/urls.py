@@ -12,6 +12,7 @@ from .views import (
     OllamaModelUseView,
     OllamaPullDetailView,
     OllamaPullsView,
+    PrinterViewSet,
     PrintJobViewSet,
     ProjectViewSet,
     SettingsAPIView,
@@ -30,6 +31,7 @@ router.register("build-plates", BuildPlateViewSet, basename="build-plate")
 router.register("versions", ModelVersionViewSet, basename="version")
 router.register("agent-runs", AgentRunViewSet, basename="agent-run")
 router.register("print-jobs", PrintJobViewSet, basename="print-job")
+router.register("printers", PrinterViewSet, basename="printer")
 router.register("notifications", NotificationViewSet, basename="notification")
 
 urlpatterns = [

@@ -56,12 +56,16 @@ from notifications.services import (
     notifications_for_user,
     unread_count,
 )
+from printers.base import PrinterBackendError
+from printers.models import Printer
 from printers.permissions import IsPrinterOperator
 from printers.services import (
     QueueError,
     cancel_job,
     enqueue_job,
     jobs_for_user,
+    printer_cfs_slots,
+    printer_status,
     start_job,
 )
 from printers.services import transition as transition_print_job
@@ -98,6 +102,7 @@ from .serializers import (
     NotificationSerializer,
     OllamaModelNameSerializer,
     PlateItemSerializer,
+    PrinterSerializer,
     PrintJobCreateSerializer,
     PrintJobSerializer,
     PrintJobTransitionSerializer,
@@ -544,6 +549,69 @@ class PrintJobViewSet(
         except QueueError as exc:
             return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         return Response(PrintJobSerializer(job).data)
+
+
+def _cfs_slot_payload(slot) -> dict:
+    """Serialise one :class:`~printers.base.CfsSlot` for the status endpoint."""
+    return {
+        "index": slot.index,
+        "material": slot.material,
+        "brand": slot.brand,
+        "name": slot.name,
+        "color": slot.color,
+        "state": slot.state,
+        "empty": slot.empty,
+    }
+
+
+class PrinterViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only printer registry + live status (terv.md 13. fejezet).
+
+    Printers are a global resource (not workspace-scoped), so any authenticated
+    user may list them and poll a status snapshot. ``host``/``api_key`` are never
+    exposed. A backend failure is reported as ``online: false`` with an ``error``
+    string instead of a 5xx, so the UI can poll safely.
+    """
+
+    serializer_class = PrinterSerializer
+    permission_classes = [WorkspaceScopePermission]
+    # Global resource: authenticated is enough, no workspace role to check.
+    permission_scope_exempt = True
+
+    def get_queryset(self):
+        return Printer.objects.all()
+
+    @action(detail=True, methods=["get"], url_path="status")
+    def status(self, request, pk=None):
+        printer = self.get_object()
+        payload = {"id": printer.pk, "name": printer.name, "backend": printer.backend}
+        try:
+            snapshot = printer_status(printer)
+        except PrinterBackendError as exc:
+            payload.update(
+                online=False,
+                state="offline",
+                current_filename=None,
+                progress=None,
+                message="",
+                error=str(exc),
+                cfs_slots=[],
+            )
+            return Response(payload)
+
+        payload.update(
+            online=snapshot.online,
+            state=snapshot.state,
+            current_filename=snapshot.current_filename,
+            progress=snapshot.progress,
+            message=snapshot.message,
+        )
+        try:
+            payload["cfs_slots"] = [_cfs_slot_payload(slot) for slot in printer_cfs_slots(printer)]
+        except PrinterBackendError as exc:
+            payload["cfs_slots"] = []
+            payload["cfs_error"] = str(exc)
+        return Response(payload)
 
 
 class NotificationViewSet(

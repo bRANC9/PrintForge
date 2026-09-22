@@ -16,6 +16,7 @@
             <nav class="site-nav">
                 <a href="{% url 'projects:list' %}">Projektek</a>
                 <a href="{% url 'community-list' %}">Közösség</a>
+                <a href="{% url 'printers:list' %}">Nyomtatók</a>
                 <a href="{% url 'printers:history' %}">Nyomtatási előzmények</a>
                 {% if user.is_staff %}
                     <a href="{% url 'configuration:settings' %}">Beállítások</a>

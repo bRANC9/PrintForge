@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Nyomtatók – PrintForge{% endblock %}
+{% block content %}
+    <div data-printers-page x-data="printerStatus">
+        <header class="page-head">
+            <div>
+                <h1>Nyomtatók</h1>
+                <p class="muted">Regisztrált nyomtatók élő állapota és CFS tálcái (#13).</p>
+            </div>
+            <div class="page-head-actions">
+                <label class="checkbox-inline">
+                    <input type="checkbox" x-model="autoRefresh">
+                    Automatikus frissítés
+                </label>
+                <button type="button"
+                        class="btn"
+                        @click="refreshStatuses()"
+                        :disabled="refreshing"
+                        x-text="refreshing ? 'Frissítés…' : 'Frissítés'"></button>
+            </div>
+        </header>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted" x-show="!loading && !error && !printers.length" x-cloak>
+            Nincs regisztrált nyomtató. Vedd fel a Django adminban.
+        </p>
+        <div class="printer-grid" x-show="!loading && printers.length" x-cloak>
+            <template x-for="printer in printers" :key="printer.id">
+                <section class="panel printer-card">
+                    <header class="printer-card-head">
+                        <h2 x-text="printer.name"></h2>
+                        <span class="badge" x-text="printer.backend || 'nincs backend'"></span>
+                    </header>
+                    <template x-if="statusOf(printer)">
+                        <div>
+                            <p>
+                                <span class="badge"
+                                      :class="'state-' + stateKind(statusOf(printer).state)"
+                                      x-text="stateLabel(statusOf(printer).state)"></span>
+                                <span class="muted"
+                                      x-show="statusOf(printer).current_filename"
+                                      x-text="statusOf(printer).current_filename"></span>
+                            </p>
+                            <template x-if="progressPct(printer) !== null">
+                                <div class="progress-row">
+                                    <div class="progress">
+                                        <div class="progress-bar" :style="'width: ' + progressPct(printer) + '%'"></div>
+                                    </div>
+                                    <span class="muted" x-text="progressPct(printer) + '%'"></span>
+                                </div>
+                            </template>
+                            <p class="error-box"
+                               x-show="statusOf(printer).error"
+                               x-text="statusOf(printer).error"></p>
+                            <h3>CFS</h3>
+                            <p class="muted"
+                               x-show="!statusOf(printer).cfs_slots || !statusOf(printer).cfs_slots.length">
+                                Nincs CFS adat.
+                            </p>
+                            <ul class="cfs-slots"
+                                x-show="statusOf(printer).cfs_slots && statusOf(printer).cfs_slots.length">
+                                <template x-for="slot in statusOf(printer).cfs_slots" :key="slot.index">
+                                    <li :class="{ 'is-empty': slot.empty }">
+                                        <span class="cfs-index" x-text="'#' + slot.index"></span>
+                                        <span class="cfs-name" x-text="slotLabel(slot)"></span>
+                                        <span class="cfs-color"
+                                              x-show="slot.color"
+                                              :style="'background: ' + slot.color"></span>
+                                    </li>
+                                </template>
+                            </ul>
+                        </div>
+                    </template>
+                    <p class="muted" x-show="!statusOf(printer)">Állapot betöltése…</p>
+                </section>
+            </template>
+        </div>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/printers.js' %}"></script>
+{% endblock %}

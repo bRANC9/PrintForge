@@ -1087,3 +1087,99 @@ ul.error-box {
 .coord-row .input {
     max-width: none;
 }
+
+/* Printers: registry + live status (terv.md 13.) ------------------------- */
+
+.printer-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 1rem;
+}
+
+.printer-card h3 {
+    margin: 1rem 0 0.4rem;
+    font-size: 0.9rem;
+}
+
+.printer-card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.checkbox-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.progress-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+}
+
+.progress-row .progress {
+    flex: 1;
+}
+
+.cfs-slots {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.3rem;
+}
+
+.cfs-slots li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.cfs-slots li.is-empty {
+    opacity: 0.55;
+}
+
+.cfs-index {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.cfs-color {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+}
+
+.badge.state-printing {
+    background: var(--accent);
+    color: #fff;
+}
+
+.badge.state-idle {
+    background: #2e7d32;
+    color: #fff;
+}
+
+.badge.state-paused {
+    background: #f9a825;
+    color: #1a1a1a;
+}
+
+.badge.state-error {
+    background: #c62828;
+    color: #fff;
+}
+
+.badge.state-offline,
+.badge.state-unknown {
+    background: var(--border);
+    color: var(--text);
+}
