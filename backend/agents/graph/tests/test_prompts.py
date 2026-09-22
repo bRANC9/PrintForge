@@ -77,10 +77,39 @@ def test_prompt_teaches_required_operation_dimensions(name: str, prompt: str) ->
     assert "'pocket', 'cut' and 'add' -> 'width' and 'height'" in prompt
 
 
+@pytest.mark.parametrize("name, prompt", DIMENSION_PROMPTS.items())
+def test_prompt_teaches_required_primitive_dimensions(name: str, prompt: str) -> None:
+    """Pin the per-type required primitive sizes the CAD backend enforces.
+
+    A live small model emitted a ``box`` without ``depth``/``height``; this
+    contract (shared by Planner, Editor and Reviser) is what prevents that.
+    """
+    assert "'box' requires 'width', 'depth' and 'height'" in prompt
+    assert "'cylinder' and 'cone' require 'diameter' and 'height'" in prompt
+    assert "'sphere' requires 'diameter'" in prompt
+    assert "concrete number" in prompt
+    assert "never leave a required size missing or null" in prompt
+
+
+@pytest.mark.parametrize("name, prompt", DIMENSION_PROMPTS.items())
+def test_prompt_explains_primitive_position_and_build_plate(name: str, prompt: str) -> None:
+    """``position`` is the primitive centre and the part rests on the plate."""
+    assert "primitive centre" in prompt
+    assert "min Z = 0" in prompt
+
+
 def test_reviser_is_told_to_repair_the_missing_numeric_fields() -> None:
     prompt = REVISER_SYSTEM_PROMPT
     assert "fill or repair exactly that field" in prompt
     assert "numeric" in prompt
+
+
+def test_reviser_is_told_to_repair_missing_primitive_sizes() -> None:
+    """The reviser must refill missing operation dimensions AND primitive sizes."""
+    prompt = REVISER_SYSTEM_PROMPT
+    assert "missing primitive sizes" in prompt
+    # The shared primitive-dimension contract is appended verbatim.
+    assert "'box' requires 'width', 'depth' and 'height'" in prompt
 
 
 def test_planner_keeps_legacy_fields_and_research_behaviour() -> None:

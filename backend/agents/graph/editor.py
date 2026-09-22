@@ -26,7 +26,12 @@ from pydantic import ValidationError
 from agents.llm import LLMError, LLMProvider
 from agents.spec import MAX_OPERATION_LABEL
 
-from .planner import OPERATION_DIMENSIONS_PROMPT, PlannerPlan, coerce_plan
+from .planner import (
+    OPERATION_DIMENSIONS_PROMPT,
+    PRIMITIVE_DIMENSIONS_PROMPT,
+    PlannerPlan,
+    coerce_plan,
+)
 from .state import WorkflowState, append_history, failure_state
 from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
@@ -63,6 +68,7 @@ EDITOR_SYSTEM_PROMPT = (
     "Keep the base object kind and dimensions unless the edit explicitly "
     "requires a change. Emit 'operations': [] when the edit adds no feature. "
     + OPERATION_DIMENSIONS_PROMPT
+    + PRIMITIVE_DIMENSIONS_PROMPT
     + "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
 )
 

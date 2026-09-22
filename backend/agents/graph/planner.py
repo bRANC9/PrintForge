@@ -27,6 +27,7 @@ from .vision import reference_images, reference_prompt_for, structured_with_refe
 __all__ = [
     "OPERATION_DIMENSIONS_PROMPT",
     "PLANNER_SYSTEM_PROMPT",
+    "PRIMITIVE_DIMENSIONS_PROMPT",
     "PlannerPlan",
     "coerce_plan",
     "make_planner_node",
@@ -43,6 +44,21 @@ OPERATION_DIMENSIONS_PROMPT = (
     "'slot' -> 'diameter' and 'length'; 'pocket', 'cut' and 'add' -> 'width' "
     "and 'height'. Always fill these numeric fields explicitly and never leave a "
     "required dimension missing or null. "
+)
+
+#: Shared instruction pinning the per-type required fields of every
+#: ``ModelSpecification.primitives`` entry. A ``box`` emitted without ``depth``
+#: or ``height`` (or a ``cylinder``/``cone`` without ``diameter``/``height``) is
+#: a fixable specification error the CAD backend rejects, so the Planner,
+#: Editor and Reviser all state the contract explicitly and ask the LLM for
+#: concrete numbers instead of nulls.
+PRIMITIVE_DIMENSIONS_PROMPT = (
+    "Every 'primitives' entry MUST carry the sizes its type needs: 'box' "
+    "requires 'width', 'depth' and 'height'; 'cylinder' and 'cone' require "
+    "'diameter' and 'height'; 'sphere' requires 'diameter'. 'position' is the "
+    "primitive centre in mm and the part must rest on the build plate "
+    "(min Z = 0); always give every listed size as a concrete number and never "
+    "leave a required size missing or null. "
 )
 
 PLANNER_SYSTEM_PROMPT = (
@@ -64,6 +80,7 @@ PLANNER_SYSTEM_PROMPT = (
     "really is the built-in phone holder; otherwise always describe the object "
     "with primitives. Use sensible printable defaults when a value is missing. "
     + OPERATION_DIMENSIONS_PROMPT
+    + PRIMITIVE_DIMENSIONS_PROMPT
     + "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
 )
 
