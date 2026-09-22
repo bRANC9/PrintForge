@@ -307,7 +307,12 @@
     function projectDetailUrlMixin() {
         return {
             get detailUrlTemplate() {
-                return this.$el && this.$el.dataset ? this.$el.dataset.projectDetailUrl || "" : "";
+                // `$root`, not `$el`: this getter is read from inside `x-for`
+                // templates, where Alpine binds `$el` to the current element
+                // (e.g. the project card <a>), not the component root that
+                // carries `data-project-detail-url`.
+                const root = this.$root;
+                return root && root.dataset ? root.dataset.projectDetailUrl || "" : "";
             },
             detailUrl(pk) {
                 return fillPkTemplate(this.detailUrlTemplate, pk);
