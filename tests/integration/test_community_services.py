@@ -130,6 +130,16 @@ def test_search_ordering_and_unknown_fallback():
     assert unknown == newest  # unknown values fall back to newest
 
 
+def test_rating_ordering_sorts_unrated_projects_last_on_every_backend():
+    # Regression: a plain ``-average_rating`` puts NULLs *first* on PostgreSQL
+    # but *last* on SQLite, so the ordering must be explicit.
+    from projects.services import PUBLIC_ORDERINGS
+
+    expression = PUBLIC_ORDERINGS["rating"][0]
+    assert expression.descending is True
+    assert expression.nulls_last is True
+
+
 # ---------------------------------------------------------------------------
 # Tags
 # ---------------------------------------------------------------------------

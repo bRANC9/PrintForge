@@ -64,10 +64,15 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 #: Allowed ``ordering`` values for :func:`search_public_projects`.
-PUBLIC_ORDERINGS: dict[str, tuple[str, ...]] = {
+#:
+#: ``rating`` orders unrated projects (``average_rating IS NULL``) last on every
+#: database. A plain ``-average_rating`` is not enough: PostgreSQL sorts NULLs
+#: first for a DESC order (SQLite sorts them last), so the same data would rank
+#: differently per backend.
+PUBLIC_ORDERINGS: dict[str, tuple] = {
     "newest": ("-created_at", "-id"),
     "downloads": ("-download_count", "-created_at"),
-    "rating": ("-average_rating", "-created_at"),
+    "rating": (F("average_rating").desc(nulls_last=True), "-created_at"),
 }
 
 
