@@ -202,9 +202,7 @@ def test_patch_description_records_manual_provenance(project, owner, monkeypatch
     assert project.description == "Kézzel írt"
 
     # Clearing it marks it empty again, so the AI may legitimately refill it.
-    cleared = client.patch(
-        f"/api/v1/projects/{project.pk}/", {"description": ""}, format="json"
-    )
+    cleared = client.patch(f"/api/v1/projects/{project.pk}/", {"description": ""}, format="json")
     assert cleared.json()["description_source"] == ContentSource.EMPTY
 
 
