@@ -17,12 +17,13 @@ from printers.creality_k2 import (
     K2_PROTOCOL_TODO,
     CrealityK2Backend,
     K2Transport,
+    MoonrakerK2Transport,
     UnconfiguredK2Transport,
 )
 
 
-def _printer(host: str = "k2.local") -> SimpleNamespace:
-    return SimpleNamespace(host=host, backend="creality_k2")
+def _printer(host: str = "k2.local", api_key: str = "") -> SimpleNamespace:
+    return SimpleNamespace(host=host, backend="creality_k2", api_key=api_key)
 
 
 class FakeTransport(K2Transport):
@@ -61,19 +62,19 @@ class FakeTransport(K2Transport):
 
 
 # ---------------------------------------------------------------------------
-# Unconfigured (default) transport -- must never fake success
+# Unconfigured transport -- must never fake success
 # ---------------------------------------------------------------------------
 
 
-def test_default_transport_refuses_status_with_todo():
-    backend = CrealityK2Backend(_printer())
+def test_unconfigured_transport_refuses_status_with_todo():
+    backend = CrealityK2Backend(_printer(), transport=UnconfiguredK2Transport(host="k2.local"))
     with pytest.raises(PrinterProtocolNotImplementedError) as excinfo:
         backend.status()
     assert "TODO(printer-integration)" in str(excinfo.value)
 
 
-def test_default_transport_refuses_every_operation():
-    backend = CrealityK2Backend(_printer())
+def test_unconfigured_transport_refuses_every_operation():
+    backend = CrealityK2Backend(_printer(), transport=UnconfiguredK2Transport(host="k2.local"))
     for call in (
         lambda: backend.upload(b"gcode", "model.gcode"),
         lambda: backend.start("model.gcode"),
@@ -92,10 +93,13 @@ def test_unconfigured_transport_exposes_todo_constant():
         transport.fetch_cfs_slots()
 
 
-def test_from_printer_uses_printer_host():
-    transport = K2Transport.from_printer(_printer("10.0.0.7"))
-    assert isinstance(transport, UnconfiguredK2Transport)
+def test_from_printer_builds_a_moonraker_transport():
+    transport = K2Transport.from_printer(_printer("10.0.0.7", api_key="secret"))
+
+    assert isinstance(transport, MoonrakerK2Transport)
     assert transport.host == "10.0.0.7"
+    assert transport.client.api_key == "secret"
+    assert transport.client.base_url == "http://10.0.0.7:7125"
 
 
 # ---------------------------------------------------------------------------
@@ -168,3 +172,86 @@ def test_start_rejects_empty_filename():
 
 def test_backend_name_is_stable():
     assert CrealityK2Backend.name == "creality_k2"
+
+
+# ---------------------------------------------------------------------------
+# MoonrakerK2Transport -- Moonraker for print ops, WebSocket for CFS
+# ---------------------------------------------------------------------------
+
+
+class FakeMoonrakerClient:
+    """Records calls and returns canned Moonraker results."""
+
+    def __init__(self, *, objects=None, remote="remote.gcode"):
+        self._objects = objects or {}
+        self._remote = remote
+        self.calls: list[object] = []
+
+    def query_objects(self, *objects):
+        self.calls.append(("query", objects))
+        return self._objects
+
+    def upload_file(self, gcode_bytes, filename):
+        self.calls.append(("upload", gcode_bytes, filename))
+        return self._remote
+
+    def start_print(self, filename):
+        self.calls.append(("start", filename))
+
+    def cancel_print(self):
+        self.calls.append("cancel")
+
+
+def test_moonraker_transport_maps_status():
+    client = FakeMoonrakerClient(
+        objects={
+            "status": {
+                "print_stats": {"state": "printing", "filename": "cube.gcode"},
+                "virtual_sdcard": {"progress": 0.5},
+            }
+        }
+    )
+    transport = MoonrakerK2Transport("k2.local", client=client)
+
+    status = transport.fetch_status()
+
+    assert status.online is True
+    assert status.state == PrinterState.PRINTING
+    assert status.current_filename == "cube.gcode"
+    assert status.progress == 0.5
+
+
+def test_moonraker_transport_upload_start_cancel_delegate():
+    client = FakeMoonrakerClient(remote="job.gcode")
+    transport = MoonrakerK2Transport("k2.local", client=client)
+
+    assert transport.upload_file(b"G28\n", "local.gcode") == "job.gcode"
+    transport.start_print("job.gcode")
+    transport.cancel_print()
+
+    assert client.calls == [
+        ("upload", b"G28\n", "local.gcode"),
+        ("start", "job.gcode"),
+        "cancel",
+    ]
+
+
+def test_moonraker_transport_reads_cfs_from_the_injected_reader():
+    slots = [CfsSlot(index=0, material="PLA", empty=False)]
+    seen: dict[str, object] = {}
+
+    def fake_reader(host, *, port, timeout):
+        seen.update(host=host, port=port, timeout=timeout)
+        return slots
+
+    transport = MoonrakerK2Transport("k2.local", timeout=2.0, cfs_reader=fake_reader)
+
+    assert transport.fetch_cfs_slots() == slots
+    assert seen == {"host": "k2.local", "port": 9999, "timeout": 2.0}
+
+
+def test_creality_backend_uses_moonraker_transport_by_default():
+    backend = CrealityK2Backend(_printer("10.0.0.9"))
+
+    assert isinstance(backend.transport, MoonrakerK2Transport)
+    assert backend.transport.host == "10.0.0.9"

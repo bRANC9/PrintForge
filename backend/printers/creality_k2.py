@@ -21,19 +21,27 @@ look like a local API are gated or unofficial:
   LAN control. Both require a Creality account/app and are not self-hosted, so
   they are not a fit for this project's core.
 
-Consequently this adapter does **not** implement a protocol. It defines
-:class:`K2Transport`, a replaceable boundary that mirrors the high-level
-operations, and an :class:`UnconfiguredK2Transport` that refuses every call with
-a precise TODO. The rest of the app never depends on the K2: the queue and the
-factory treat it like any other backend, and a failed/refused operation marks
-the job ``FAILED`` instead of faking success. When someone is ready to invest in
-the protocol, they implement one transport (and pin the validated firmware
-version) without touching ``base``/``services``/``factory``.
+Consequently the adapter ships a **best-effort, opt-in** transport:
+
+* :class:`MoonrakerK2Transport` uses the on-device Moonraker (port ``7125``) for
+  status/upload/start/cancel -- exactly the documented Klipper API -- and reads
+  the CFS from the proprietary WebSocket (port ``9999``). Both paths are
+  unofficial/gated and firmware-dependent; they never fake success, so an
+  unreachable or locked printer raises
+  :class:`~printers.base.PrinterConnectionError` and the job is marked
+  ``FAILED``.
+* :class:`UnconfiguredK2Transport` remains the explicit "no protocol" fallback
+  (kept for tests and for deployments that want to refuse rather than try).
+
+The rest of the app never depends on the K2: the queue and the factory treat it
+like any other backend. Pin the validated firmware version in the deployment
+notes when you roll this out.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import NoReturn
 
 from .base import (
@@ -42,6 +50,8 @@ from .base import (
     PrinterProtocolNotImplementedError,
     PrinterStatus,
 )
+from .k2_websocket import K2_WEBSOCKET_PORT, read_cfs_slots
+from .moonraker import MoonrakerClient, moonraker_base_url, status_from_objects
 
 __all__ = [
     "K2_FLUIDD_PORT",
@@ -49,15 +59,16 @@ __all__ = [
     "K2_WEBSOCKET_PORT",
     "CrealityK2Backend",
     "K2Transport",
+    "MoonrakerK2Transport",
     "UnconfiguredK2Transport",
 ]
 
-#: Known local ports on a K2 series device (documented for the TODO below).
+#: Known local ports on a K2 series device.
 K2_MOONRAKER_PORT = 7125  # Klipper HTTP API -- gated by trusted_clients
 K2_FLUIDD_PORT = 4408  # bundled Fluidd web UI
-K2_WEBSOCKET_PORT = 9999  # Creality-proprietary live status + CFS WebSocket
+# K2_WEBSOCKET_PORT (9999) is defined in ``k2_websocket`` and re-exported above.
 
-#: The precise TODO surfaced whenever the K2 protocol is needed. Kept as a
+#: The precise TODO surfaced by :class:`UnconfiguredK2Transport`. Kept as a
 #: module constant so tests and callers can assert on it verbatim.
 K2_PROTOCOL_TODO = (
     "Creality K2 Pro has no public local API. TODO(printer-integration): "
@@ -89,10 +100,15 @@ class K2Transport(ABC):
     def from_printer(cls, printer: object) -> K2Transport:
         """Build the default transport for ``printer``.
 
-        Today this is :class:`UnconfiguredK2Transport`; once a real transport
-        exists this is the single switch-over point.
+        This is :class:`MoonrakerK2Transport`: the K2 ships a Moonraker stack for
+        the print operations and the proprietary WebSocket for CFS. A blank host
+        or a locked/offline printer raises at call time rather than faking
+        success.
         """
-        return UnconfiguredK2Transport(host=getattr(printer, "host", "") or "")
+        return MoonrakerK2Transport(
+            host=getattr(printer, "host", "") or "",
+            api_key=getattr(printer, "api_key", "") or "",
+        )
 
     @abstractmethod
     def fetch_status(self) -> PrinterStatus:
@@ -141,14 +157,61 @@ class UnconfiguredK2Transport(K2Transport):
         self._fail()
 
 
+class MoonrakerK2Transport(K2Transport):
+    """K2 transport using the on-device Moonraker + the CFS WebSocket.
+
+    Print operations (status/upload/start/cancel) go through
+    :class:`~printers.moonraker.MoonrakerClient` on port ``7125``; the CFS is
+    read from the proprietary WebSocket on port ``9999``. Both are injectable so
+    tests never touch the network. Nothing is faked: an unreachable printer
+    raises :class:`~printers.base.PrinterConnectionError`.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        *,
+        api_key: str = "",
+        timeout: float = 5.0,
+        client: MoonrakerClient | None = None,
+        cfs_reader: Callable[..., list[CfsSlot]] | None = None,
+        cfs_port: int = K2_WEBSOCKET_PORT,
+    ) -> None:
+        super().__init__(host, timeout=timeout)
+        self._client = client or MoonrakerClient(
+            moonraker_base_url(host), api_key=api_key, timeout=timeout
+        )
+        self._cfs_reader = cfs_reader or read_cfs_slots
+        self._cfs_port = cfs_port
+
+    @property
+    def client(self) -> MoonrakerClient:
+        return self._client
+
+    def fetch_status(self) -> PrinterStatus:
+        return status_from_objects(self._client.query_objects())
+
+    def upload_file(self, gcode_bytes: bytes, filename: str) -> str:
+        return self._client.upload_file(gcode_bytes, filename)
+
+    def start_print(self, filename: str) -> None:
+        self._client.start_print(filename)
+
+    def cancel_print(self) -> None:
+        self._client.cancel_print()
+
+    def fetch_cfs_slots(self) -> list[CfsSlot]:
+        return self._cfs_reader(self.host, port=self._cfs_port, timeout=self.timeout)
+
+
 class CrealityK2Backend(PrinterBackend):
     """Printer backend for the Creality K2 series.
 
     The backend is a thin, protocol-agnostic shell over a :class:`K2Transport`.
-    Tests inject a fake transport; production currently gets
-    :class:`UnconfiguredK2Transport`, which raises
-    :class:`~printers.base.PrinterProtocolNotImplementedError` until the real
-    protocol is implemented.
+    Tests inject a fake transport; production gets
+    :class:`MoonrakerK2Transport` (Moonraker on 7125 + CFS WebSocket on 9999),
+    which raises :class:`~printers.base.PrinterConnectionError` when the printer
+    is unreachable or locked instead of faking success.
     """
 
     name = "creality_k2"

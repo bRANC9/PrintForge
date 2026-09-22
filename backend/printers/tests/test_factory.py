@@ -15,7 +15,8 @@ from printers.factory import (
     register_backend,
     supported_backends,
 )
-from printers.stubs import BambuBackend, MoonrakerBackend, OctoPrintBackend
+from printers.moonraker import MoonrakerBackend
+from printers.stubs import BambuBackend, OctoPrintBackend
 
 
 def _printer(backend: str, host: str = "printer.local") -> SimpleNamespace:
@@ -96,7 +97,13 @@ def test_register_backend_rejects_non_backend_class():
 
 
 def test_stub_backends_refuse_operations():
-    for cls in (MoonrakerBackend, OctoPrintBackend, BambuBackend):
+    for cls in (OctoPrintBackend, BambuBackend):
         backend = cls(_printer(cls.name))
         with pytest.raises(NotImplementedError):
             backend.status()
+
+
+def test_moonraker_backend_is_implemented_not_a_stub():
+    backend = get_printer_backend(_printer("moonraker"))
+    assert isinstance(backend, MoonrakerBackend)
+    assert backend.name == "moonraker"

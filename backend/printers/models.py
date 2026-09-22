@@ -32,6 +32,10 @@ class Printer(models.Model):
     name = models.CharField(max_length=200)
     backend = models.CharField(max_length=50, blank=True)
     host = models.CharField(max_length=255, blank=True)
+    #: Optional API key/token for the backend's local API (e.g. Moonraker's
+    #: ``[authorization]``). Blank means "trusted_clients / no auth". Adapters
+    #: must never log this value.
+    api_key = models.CharField(max_length=255, blank=True, default="")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

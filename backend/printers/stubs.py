@@ -8,10 +8,9 @@ success.
 
 When a protocol is implemented it should follow the Creality K2 pattern: a
 replaceable transport object behind the adapter, plus tests that inject a fake
-transport. Candidate first steps:
+transport. Moonraker is now implemented in :mod:`printers.moonraker`. Candidate
+next steps:
 
-* ``MoonrakerBackend`` -- Klipper's documented HTTP API on port ``7125``
-  (``/server/files/upload``, ``/printer/print/start``, ``/printer/objects/query``).
 * ``OctoPrintBackend`` -- OctoPrint REST API with an application API key
   (``/api/files/local``, ``/api/job``).
 * ``BambuBackend`` -- Bambu Lab's MQTT + FTPS LAN mode, or Bambu Cloud; the LAN
@@ -24,7 +23,7 @@ from typing import NoReturn
 
 from .base import PrinterBackend, PrinterProtocolNotImplementedError, PrinterStatus
 
-__all__ = ["BambuBackend", "MoonrakerBackend", "OctoPrintBackend"]
+__all__ = ["BambuBackend", "OctoPrintBackend"]
 
 
 class _UnimplementedBackend(PrinterBackend):
@@ -50,17 +49,6 @@ class _UnimplementedBackend(PrinterBackend):
 
     def cfs_slots(self):
         self._fail()
-
-
-class MoonrakerBackend(_UnimplementedBackend):
-    """Klipper/Moonraker adapter (TODO, see module docstring)."""
-
-    name = "moonraker"
-    todo = (
-        "MoonrakerBackend is not implemented. TODO(printer-integration): add a "
-        "Moonraker transport (HTTP + optional API key, port 7125) behind this "
-        "adapter; never log the API key. CFS slots are not part of Moonraker."
-    )
 
 
 class OctoPrintBackend(_UnimplementedBackend):

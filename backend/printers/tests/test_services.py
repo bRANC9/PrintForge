@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from designs.services import create_next_version
 from files.services import LocalStorage
-from printers.base import PrinterProtocolNotImplementedError, PrinterState, PrinterStatus
+from printers.base import PrinterConnectionError, PrinterState, PrinterStatus
 from printers.models import Printer, PrintJob, PrintJobStatus
 from printers.services import (
     ALLOWED_TRANSITIONS,
@@ -561,16 +561,20 @@ def test_start_job_requires_gcode(project, version, printer, operator, tmp_path)
         )
 
 
-def test_start_job_does_not_fake_success_for_unconfigured_k2(
+def test_start_job_does_not_fake_success_when_the_printer_is_unconfigured(
     project, version, printer, operator, tmp_path
 ):
+    printer.host = ""
+    printer.save(update_fields=["host"])
     job = enqueue_job(project=project, model_version=version, printer=printer)
     transition(job, PrintJobStatus.READY)
     storage = LocalStorage(root=tmp_path)
     _attach_gcode(job, storage)
 
-    with pytest.raises(PrinterProtocolNotImplementedError):
-        start_job(job, user=operator, storage=storage)  # real factory -> K2 adapter
+    # The real factory builds the K2 Moonraker transport; with no host the
+    # adapter must refuse (no network, no faked success).
+    with pytest.raises(PrinterConnectionError):
+        start_job(job, user=operator, storage=storage)
 
     job.refresh_from_db()
     assert job.status == PrintJobStatus.READY  # not faked to PRINTING
