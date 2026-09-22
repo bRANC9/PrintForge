@@ -6,14 +6,23 @@ No database, no network: all dependencies are fakes injected through
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
 import pytest
 from django.conf import settings
+from langgraph.graph import END
 
 from agents.graph import WorkflowDeps, build_workflow, run_workflow
-from agents.graph.tests.fakes import DEFAULT_SPEC, ENRICHED_SPEC, FakeCADBackend, FakeProvider
+from agents.graph.tests.fakes import (
+    DEFAULT_SPEC,
+    ENRICHED_SPEC,
+    FakeCADBackend,
+    FakeProvider,
+    SpecFixingCADBackend,
+)
+from agents.graph.workflow import route_after_cad
 from agents.llm import LLMError
 from agents.spec import ModelSpecification
 from designs.cad.base import CADError
@@ -47,6 +56,21 @@ ANNOTATION = {
     "normal": [0.0, 0.0, 1.0],
     "faces": [],
     "instruction": "4 mm-es átmenő lyuk",
+}
+
+#: A specification whose slot operation is missing the fields the CAD backend
+#: requires (``diameter``/``length``): valid for pydantic, rejected by
+#: ``generate``. This is exactly the bug class the reviser retry must fix.
+SLOT_SPEC: dict[str, Any] = {
+    **DEFAULT_SPEC,
+    "operations": [
+        {
+            "kind": "slot",
+            "origin": {"x": 10.0, "y": 10.0, "z": 5.0},
+            "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
+            "depth": 5.0,
+        }
+    ],
 }
 
 
@@ -339,17 +363,97 @@ def test_planner_failure_is_terminal_and_structured():
     assert "no model available" in error["message"]
 
 
-def test_cad_generation_failure_is_terminal():
+def test_cad_generation_failure_is_retried_then_terminal():
+    """A generation error now gets reviser retries before it turns terminal."""
     provider = FakeProvider()
     cad = FakeCADBackend(generate_error=CADError("openscad missing"))
 
-    state = run_workflow("x", deps=_deps(provider, cad))
+    state = run_workflow("x", deps=_deps(provider, cad, max_attempts=2))
 
     assert state["status"] == "failed"
+    assert cad.generate_calls == 2  # bounded retries, never more
     assert cad.validate_calls == 0
     error = json.loads(state["error"])
     assert error["stage"] == "cad"
     assert error["type"] == "CADError"
+
+
+def test_cad_specification_error_is_fixed_by_the_reviser():
+    """The slot/diameter bug is repaired, not failed: cad -> retry -> cad."""
+    seen: list[tuple[dict, list[str], int]] = []
+
+    def reviser(spec: dict, errors: list[str], attempt: int) -> dict:
+        seen.append((spec, errors, attempt))
+        fixed = copy.deepcopy(spec)
+        for operation in fixed.get("operations", []):
+            operation["diameter"] = 4.0
+            operation["length"] = 20.0
+        return fixed
+
+    provider = FakeProvider(
+        plan={"specification": SLOT_SPEC, "needs_research": False, "research_query": None}
+    )
+    cad = SpecFixingCADBackend()
+
+    state = run_workflow(
+        "cut a slot into the base",
+        deps=_deps(provider, cad, reviser=reviser, max_attempts=3),
+    )
+
+    assert state["status"] == "done"
+    assert state["attempt"] == 2
+    assert cad.generate_calls == 2
+    assert cad.validate_calls == 1
+    assert cad.export_calls == 1
+
+    # The reviser saw exactly the CAD error and filled the missing fields.
+    assert len(seen) == 1
+    assert seen[0][2] == 2
+    assert any("diameter is required for a 'slot'" in error for error in seen[0][1])
+    operation = state["specification"]["operations"][0]
+    assert operation["diameter"] == 4.0
+    assert operation["length"] == 20.0
+
+    # The failure was retried, not treated as terminal.
+    assert any("cad: generation failed" in entry for entry in state["history"])
+    assert any("reviser applied" in entry for entry in state["history"])
+
+
+def test_cad_specification_error_exhausts_retries_terminally():
+    """An unrepairable slot still fails, structurally, at the attempt bound."""
+    reviser_calls: list[int] = []
+
+    def reviser(spec: dict, errors: list[str], attempt: int) -> None:
+        reviser_calls.append(attempt)
+        return None  # cannot repair: the slot stays incomplete
+
+    provider = FakeProvider(
+        plan={"specification": SLOT_SPEC, "needs_research": False, "research_query": None}
+    )
+    cad = SpecFixingCADBackend()
+
+    state = run_workflow(
+        "cut a slot into the base",
+        deps=_deps(provider, cad, reviser=reviser, max_attempts=2),
+    )
+
+    assert state["status"] == "failed"
+    assert cad.generate_calls == 2  # the bound, never more
+    assert cad.validate_calls == 0
+    assert reviser_calls == [2]  # only the second attempt had CAD errors to fix
+
+    error = json.loads(state["error"])
+    assert error["stage"] == "cad"
+    assert error["type"] == "SpecificationError"
+    assert "diameter is required for a 'slot'" in error["message"]
+
+
+def test_route_after_cad_routes_retry_failed_and_generated():
+    assert route_after_cad({"status": "retry"}) == "cad"
+    assert route_after_cad({"status": "failed"}) == END
+    assert route_after_cad({"status": "generated"}) == "validate"
+    # An unknown/absent status still goes to the Validator (defensive default).
+    assert route_after_cad({}) == "validate"
 
 
 def test_export_failure_uses_the_bounded_retry_loop():

@@ -8,18 +8,19 @@ Graph shape::
                              +-------------------------------+
                              |
                              v
-                            cad <-----------------+
-                             |                    |
-                             v                    | invalid (attempt < max)
-                          validate ---------------+
+                            cad --(generation failed, attempt < max)--> cad
                              |
-                             +-- valid --> review
-                             |                |
-                             |                +-- retry (attempt < max) --> cad
-                             |                |
-                             |                +-- END (match / skip / exhausted)
+                             v
+                          validate --(invalid, attempt < max)--> cad
                              |
-                             +-- invalid after max attempts --> END (status=failed)
+                             +-- valid --> review --(retry, attempt < max)--> cad
+                                           |
+                                           +-- END (match / skip / exhausted)
+
+    ``cad`` retries itself while ``CADBackend.generate`` fails and the attempt
+    bound has not been reached, carrying the backend error to the reviser through
+    ``validation.errors``; once the bound is reached the failure is terminal
+    (``END`` with ``status=failed``).
 
     ``review`` is the optional vision self-check (docs/vision-self-check.md):
     it renders a preview and, when the provider supports vision, asks the model
@@ -125,8 +126,20 @@ def route_after_research(state: WorkflowState) -> str:
 
 
 def route_after_cad(state: WorkflowState) -> str:
-    """A CAD generation failure is terminal; a generated source goes to the Validator."""
-    return END if state.get("status") == "failed" else "validate"
+    """Route a CAD result: retry back into ``cad``, validate, or stop.
+
+    ``cad`` now reports ``status == "retry"`` when ``CADBackend.generate`` raised
+    while attempts remain (the error is stored on ``validation.errors`` so the
+    next pass runs the reviser); that retry is bounded by the CAD node's own
+    ``attempt < max_attempts`` guard -- an exhausted failure stays terminal. A
+    generated source goes to the Validator.
+    """
+    status = state.get("status")
+    if status == "failed":
+        return END
+    if status == "retry":
+        return "cad"
+    return "validate"
 
 
 def route_after_validate(state: WorkflowState) -> str:
@@ -222,7 +235,7 @@ def build_workflow(deps: WorkflowDeps):
     graph.add_conditional_edges(
         "cad",
         route_after_cad,
-        {"validate": "validate", END: END},
+        {"cad": "cad", "validate": "validate", END: END},
     )
     graph.add_conditional_edges(
         "validate",

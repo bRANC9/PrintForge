@@ -7,6 +7,13 @@ Boundary (terv.md 7. fejezet): the CAD agent goes through
 ``CADBackend.generate(specification)`` and returns OpenSCAD source only. It
 never builds a mesh/STL itself -- meshing is the OpenSCAD CLI's job and is
 triggered by the Validator node through ``CADBackend.export``.
+
+``generate`` can fail for a *fixable specification* problem (e.g. the LLM left a
+``slot`` operation without its ``diameter``). While attempts remain the node does
+not fail terminally: it stores the backend error on ``validation.errors`` and
+sets ``status = "retry"`` so the next ``cad`` pass runs the optional
+:data:`SpecReviser` and repairs the specification. Only the exhausted bound is
+terminal (``failure_state``), so the loop stays bounded (terv.md 6. fejezet).
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ def make_cad_node(
 
     def cad_node(state: WorkflowState) -> dict[str, Any]:
         attempt = int(state.get("attempt", 0)) + 1
+        max_attempts = int(state.get("max_attempts", 1))
         specification = dict(state.get("specification") or {})
 
         validation = state.get("validation") or {}
@@ -63,7 +71,32 @@ def make_cad_node(
         try:
             # OpenSCAD source only -- never a mesh/STL.
             scad_source = cad_backend.generate(specification)
-        except Exception as exc:  # noqa: BLE001 - any backend failure is terminal for CAD
+        except Exception as exc:  # noqa: BLE001 - a backend failure may be a fixable spec problem
+            if attempt < max_attempts:
+                # Not terminal yet: surface the backend error through the same
+                # ``validation.errors`` channel the Validator uses so the next
+                # ``cad`` pass runs the reviser with the concrete CAD complaint.
+                # ``scad_source`` is deliberately NOT set here -- a previous
+                # source (if any) is kept until a generation succeeds.
+                message = f"{type(exc).__name__}: {exc}"
+                return {
+                    "specification": specification,
+                    "validation": {
+                        "status": "invalid",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "errors": [message],
+                        "warnings": [],
+                    },
+                    "attempt": attempt,
+                    "status": "retry",
+                    "error": None,
+                    "history": append_history(
+                        state,
+                        f"cad: generation failed, retrying (attempt {attempt}): {exc}",
+                    ),
+                }
+            # Attempts exhausted: the generation failure is terminal.
             return failure_state(
                 state,
                 stage="cad",

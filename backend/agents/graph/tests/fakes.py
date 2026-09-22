@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from agents.llm import LLMProvider
 from agents.spec import ModelSpecification
-from designs.cad.base import CADBackend, GeneratedModel
+from designs.cad.base import CADBackend, GeneratedModel, SpecificationError
 
 __all__ = [
     "DEFAULT_SPEC",
@@ -20,6 +20,7 @@ __all__ = [
     "FakeCADBackend",
     "FakeProvider",
     "FakeVisionProvider",
+    "SpecFixingCADBackend",
 ]
 
 DEFAULT_SPEC: dict[str, Any] = ModelSpecification.example()
@@ -158,4 +159,54 @@ class FakeCADBackend(CADBackend):
         self.export_calls += 1
         if self.export_error is not None:
             raise self.export_error
+        return self.stl_bytes
+
+
+class SpecFixingCADBackend(CADBackend):
+    """Fails ``generate`` until every slot operation has diameter + length.
+
+    Models the real, *fixable* specification error the LLM can produce: a
+    ``slot`` operation missing its required ``diameter`` makes the OpenSCAD
+    backend raise :class:`~designs.cad.base.SpecificationError`. Generation only
+    succeeds once the reviser has filled the missing numeric fields, so the CAD
+    retry loop can be exercised end-to-end without OpenSCAD.
+    """
+
+    name = "spec-fixing"
+
+    def __init__(
+        self,
+        *,
+        scad_source: str = "// fixed scad\ncube([1, 1, 1]);\n",
+        stl_bytes: bytes = b"solid fixed\nendsolid fixed\n",
+    ) -> None:
+        self.scad_source = scad_source
+        self.stl_bytes = stl_bytes
+        self.generate_calls = 0
+        self.validate_calls = 0
+        self.export_calls = 0
+        self.seen_specifications: list[dict[str, Any]] = []
+
+    def generate(self, specification: dict[str, Any]) -> str:
+        self.generate_calls += 1
+        self.seen_specifications.append(specification)
+        for index, operation in enumerate(specification.get("operations") or []):
+            if not isinstance(operation, dict) or operation.get("kind") != "slot":
+                continue
+            if operation.get("diameter") is None:
+                raise SpecificationError(
+                    f"operations[{index}].diameter is required for a 'slot' operation"
+                )
+            if operation.get("length") is None:
+                raise SpecificationError(
+                    f"operations[{index}].length is required for a 'slot' operation"
+                )
+        return self.scad_source
+
+    def validate(self, model: GeneratedModel) -> list[str]:
+        self.validate_calls += 1
+        return []
+
+    def export(self, model: GeneratedModel, format: str) -> bytes:
+        self.export_calls += 1
         return self.stl_bytes

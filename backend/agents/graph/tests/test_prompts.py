@@ -12,12 +12,19 @@ import pytest
 
 from agents.graph.editor import EDITOR_SYSTEM_PROMPT
 from agents.graph.planner import PLANNER_SYSTEM_PROMPT
+from agents.graph.reviser import REVISER_SYSTEM_PROMPT
 
 PRIMITIVE_TYPES = ("box", "cylinder", "sphere", "cone")
 
 PROMPTS = {
     "planner": PLANNER_SYSTEM_PROMPT,
     "editor": EDITOR_SYSTEM_PROMPT,
+}
+
+#: The reviser carries the same per-operation contract as the planner/editor.
+DIMENSION_PROMPTS = {
+    **PROMPTS,
+    "reviser": REVISER_SYSTEM_PROMPT,
 }
 
 
@@ -53,6 +60,27 @@ def test_prompt_mentions_add_subtract_roles_and_build_plate(name: str, prompt: s
 @pytest.mark.parametrize("name, prompt", PROMPTS.items())
 def test_prompt_forbids_code_and_mesh_output(name: str, prompt: str) -> None:
     assert "Never emit OpenSCAD code, G-code or STL data" in prompt
+
+
+@pytest.mark.parametrize("name, prompt", DIMENSION_PROMPTS.items())
+def test_prompt_teaches_required_operation_dimensions(name: str, prompt: str) -> None:
+    """Pin the per-kind required fields that the CAD backend enforces.
+
+    A ``slot`` without a ``diameter`` (or any other missing required dimension)
+    is the fixable specification error the reviser retry loop exists for, so
+    every prompt that emits operations must spell the contract out.
+    """
+    assert "'depth', 'origin' and 'normal'" in prompt
+    assert "'hole' -> 'diameter'" in prompt
+    assert "'boss' -> 'diameter'" in prompt
+    assert "'slot' -> 'diameter' and 'length'" in prompt
+    assert "'pocket', 'cut' and 'add' -> 'width' and 'height'" in prompt
+
+
+def test_reviser_is_told_to_repair_the_missing_numeric_fields() -> None:
+    prompt = REVISER_SYSTEM_PROMPT
+    assert "fill or repair exactly that field" in prompt
+    assert "numeric" in prompt
 
 
 def test_planner_keeps_legacy_fields_and_research_behaviour() -> None:

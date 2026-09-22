@@ -24,7 +24,7 @@ from agents.llm import LLMError, LLMProvider
 from agents.spec import ModelSpecification
 
 from .cad import SpecReviser
-from .planner import coerce_plan
+from .planner import OPERATION_DIMENSIONS_PROMPT, coerce_plan
 
 __all__ = ["REVISER_SYSTEM_PROMPT", "make_llm_reviser"]
 
@@ -36,6 +36,11 @@ REVISER_SYSTEM_PROMPT = (
     "validation and/or vision-review errors it produced. Return ONE JSON "
     "object: the corrected ModelSpecification matching the schema. "
     "Change only what the errors describe and keep every other field as-is. "
+    + OPERATION_DIMENSIONS_PROMPT
+    + "If an error says a required numeric field is missing or out of range, "
+    "fill or repair exactly that field (and any sibling field the same "
+    "operation kind requires) using the surrounding geometry and the numeric "
+    "error, instead of re-emitting the same invalid value. "
     "Keep dimensions, primitives and operations printable, keep the part "
     "resting on the build plate (min Z = 0) and never emit OpenSCAD code, "
     "G-code or STL data - only the structured specification."

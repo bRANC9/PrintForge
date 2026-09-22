@@ -25,11 +25,25 @@ from .state import WorkflowState, append_history, failure_state
 from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
 __all__ = [
+    "OPERATION_DIMENSIONS_PROMPT",
     "PLANNER_SYSTEM_PROMPT",
     "PlannerPlan",
     "coerce_plan",
     "make_planner_node",
 ]
+
+#: Shared instruction pinning the per-operation required fields. The Planner,
+#: Editor and Reviser all emit ``ModelSpecification.operations``; a ``slot``
+#: without its ``diameter`` (or any other missing required dimension) is a
+#: fixable specification error the CAD backend rejects, so every prompt states
+#: the contract explicitly and asks the LLM to fill the fields.
+OPERATION_DIMENSIONS_PROMPT = (
+    "Every 'operations' entry MUST carry 'depth', 'origin' and 'normal', plus "
+    "the dimensions its kind needs: 'hole' -> 'diameter'; 'boss' -> 'diameter'; "
+    "'slot' -> 'diameter' and 'length'; 'pocket', 'cut' and 'add' -> 'width' "
+    "and 'height'. Always fill these numeric fields explicitly and never leave a "
+    "required dimension missing or null. "
+)
 
 PLANNER_SYSTEM_PROMPT = (
     "You are the Planner agent of an OpenSCAD 3D-printing workflow. "
@@ -49,7 +63,8 @@ PLANNER_SYSTEM_PROMPT = (
     "filled for compatibility, and use 'primitives': [] only when the object "
     "really is the built-in phone holder; otherwise always describe the object "
     "with primitives. Use sensible printable defaults when a value is missing. "
-    "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
+    + OPERATION_DIMENSIONS_PROMPT
+    + "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
 )
 
 
