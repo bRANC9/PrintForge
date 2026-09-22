@@ -2,7 +2,10 @@
 {% load static %}
 {% block title %}Nyomtatók – PrintForge{% endblock %}
 {% block content %}
-    <div data-printers-page x-data="printerStatus">
+    <div data-printers-page
+         data-is-staff="{{ user.is_staff|yesno:'true,false' }}"
+         x-data="printerStatus">
+        {{ backends|json_script:"printer-backends-data" }}
         <header class="page-head">
             <div>
                 <h1>Nyomtatók</h1>
@@ -18,22 +21,82 @@
                         @click="refreshStatuses()"
                         :disabled="refreshing"
                         x-text="refreshing ? 'Frissítés…' : 'Frissítés'"></button>
+                {% if user.is_staff %}
+                    <button type="button" class="btn btn-primary" @click="startCreate()">Új nyomtató</button>
+                {% endif %}
             </div>
         </header>
         <template x-if="error">
             <p class="error-box" x-text="error"></p>
         </template>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        {% if user.is_staff %}
+            <section class="panel" x-show="formOpen" x-cloak>
+                <h2 x-text="form.id ? 'Nyomtató szerkesztése' : 'Új nyomtató'"></h2>
+                <form class="stack-form" @submit.prevent="savePrinter()">
+                    <label for="printer-name">Név</label>
+                    <input id="printer-name"
+                           class="input"
+                           type="text"
+                           maxlength="200"
+                           required
+                           x-model="form.name"
+                           :disabled="saving">
+                    <label for="printer-backend">Backend</label>
+                    <select id="printer-backend"
+                            class="input"
+                            x-model="form.backend"
+                            :disabled="saving">
+                        <option value="">Válassz backendet…</option>
+                        <template x-for="backend in backends" :key="backend">
+                            <option :value="backend" x-text="backend"></option>
+                        </template>
+                    </select>
+                    <label for="printer-host">Host (IP vagy hostnév, opcionális porttal)</label>
+                    <input id="printer-host"
+                           class="input"
+                           type="text"
+                           maxlength="255"
+                           placeholder="192.168.1.50 vagy printer.local:7125"
+                           x-model="form.host"
+                           :disabled="saving">
+                    <label for="printer-api-key">API kulcs / access code</label>
+                    <input id="printer-api-key"
+                           class="input"
+                           type="password"
+                           autocomplete="new-password"
+                           placeholder="változatlan"
+                           x-model="form.api_key"
+                           :disabled="saving">
+                    <p class="muted field-hint">Üresen hagyva a mentett kulcs nem változik. A kulcsot az API soha nem adja vissza.</p>
+                    <label class="checkbox-inline">
+                        <input type="checkbox" x-model="form.is_active" :disabled="saving">
+                        Aktív
+                    </label>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="saving || !form.name.trim()"
+                                x-text="saving ? 'Mentés…' : 'Mentés'"></button>
+                        <button type="button" class="btn" @click="cancelForm()" :disabled="saving">Mégse</button>
+                    </div>
+                </form>
+            </section>
+        {% endif %}
         <p class="muted" x-show="loading">Betöltés…</p>
         <p class="muted" x-show="!loading && !error && !printers.length" x-cloak>
-            Nincs regisztrált nyomtató. Vedd fel a Django adminban.
+            Nincs regisztrált nyomtató.
+            {% if user.is_staff %}Vedd fel az „Új nyomtató" gombbal.{% endif %}
         </p>
         <div class="printer-grid" x-show="!loading && printers.length" x-cloak>
             <template x-for="printer in printers" :key="printer.id">
-                <section class="panel printer-card">
+                <section class="panel printer-card"
+                         :class="{ 'is-inactive': !printer.is_active }">
                     <header class="printer-card-head">
                         <h2 x-text="printer.name"></h2>
                         <span class="badge" x-text="printer.backend || 'nincs backend'"></span>
                     </header>
+                    <p class="muted" x-show="!printer.is_active" x-cloak>Inaktív</p>
                     <template x-if="statusOf(printer)">
                         <div>
                             <p>
@@ -75,6 +138,21 @@
                         </div>
                     </template>
                     <p class="muted" x-show="!statusOf(printer)">Állapot betöltése…</p>
+                    {% if user.is_staff %}
+                        <div class="row-actions">
+                            <button type="button" class="btn btn-small" @click="startEdit(printer)">Szerkesztés</button>
+                            <button type="button"
+                                    class="btn btn-small"
+                                    x-show="!printer.is_active"
+                                    :disabled="busyPrinterId === printer.id"
+                                    @click="reactivate(printer)">Aktiválás</button>
+                            <button type="button"
+                                    class="btn btn-small btn-danger"
+                                    x-show="printer.is_active"
+                                    :disabled="busyPrinterId === printer.id"
+                                    @click="deactivate(printer)">Deaktiválás</button>
+                        </div>
+                    {% endif %}
                 </section>
             </template>
         </div>

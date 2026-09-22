@@ -117,16 +117,44 @@ class TagSerializer(serializers.ModelSerializer):
 
 
 class PrinterSerializer(serializers.ModelSerializer):
-    """Read-only printer registry row.
+    """Printer registry row.
 
-    Deliberately omits ``host`` and ``api_key``: the host is operational detail
-    and the key is a secret that must never leave the server.
+    ``host`` and ``api_key`` are operational/secret fields: they are only
+    visible to staff (``host``) or never returned at all (``api_key``, which is
+    write-only). Non-staff callers get the plain read projection.
     """
+
+    api_key = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, max_length=255
+    )
 
     class Meta:
         model = Printer
-        fields = ["id", "name", "backend", "is_active", "created_at"]
-        read_only_fields = fields
+        fields = ["id", "name", "backend", "host", "api_key", "is_active", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+    def get_fields(self):
+        fields = super().get_fields()
+        request = self.context.get("request")
+        if request is None or not getattr(request.user, "is_staff", False):
+            fields.pop("host", None)
+            fields.pop("api_key", None)
+        return fields
+
+    def validate_backend(self, value):
+        from printers.factory import supported_backends
+
+        if value and value.strip().lower() not in supported_backends():
+            raise serializers.ValidationError(
+                f"Unknown printer backend {value!r}; supported: " + ", ".join(supported_backends())
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        # An empty api_key on update means "leave the stored secret unchanged".
+        if validated_data.get("api_key", None) == "":
+            validated_data.pop("api_key")
+        return super().update(instance, validated_data)
 
 
 class RatingSerializer(serializers.ModelSerializer):

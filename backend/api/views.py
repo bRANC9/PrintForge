@@ -564,22 +564,35 @@ def _cfs_slot_payload(slot) -> dict:
     }
 
 
-class PrinterViewSet(viewsets.ReadOnlyModelViewSet):
-    """Read-only printer registry + live status (terv.md 13. fejezet).
+class PrinterViewSet(viewsets.ModelViewSet):
+    """Printer registry, live status and staff-only management (terv.md 13.).
 
-    Printers are a global resource (not workspace-scoped), so any authenticated
-    user may list them and poll a status snapshot. ``host``/``api_key`` are never
-    exposed. A backend failure is reported as ``online: false`` with an ``error``
-    string instead of a 5xx, so the UI can poll safely.
+    Reads are open to any authenticated user (printers are a global resource,
+    not workspace-scoped); create/update/deactivate require staff, matching the
+    settings/Ollama endpoints. ``host`` is visible to staff and ``api_key`` is
+    write-only. A backend failure is reported as ``online: false`` with an
+    ``error`` string instead of a 5xx, so the UI can poll safely.
     """
 
     serializer_class = PrinterSerializer
-    permission_classes = [WorkspaceScopePermission]
     # Global resource: authenticated is enough, no workspace role to check.
     permission_scope_exempt = True
 
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            return [IsStaff()]
+        return [WorkspaceScopePermission()]
+
     def get_queryset(self):
         return Printer.objects.all()
+
+    def destroy(self, request, *args, **kwargs):
+        """Deactivate instead of deleting: ``PrintJob`` protects the row."""
+        printer = self.get_object()
+        if printer.is_active:
+            printer.is_active = False
+            printer.save(update_fields=["is_active"])
+        return Response(status=HTTPStatus.NO_CONTENT)
 
     @action(detail=True, methods=["get"], url_path="status")
     def status(self, request, pk=None):

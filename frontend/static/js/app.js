@@ -27,6 +27,7 @@
             `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/transition/`,
         // Printer registry + live status (terv.md 13.).
         printers: () => `${API_BASE}/printers/`,
+        printer: (printerId) => `${API_BASE}/printers/${encodeURIComponent(printerId)}/`,
         printerStatus: (printerId) =>
             `${API_BASE}/printers/${encodeURIComponent(printerId)}/status/`,
         notifications: () => `${API_BASE}/notifications/`,
@@ -190,6 +191,11 @@
         transitionPrintJob: (jobId, status) =>
             request(endpoints.printJobTransition(jobId), { method: "POST", body: { status } }),
         listPrinters: async () => unwrapList(await request(endpoints.printers())),
+        createPrinter: (payload) => request(endpoints.printers(), { method: "POST", body: payload }),
+        updatePrinter: (printerId, patch) =>
+            request(endpoints.printer(printerId), { method: "PATCH", body: patch }),
+        deactivatePrinter: (printerId) =>
+            request(endpoints.printer(printerId), { method: "DELETE" }),
         printerStatus: (printerId) => request(endpoints.printerStatus(printerId)),
         listNotifications: async () => unwrapList(await request(endpoints.notifications())),
         markNotificationRead: (notificationId) =>
@@ -866,12 +872,32 @@
                 return value === null || value === undefined ? "" : value;
             },
 
+            /** True when Ollama reported capabilities (>= 0.34); else show all. */
+            hasModelCapabilities() {
+                return this.models.some(
+                    (model) => Array.isArray(model.capabilities) && model.capabilities.length
+                );
+            },
+
             /**
-             * Installed Ollama models, plus the current value when it is not
-             * installed (so a dropdown never hides an existing override).
+             * Dropdown options for a model kind ("completion" / "embedding").
+             * Falls back to the full list when capabilities are unavailable, and
+             * always keeps the current value so an existing override is never
+             * hidden (even when that model is not installed).
              */
-            modelOptionsFor(current) {
-                const options = Array.isArray(this.models) ? this.models.slice() : [];
+            modelOptionsFor(current, kind) {
+                let options = Array.isArray(this.models) ? this.models.slice() : [];
+                if (this.hasModelCapabilities()) {
+                    options = options.filter((model) => {
+                        const caps = Array.isArray(model.capabilities) ? model.capabilities : [];
+                        if (kind === "embedding") return caps.includes("embedding");
+                        return (
+                            caps.includes("completion") ||
+                            caps.includes("tools") ||
+                            caps.includes("insert")
+                        );
+                    });
+                }
                 const names = options.map((model) => model.name);
                 if (current && !names.includes(current)) {
                     options.unshift({ name: current, missing: true });
@@ -880,11 +906,11 @@
             },
 
             get ollamaModelOptions() {
-                return this.modelOptionsFor(this.form.ollama_model);
+                return this.modelOptionsFor(this.form.ollama_model, "completion");
             },
 
             get embeddingModelOptions() {
-                return this.modelOptionsFor(this.form.embedding_model);
+                return this.modelOptionsFor(this.form.embedding_model, "embedding");
             },
 
             formatDate,
