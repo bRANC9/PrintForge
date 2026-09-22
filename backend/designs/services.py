@@ -35,11 +35,12 @@ __all__ = [
 ]
 
 #: Artifact kinds exposed by the API and the storage layout they map to.
-ARTIFACT_KINDS = ("scad", "stl")
-_ARTIFACT_FIELDS = {"scad": "scad_file", "stl": "stl_file"}
+ARTIFACT_KINDS = ("scad", "stl", "preview")
+_ARTIFACT_FIELDS = {"scad": "scad_file", "stl": "stl_file", "preview": "preview_image"}
 ARTIFACT_CONTENT_TYPES = {
     "scad": "text/plain; charset=utf-8",
     "stl": "model/stl",
+    "preview": "image/png",
 }
 
 
@@ -188,7 +189,7 @@ def start_render(version: ModelVersion, *, task: Any | None = None) -> ModelVers
 
 
 def artifact_path(version: ModelVersion, kind: str) -> str | None:
-    """Return the relative storage path of ``kind`` (``scad``/``stl``).
+    """Return the relative storage path of ``kind`` (``scad``/``stl``/``preview``).
 
     Falls back to the path recorded in ``validation_json`` when the model field
     is empty. Returns ``None`` for unknown kinds or missing artifacts.

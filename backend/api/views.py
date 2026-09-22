@@ -569,7 +569,10 @@ class ModelVersionViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             content_type=ARTIFACT_CONTENT_TYPES.get(kind, "application/octet-stream"),
         )
         filename = relative_path.rsplit("/", 1)[-1]
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        # The preview PNG is rendered to be displayed in the browser (inline);
+        # scad/stl stay attachments so clicking them downloads the artifact.
+        disposition = "inline" if kind == "preview" else "attachment"
+        response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
         return response
 
 
