@@ -146,9 +146,11 @@ def test_too_many_operations_are_rejected():
         [],
     ],
 )
-def test_malformed_operations_are_rejected(operation):
-    with pytest.raises(SpecificationError):
-        parse_operations(spec(operation))
+def test_malformed_operations_are_skipped_with_warning(operation):
+    warnings: list[str] = []
+    assert parse_operations(spec(operation), warnings=warnings) == []
+    assert warnings
+    assert "skipped operations[0]" in warnings[0]
 
 
 @pytest.mark.parametrize(
@@ -158,14 +160,19 @@ def test_malformed_operations_are_rejected(operation):
         {"x": 0, "y": 0, "z": 0},
     ],
 )
-def test_zero_length_normal_is_rejected(normal):
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({**HOLE, "normal": normal}))
+def test_zero_length_normal_is_skipped(normal):
+    warnings: list[str] = []
+    assert parse_operations(spec({**HOLE, "normal": normal}), warnings=warnings) == []
+    assert warnings
 
 
-def test_generate_rejects_zero_length_normal():
-    with pytest.raises(SpecificationError):
-        OpenSCADBackend().generate(spec({**HOLE, "normal": {"x": 0, "y": 0, "z": 0}}))
+def test_generate_skips_zero_length_normal_and_keeps_base():
+    source = OpenSCADBackend().generate(spec({**HOLE, "normal": {"x": 0, "y": 0, "z": 0}}))
+
+    assert source.rstrip().endswith("holder();")
+    assert "multmatrix" not in source
+    assert "// warning: skipped operations[0]" in source
+    assert validate_scad_source(source) == []
 
 
 @pytest.mark.parametrize(
@@ -184,38 +191,69 @@ def test_generate_rejects_zero_length_normal():
         {**HOLE, "kind": "slot", "length": 500.1, "diameter": 3.0},
     ],
 )
-def test_out_of_bounds_operation_values_are_rejected(operation):
-    with pytest.raises(SpecificationError):
-        parse_operations(spec(operation))
+def test_out_of_bounds_operation_values_are_skipped(operation):
+    warnings: list[str] = []
+    assert parse_operations(spec(operation), warnings=warnings) == []
+    assert warnings
 
 
 @pytest.mark.parametrize("origin", [{"x": 1e12, "y": 0, "z": 0}, {"x": 0, "z": 0}])
-def test_invalid_origin_is_rejected(origin):
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({**HOLE, "origin": origin}))
+def test_invalid_origin_is_skipped(origin):
+    warnings: list[str] = []
+    assert parse_operations(spec({**HOLE, "origin": origin}), warnings=warnings) == []
+    assert warnings
 
 
 @pytest.mark.parametrize("kind", ["hole", "boss"])
-def test_cylindrical_kinds_require_diameter(kind):
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({**HOLE, "kind": kind, "diameter": None}))
+def test_cylindrical_kinds_missing_diameter_are_skipped(kind):
+    warnings: list[str] = []
+    assert parse_operations(spec({**HOLE, "kind": kind, "diameter": None}), warnings=warnings) == []
+    assert warnings
 
 
 @pytest.mark.parametrize("kind", ["pocket", "cut", "add"])
-def test_rectangular_kinds_require_width_and_height(kind):
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({**POCKET, "kind": kind, "width": None}))
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({**POCKET, "kind": kind, "height": None}))
+def test_rectangular_kinds_missing_size_are_skipped(kind):
+    warnings: list[str] = []
+    assert parse_operations(spec({**POCKET, "kind": kind, "width": None}), warnings=warnings) == []
+    assert warnings
+    warnings = []
+    assert parse_operations(spec({**POCKET, "kind": kind, "height": None}), warnings=warnings) == []
+    assert warnings
 
 
-def test_slot_requires_length_and_diameter():
+def test_slot_missing_length_or_diameter_is_skipped():
     slot = {**HOLE, "kind": "slot", "length": 10.0}
     parse_operations(spec(slot))  # valid
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({key: value for key, value in slot.items() if key != "length"}))
-    with pytest.raises(SpecificationError):
-        parse_operations(spec({key: value for key, value in slot.items() if key != "diameter"}))
+
+    warnings: list[str] = []
+    without_length = {key: value for key, value in slot.items() if key != "length"}
+    assert parse_operations(spec(without_length), warnings=warnings) == []
+    assert warnings
+
+    warnings = []
+    without_diameter = {key: value for key, value in slot.items() if key != "diameter"}
+    assert parse_operations(spec(without_diameter), warnings=warnings) == []
+    assert warnings
+
+
+def test_incomplete_operation_is_skipped_and_rest_renders():
+    # The weak-model case: operations[0] is a pocket missing width/height.
+    incomplete = {
+        "kind": "pocket",
+        "origin": {"x": 20.0, "y": 20.0, "z": 5.0},
+        "normal": {"x": 1.0, "y": 0.0, "z": 0.0},
+        "depth": 3.0,
+    }
+    warnings: list[str] = []
+    operations = parse_operations(spec(incomplete, HOLE), warnings=warnings)
+
+    assert [operation.kind for operation in operations] == ["hole"]
+    assert any("operations[0]" in warning for warning in warnings)
+
+    source = OpenSCADBackend().generate(spec(incomplete, HOLE))
+    assert "// operation: hole" in source
+    assert "// warning: skipped operations[0]" in source
+    assert validate_scad_source(source) == []
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +327,22 @@ def test_label_newlines_cannot_break_out_of_comment():
 # ---------------------------------------------------------------------------
 
 
-def test_validate_reports_operation_problems():
+def test_validate_reports_structural_operation_problems():
+    # A non-list is a structural error and still blocks.
     model = GeneratedModel(
-        specification=spec({**HOLE, "normal": {"x": 0, "y": 0, "z": 0}}),
+        specification={**BASE_SPEC, "operations": "hole"},
         scad_source="cube([1, 1, 1]);",
     )
     problems = OpenSCADBackend().validate(model)
-    assert any("normal" in problem for problem in problems)
+    assert any("operations" in problem for problem in problems)
+
+
+def test_validate_tolerates_individual_bad_operations():
+    # A skipped operation is simply absent: the render still validates.
+    bad_spec = spec({**HOLE, "normal": {"x": 0, "y": 0, "z": 0}})
+    source = OpenSCADBackend().generate(bad_spec)
+    model = GeneratedModel(specification=bad_spec, scad_source=source)
+    assert OpenSCADBackend().validate(model) == []
 
 
 def test_validate_accepts_valid_operations():

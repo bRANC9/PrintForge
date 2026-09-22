@@ -81,6 +81,24 @@ def test_mounting_type_can_be_numeric():
 
 
 @pytest.mark.parametrize(
+    ("mount_type", "expected"),
+    [
+        ("M3", 3.3),
+        ("M5", 5.3),
+        ("standard_6mm", 6.3),
+        ("m3 screw", 3.3),
+        ("M3x10", 3.3),
+        ("banana", 5.3),  # no number -> M5 fallback
+        ("", 5.3),
+    ],
+)
+def test_hole_diameter_is_tolerant(mount_type, expected):
+    """Unrecognised mounting labels resolve deterministically instead of raising."""
+    spec = {**SPEC, "mounting": {"type": mount_type}}
+    assert build_parameters(spec).hole_diameter == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
     "spec",
     [
         {"dimensions": {"width": -1}},
@@ -88,7 +106,6 @@ def test_mounting_type_can_be_numeric():
         {"dimensions": {"height": "not-a-number"}},
         {"angle": 500},
         {"wall_thickness": 0.1},
-        {"mounting": {"type": "banana"}},
         {"mounting": {"count": 99}},
         {"mounting": "M5"},
         {"angle": True},

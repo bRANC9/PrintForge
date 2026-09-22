@@ -179,7 +179,8 @@ _SCREW_NOMINAL: dict[str, float] = {
     "M6": 6.0,
     "M8": 8.0,
 }
-_RE_SCREW = re.compile(r"^M?(\d+(?:\.\d+)?)$", re.IGNORECASE)
+# Any number embedded in the mounting label: ``"M3"``, ``"3.5"``, ``"standard_6mm"``.
+_RE_SCREW_NUMBER = re.compile(r"(\d+(?:\.\d+)?)")
 _RE_SAFE_NAME = re.compile(r"[^A-Za-z0-9_\- ]+")
 
 
@@ -249,15 +250,25 @@ def _sanitize_object_name(value: Any) -> str:
 
 
 def _hole_diameter(mount_type: str, clearance: float) -> float:
+    """Resolve a mounting label to a screw hole diameter, never raising.
+
+    Weak local models emit labels the ISO table does not know (``"standard_6mm"``,
+    ``"m3 screw"``, ...). The resolution is deliberately tolerant and
+    deterministic:
+
+    * an exact ISO metric key (``"M3"``, ``"M5"``, ...) uses its nominal size;
+    * otherwise the **first number** in the string is the nominal diameter
+      (``"standard_6mm"`` -> ``6.0``, ``"M3x10"`` -> ``3.0``);
+    * a string without any number falls back to ``M5`` (``5.0``).
+
+    The clearance is always added on top. Mounting is irrelevant to
+    primitive-based parts, but ``build_parameters`` still parses it.
+    """
     key = str(mount_type).strip().upper()
     nominal = _SCREW_NOMINAL.get(key)
     if nominal is None:
-        match = _RE_SCREW.match(key)
-        if match is None:
-            raise SpecificationError(
-                f"Unsupported mounting type {mount_type!r}; use an ISO metric screw e.g. 'M3', 'M5'"
-            )
-        nominal = float(match.group(1))
+        match = _RE_SCREW_NUMBER.search(key)
+        nominal = float(match.group(1)) if match is not None else 5.0
     return nominal + clearance
 
 
@@ -341,6 +352,9 @@ _RECTANGULAR_KINDS = frozenset({"pocket", "cut", "add"})
 # Labels are only ever emitted inside a ``//`` comment, but sanitise anyway so a
 # hostile label cannot close the comment or smuggle a forbidden construct.
 _RE_LABEL = re.compile(r"[^\w\- .,:/]+")
+# Warnings are emitted inside a ``//`` comment too: flatten every control /
+# line-separator character so the comment can never be broken out of.
+_RE_WARNING_UNSAFE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
 
 
 @dataclass(frozen=True)
@@ -426,6 +440,26 @@ def _sanitize_label(value: Any) -> str:
     return _RE_LABEL.sub("", text).strip()[:MAX_OPERATION_LABEL]
 
 
+def _sanitize_warning(value: Any) -> str:
+    """Sanitise a warning for a ``// warning: ...`` comment line.
+
+    Warnings embed exception text that may contain untrusted specification
+    values. Every control character (including ``\\r``/``\\n`` and the Unicode
+    line separators) is flattened to a space so a warning can never break out of
+    its ``//`` comment and inject OpenSCAD code; the safety scan ignores comment
+    contents, so the readable remainder is safe.
+    """
+    text = str(value) if value is not None else ""
+    return _RE_WARNING_UNSAFE.sub(" ", text).strip()[:200]
+
+
+def _collect_warning(warnings: list[str] | None, message: str) -> None:
+    """Record a skip/fallback warning when the caller asked for warnings."""
+    logger.warning("%s", message)
+    if warnings is not None:
+        warnings.append(message)
+
+
 def _parse_operation(item: Any, index: int) -> RenderOperation:
     path = f"operations[{index}]"
     if not isinstance(item, dict):
@@ -484,14 +518,26 @@ def _parse_operation(item: Any, index: int) -> RenderOperation:
     )
 
 
-def parse_operations(specification: dict[str, Any] | None) -> list[RenderOperation]:
+def parse_operations(
+    specification: dict[str, Any] | None,
+    *,
+    warnings: list[str] | None = None,
+) -> list[RenderOperation]:
     """Validate ``specification['operations']`` and return bounded features.
 
     Missing/``None``/empty ``operations`` yields ``[]`` (the base part alone).
-    Malformed entries, a zero-length ``normal`` and out-of-bounds numbers all
-    raise :class:`SpecificationError`, which ``validate()`` surfaces as blocking
-    problems. The LLM never supplies OpenSCAD code: only these coerced numbers
-    reach the template.
+    A **structural** error -- a non-list ``operations`` or more than
+    :data:`MAX_OPERATIONS` entries -- still raises :class:`SpecificationError`
+    (an unbounded list is a DoS vector).
+
+    Weak-model tolerance
+    --------------------
+    An *individual* malformed or incomplete operation (bad ``kind``, a
+    zero-length ``normal``, a missing per-kind dimension, out-of-bounds numbers)
+    is **skipped** instead of failing the whole render: the base part still
+    renders and a human-readable warning is collected into ``warnings`` when the
+    caller passes a list. The LLM never supplies OpenSCAD code: only these
+    coerced numbers reach the template.
     """
     spec: dict[str, Any] = specification if isinstance(specification, dict) else {}
     raw = spec.get("operations")
@@ -503,7 +549,14 @@ def parse_operations(specification: dict[str, Any] | None) -> list[RenderOperati
         raise SpecificationError(
             f"Field 'operations' must have at most {MAX_OPERATIONS} entries (got {len(raw)})"
         )
-    return [_parse_operation(item, index) for index, item in enumerate(raw)]
+
+    operations: list[RenderOperation] = []
+    for index, item in enumerate(raw):
+        try:
+            operations.append(_parse_operation(item, index))
+        except SpecificationError as exc:
+            _collect_warning(warnings, f"skipped operations[{index}]: {exc}")
+    return operations
 
 
 # ---------------------------------------------------------------------------
@@ -527,12 +580,22 @@ MAX_PRIMITIVES = 64
 PRIMITIVE_TYPES: tuple[str, ...] = ("box", "cylinder", "sphere", "cone")
 PRIMITIVE_ROLES: tuple[str, ...] = ("add", "subtract")
 _ADDITIVE_ROLES = frozenset({"add"})
-#: Required size fields per primitive type; missing ones are a specification error.
+#: Required size fields per primitive type; missing ones are a specification error
+#: unless they can be repaired from the spec ``dimensions`` (see ``_fallback_size``).
 _REQUIRED_SIZES: dict[str, tuple[str, ...]] = {
     "box": ("width", "depth", "height"),
     "cylinder": ("diameter", "height"),
     "sphere": ("diameter",),
     "cone": ("diameter", "height"),
+}
+
+#: Weak-model tolerance: map a missing ``box`` size onto the spec ``dimensions``
+#: field used to repair it. Small local models frequently emit a plate-like box
+#: with only ``width`` set, so ``width x height x thickness`` is the natural fill.
+_BOX_DIMENSION_FALLBACK: dict[str, str] = {
+    "width": "width",
+    "depth": "height",
+    "height": "thickness",
 }
 
 
@@ -581,7 +644,51 @@ def _primitive_vec3(
     return components  # type: ignore[return-value]
 
 
-def _parse_primitive(item: Any, index: int) -> RenderPrimitive:
+def _optional_dimension(spec: dict[str, Any], name: str) -> float | None:
+    """Return ``dimensions.<name>`` for the size fallback, or ``None``.
+
+    A missing, malformed or out-of-bounds ``dimensions`` entry yields ``None``
+    so the primitive field stays missing and the caller still raises; a fallback
+    never invents a size.
+    """
+    dimensions = spec.get("dimensions")
+    if not isinstance(dimensions, dict):
+        return None
+    try:
+        return _coerce_float(dimensions, name, minimum=MIN_PRIMITIVE_MM, maximum=MAX_PRIMITIVE_MM)
+    except SpecificationError:
+        return None
+
+
+def _smallest_dimension(spec: dict[str, Any]) -> float | None:
+    """``min(dimensions.width, dimensions.height, dimensions.thickness)`` or ``None``.
+
+    The diameter fallback only applies when all three dimensions are present and
+    valid, mirroring the documented rule exactly.
+    """
+    values = [_optional_dimension(spec, name) for name in ("width", "height", "thickness")]
+    present = [value for value in values if value is not None]
+    return min(present) if len(present) == 3 else None
+
+
+def _fallback_size(kind: str, field: str, spec: dict[str, Any]) -> float | None:
+    """Repair one missing primitive size from the spec ``dimensions``.
+
+    Returns ``None`` when no usable dimension exists, so the caller still raises
+    :class:`SpecificationError`. Explicitly provided primitive values are never
+    passed here: the caller only falls back when the field is ``None``.
+    """
+    if kind == "box":
+        dimension = _BOX_DIMENSION_FALLBACK.get(field)
+        return _optional_dimension(spec, dimension) if dimension is not None else None
+    if field == "diameter":  # cylinder / sphere / cone
+        return _smallest_dimension(spec)
+    if field == "height":  # cylinder / cone
+        return _optional_dimension(spec, "thickness")
+    return None
+
+
+def _parse_primitive(item: Any, index: int, spec: dict[str, Any]) -> RenderPrimitive:
     path = f"primitives[{index}]"
     if not isinstance(item, dict):
         raise SpecificationError(f"{path} must be an object")
@@ -624,6 +731,11 @@ def _parse_primitive(item: Any, index: int) -> RenderPrimitive:
         "height": height,
         "diameter": diameter,
     }
+    # Weak-model tolerance: repair a missing required size from the spec
+    # ``dimensions`` before failing. An explicit primitive value always wins.
+    for name in _REQUIRED_SIZES[kind]:
+        if sizes[name] is None:
+            sizes[name] = _fallback_size(kind, name, spec)
     missing = [name for name in _REQUIRED_SIZES[kind] if sizes[name] is None]
     if missing:
         names = ", ".join(f"'{name}'" for name in missing)
@@ -634,35 +746,119 @@ def _parse_primitive(item: Any, index: int) -> RenderPrimitive:
         role=role,
         position=position,
         rotation=rotation,
-        width=width,
-        depth=depth,
-        height=height,
-        diameter=diameter,
+        width=sizes["width"],
+        depth=sizes["depth"],
+        height=sizes["height"],
+        diameter=sizes["diameter"],
         label=_sanitize_label(item.get("label", "")),
     )
 
 
-def parse_primitives(specification: dict[str, Any] | None) -> list[RenderPrimitive]:
+def _is_holder_like(spec: dict[str, Any]) -> bool:
+    """True when the spec should render the legacy holder template.
+
+    A spec without an ``object`` key is a legacy manual spec (holder template);
+    otherwise the object name marks a holder when it contains ``"holder"``
+    (case-insensitive, so ``"phone_holder"`` matches).
+    """
+    if "object" not in spec:
+        return True
+    return "holder" in str(spec.get("object")).lower()
+
+
+def _synthesize_box(spec: dict[str, Any]) -> RenderPrimitive | None:
+    """Build a build-plate-standing box from the spec ``dimensions``.
+
+    Maps ``width -> dimensions.width``, ``depth -> dimensions.height`` and
+    ``height -> dimensions.thickness`` and centres the box so its bottom sits on
+    the build plate (``position.z = height / 2``). Returns ``None`` when any of
+    the three dimensions is missing or unusable, so the caller can still raise.
+    """
+    width = _optional_dimension(spec, "width")
+    depth = _optional_dimension(spec, "height")
+    height = _optional_dimension(spec, "thickness")
+    if width is None or depth is None or height is None:
+        return None
+    return RenderPrimitive(
+        type="box",
+        role="add",
+        position=(0.0, 0.0, height / 2.0),
+        width=width,
+        depth=depth,
+        height=height,
+        label="synthesized from dimensions",
+    )
+
+
+def parse_primitives(
+    specification: dict[str, Any] | None,
+    *,
+    warnings: list[str] | None = None,
+) -> list[RenderPrimitive]:
     """Validate ``specification['primitives']`` and return bounded primitives.
 
-    Missing/``None``/empty ``primitives`` yields ``[]`` so the historical
-    holder-token render is preserved byte-for-byte. An unknown ``type``/``role``,
-    a missing per-type size or an out-of-bounds number all raise
-    :class:`SpecificationError`, which ``validate()`` surfaces as blocking
-    problems. The LLM never supplies OpenSCAD code: only these coerced numbers
-    reach the renderer.
+    A **structural** error -- a non-list ``primitives`` or more than
+    :data:`MAX_PRIMITIVES` entries -- still raises :class:`SpecificationError`.
+    The LLM never supplies OpenSCAD code: only these coerced numbers reach the
+    renderer.
+
+    Weak-model tolerance
+    --------------------
+    Small/limited models frequently omit the non-obvious size fields (e.g. a
+    ``box`` with only ``width``). When a *required* size is missing it is
+    deterministically repaired from the spec ``dimensions`` -- a deliberate
+    fallback so weak-model output still renders (a plate-like box maps onto
+    ``width x height x thickness``):
+
+    * ``box``: ``width`` -> ``dimensions.width``, ``depth`` ->
+      ``dimensions.height``, ``height`` -> ``dimensions.thickness``
+    * ``cylinder`` / ``cone``: ``diameter`` ->
+      ``min(dimensions.width, dimensions.height, dimensions.thickness)``,
+      ``height`` -> ``dimensions.thickness``
+    * ``sphere``: ``diameter`` ->
+      ``min(dimensions.width, dimensions.height, dimensions.thickness)``
+
+    An explicitly provided primitive value always wins. An individual primitive
+    that is *still* incomplete after the fallback (or otherwise invalid) is
+    **skipped** with a human-readable warning collected into ``warnings`` rather
+    than failing the render.
+
+    If no primitive survives and the object is **not** holder-like, one ``box``
+    is synthesized from ``dimensions`` (see :func:`_synthesize_box`). A
+    holder-like/legacy spec instead yields ``[]`` so the historical holder
+    template renders byte-for-byte. When the dimensions are unusable, the
+    synthesis raises :class:`SpecificationError` as before.
     """
     spec: dict[str, Any] = specification if isinstance(specification, dict) else {}
     raw = spec.get("primitives")
     if raw is None:
-        return []
+        raw = []
     if not isinstance(raw, (list, tuple)):
         raise SpecificationError("Field 'primitives' must be a list")
     if len(raw) > MAX_PRIMITIVES:
         raise SpecificationError(
             f"Field 'primitives' must have at most {MAX_PRIMITIVES} entries (got {len(raw)})"
         )
-    return [_parse_primitive(item, index) for index, item in enumerate(raw)]
+
+    primitives: list[RenderPrimitive] = []
+    for index, item in enumerate(raw):
+        try:
+            primitives.append(_parse_primitive(item, index, spec))
+        except SpecificationError as exc:
+            _collect_warning(warnings, f"skipped primitives[{index}]: {exc}")
+
+    if not primitives and not _is_holder_like(spec):
+        synthesized = _synthesize_box(spec)
+        if synthesized is None:
+            raise SpecificationError(
+                "Field 'primitives' has no usable entries and 'dimensions' is missing or invalid"
+            )
+        _collect_warning(
+            warnings,
+            "no usable primitives; synthesized a box from 'dimensions'",
+        )
+        primitives.append(synthesized)
+    return primitives
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +944,7 @@ def render_scad(
     parameters: HolderParameters,
     operations: Sequence[RenderOperation] | None = None,
     primitives: Sequence[RenderPrimitive] | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> str:
     """Render the self-contained OpenSCAD template for validated parameters.
 
@@ -756,6 +953,10 @@ def render_scad(
     is the primitive CSG; the same ``operations`` layer is then composited on
     top, so subtractive operations cut the primitive base exactly like the
     holder template.
+
+    ``warnings`` (skipped primitives/operations, synthesized fallbacks) are
+    emitted as sanitised ``// warning: ...`` comments right under the header.
+    With no warnings the output is byte-for-byte unchanged.
     """
     rendered = _SCAD_TEMPLATE.substitute(
         object_name=parameters.object_name,
@@ -768,6 +969,13 @@ def render_scad(
         hole_d=_num(parameters.hole_diameter),
         hole_count=str(parameters.hole_count),
     )
+    warning_lines = [
+        f"// warning: {text}" for text in map(_sanitize_warning, warnings or []) if text
+    ]
+    if warning_lines:
+        header, separator, rest = rendered.partition("\n")
+        rendered = "\n".join([header, *warning_lines]) + separator + rest
+
     features = list(operations or [])
     parts = list(primitives or [])
     if not parts:
@@ -1133,11 +1341,17 @@ class OpenSCADBackend(CADBackend):
     # -- CADBackend ---------------------------------------------------------
 
     def generate(self, specification: dict[str, Any]) -> str:
-        """Validate ``specification`` and render self-contained OpenSCAD source."""
+        """Validate ``specification`` and render self-contained OpenSCAD source.
+
+        Individual malformed primitives/operations are skipped with a warning
+        (surfaced as ``// warning: ...`` comments in the source) so a weak-model
+        spec still produces a sensible part instead of failing.
+        """
         parameters = build_parameters(specification)
-        operations = parse_operations(specification)
-        primitives = parse_primitives(specification)
-        return render_scad(parameters, operations, primitives)
+        warnings: list[str] = []
+        operations = parse_operations(specification, warnings=warnings)
+        primitives = parse_primitives(specification, warnings=warnings)
+        return render_scad(parameters, operations, primitives, warnings)
 
     def validate(self, model: GeneratedModel | str) -> list[str]:
         """Return blocking safety/parameter problems (empty list == valid)."""
