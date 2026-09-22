@@ -21,6 +21,7 @@ from typing import Any
 from django.db import transaction
 from django.db.models import Avg, Count, F, Q
 from django.urls import NoReverseMatch, reverse
+from django.utils.text import slugify
 from pydantic import BaseModel, Field
 
 from accounts.models import User
@@ -54,6 +55,7 @@ __all__ = [
     "remove_plate_item",
     "revoke_share",
     "search_public_projects",
+    "set_project_description",
     "set_project_tags",
     "unpublish_project",
     "unrate_project",
@@ -88,10 +90,14 @@ def create_project(
     created_by: User,
     description: str = "",
 ) -> Project:
+    description = description or ""
     return Project.objects.create(
         workspace=workspace,
         name=name,
         description=description,
+        # A description supplied by the user is ``manual`` and must never be
+        # overwritten by the AI fill (terv.md 29.2).
+        description_source=(ContentSource.MANUAL if description.strip() else ContentSource.EMPTY),
         created_by=created_by,
     )
 
@@ -178,14 +184,28 @@ def record_download(
 
 
 def _get_or_create_tags(names: Iterable[str]) -> list[Tag]:
-    """Resolve ``names`` to :class:`Tag` rows (creating missing ones)."""
+    """Resolve ``names`` to :class:`Tag` rows (creating missing ones).
+
+    Tags are keyed by slug (``slugify(name)``) rather than by the raw, unique
+    ``Tag.name``. Names that normalise to the same slug -- case differences such
+    as ``"Box"``/``"box"``, or symbols that slugify drops -- therefore collapse
+    onto a single row instead of tripping ``UNIQUE constraint failed:
+    projects_tag.slug``. The first spelling wins; the input order is preserved.
+    """
     tags: dict[str, Tag] = {}
     for raw in names:
         name = (raw or "").strip()
         if not name:
             continue
-        tag, _ = Tag.objects.get_or_create(name=name)
-        tags[tag.slug] = tag
+        # ``slugify`` can return "" for names without ASCII alphanumerics; fall
+        # back to the (unique) name so distinct tags never share one empty slug.
+        slug = slugify(name) or name[:80]
+        if slug in tags:
+            continue
+        tag = Tag.objects.filter(slug=slug).first() or Tag.objects.filter(name=name).first()
+        if tag is None:
+            tag, _ = Tag.objects.get_or_create(slug=slug, defaults={"name": name})
+        tags[slug] = tag
     return list(tags.values())
 
 
@@ -197,6 +217,23 @@ def set_project_tags(project: Project, names: Iterable[str]) -> list[Tag]:
         project.tags_source = ContentSource.MANUAL
         project.save(update_fields=["tags_source", "updated_at"])
     return list(project.tags.all())
+
+
+def set_project_description(project: Project, description: str) -> Project:
+    """Set the project's description and record where it came from (terv.md 29.2).
+
+    A user-written value marks ``description_source = manual`` so the AI fill
+    never overwrites it; explicitly clearing it to blank marks ``empty`` so the
+    AI may legitimately fill it again.
+    """
+    description = description or ""
+    source = ContentSource.MANUAL if description.strip() else ContentSource.EMPTY
+    if project.description == description and project.description_source == source:
+        return project
+    project.description = description
+    project.description_source = source
+    project.save(update_fields=["description", "description_source", "updated_at"])
+    return project
 
 
 def rate_project(project: Project, user: User, score: int) -> Rating:
@@ -273,7 +310,14 @@ def create_share(
 
 
 def revoke_share(share: ProjectShare) -> None:
-    """Delete a project share (idempotent)."""
+    """Delete a project share (idempotent).
+
+    Django nulls the primary key after ``delete()``, so a repeated call on the
+    same instance must not raise a ``ValueError`` -- there is simply nothing left
+    to delete.
+    """
+    if share.pk is None:
+        return
     share.delete()
 
 

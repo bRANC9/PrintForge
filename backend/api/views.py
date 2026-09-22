@@ -80,6 +80,7 @@ from projects.services import (
     record_download,
     remove_plate_item,
     search_public_projects,
+    set_project_description,
     set_project_tags,
     unpublish_project,
     unrate_project,
@@ -183,10 +184,15 @@ class ProjectViewSet(viewsets.ModelViewSet):
         serializer.instance = project
 
     def perform_update(self, serializer):
-        # Tags are M2M names, applied through the service (never by DRF's
-        # default ``tags.set()``, which would expect primary keys).
+        # Tags are M2M names and the description carries provenance, so both are
+        # applied through the service layer (never by DRF's default ``tags.set()``,
+        # which would expect primary keys, or a bare field write, which would
+        # leave ``description_source`` stale and let the AI overwrite user text).
         tags = serializer.validated_data.pop("tags", None)
+        description = serializer.validated_data.pop("description", None)
         instance = serializer.save()
+        if description is not None:
+            set_project_description(instance, description)
         if tags is not None:
             set_project_tags(instance, tags)
 
@@ -262,13 +268,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
             }
         )
 
-    @action(detail=True, methods=["post", "delete"], url_path="rate")
+    @action(detail=True, methods=["get", "post", "delete"], url_path="rate")
     def rate(self, request, pk=None):
-        """Upsert (POST) or delete (DELETE) the caller's rating (MEMBER+)."""
+        """Read (GET), upsert (POST) or delete (DELETE) the caller's rating (MEMBER+)."""
         project = self.get_object()
         if request.method == "DELETE":
             unrate_project(project, request.user)
-        else:
+        elif request.method == "POST":
             payload = RatingWriteSerializer(data=request.data)
             payload.is_valid(raise_exception=True)
             try:

@@ -151,6 +151,19 @@ def test_set_project_tags_replaces_and_marks_manual():
     assert list(project.tags.values_list("name", flat=True)) == ["Only"]
 
 
+def test_set_project_tags_collapses_names_that_share_a_slug():
+    project = ProjectFactory()
+
+    # Case variants normalise to the same slug: the first spelling wins and no
+    # UNIQUE(slug) violation is raised.
+    set_project_tags(project, ["Box", "box", "BOX"])
+    assert list(project.tags.values_list("name", flat=True)) == ["Box"]
+
+    # ``slugify`` drops symbols, so "C++" and "C" also collapse onto "c".
+    set_project_tags(project, ["C++", "C"])
+    assert list(project.tags.values_list("name", flat=True)) == ["C++"]
+
+
 # ---------------------------------------------------------------------------
 # Ratings
 # ---------------------------------------------------------------------------
@@ -256,7 +269,7 @@ def test_create_share_link_tokens_are_unique_and_required_user_is_enforced():
         create_share(project, user=None)
 
 
-def test_revoke_share_deletes_the_row():
+def test_revoke_share_is_idempotent_on_the_same_instance():
     project = ProjectFactory()
     share = create_share(project, create_link=True)
     share_pk = share.pk
@@ -265,9 +278,9 @@ def test_revoke_share_deletes_the_row():
 
     assert not ProjectShare.objects.filter(pk=share_pk).exists()
 
-    # NOTE: ``revoke_share`` is documented as idempotent but calling it twice
-    # with the same instance raises ValueError (Django nulls the pk on delete).
-    # Reported to the owning agent; a fresh fetch by pk returns no row instead.
+    # Django nulls the pk on delete; a second call on the same instance must
+    # not raise (regression: it used to raise ValueError).
+    revoke_share(share)
     assert ProjectShare.objects.filter(pk=share_pk).first() is None
 
 

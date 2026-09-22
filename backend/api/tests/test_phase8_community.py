@@ -169,6 +169,45 @@ def test_rate_and_unrate_project(workspace, project, owner, outsider):
     )
 
 
+def test_rate_get_reads_the_callers_rating(project, owner):
+    client = auth(owner)
+    client.post(f"/api/v1/projects/{project.pk}/rate/", {"score": 3}, format="json")
+
+    read = client.get(f"/api/v1/projects/{project.pk}/rate/")
+
+    assert read.status_code == 200
+    assert read.json() == {"summary": {"average": 3.0, "count": 1}, "mine": 3}
+
+
+def test_patch_description_records_manual_provenance(project, owner, monkeypatch):
+    client = auth(owner)
+
+    patched = client.patch(
+        f"/api/v1/projects/{project.pk}/", {"description": "Kézzel írt"}, format="json"
+    )
+
+    assert patched.status_code == 200
+    assert patched.json()["description"] == "Kézzel írt"
+    assert patched.json()["description_source"] == ContentSource.MANUAL
+
+    # A manual description is never overwritten by the AI fill.
+    monkeypatch.setattr(
+        "agents.llm.get_provider",
+        lambda *a, **k: FakeProvider({"summary": "AI szöveg", "tags": []}),
+    )
+    project.refresh_from_db()
+    result = generate_project_description(project)
+    project.refresh_from_db()
+    assert result["applied"] is False
+    assert project.description == "Kézzel írt"
+
+    # Clearing it marks it empty again, so the AI may legitimately refill it.
+    cleared = client.patch(
+        f"/api/v1/projects/{project.pk}/", {"description": ""}, format="json"
+    )
+    assert cleared.json()["description_source"] == ContentSource.EMPTY
+
+
 def test_download_records_and_returns_the_stl_url(project, version, owner):
     version.stl_file.name = f"projects/{project.pk}/v{version.version}/model.stl"
     version.save(update_fields=["stl_file"])
