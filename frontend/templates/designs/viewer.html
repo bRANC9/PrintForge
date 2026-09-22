@@ -7,6 +7,10 @@
     The annotation panel additionally uses `annotationMode`, `annotations`,
     `annotationPrompt`, `sendingAnnotations`, `activeAnnotationId` and the
     matching handlers from the same component (docs/visual-editing.md 3.6).
+
+    The read-only stored-annotation list uses `storedAnnotations` (the selected
+    version's `annotations_json`) and the shared `annotationKindLabel` /
+    `annotationPointLabel` helpers.
 {% endcomment %}
 <section class="panel viewer-panel">
     <header class="viewer-toolbar">
@@ -91,5 +95,27 @@
                     :disabled="sendingAnnotations || !annotations.length"
                     x-text="sendingAnnotations ? 'Küldés…' : 'Küldés AI-nak'"></button>
         </div>
+    </section>
+    <section class="annotation-panel annotation-panel-stored"
+             x-show="!annotationMode && storedAnnotations.length"
+             x-cloak>
+        <header class="annotation-head">
+            <h3>Előző jelölések</h3>
+            <span class="badge" x-text="storedAnnotations.length + ' jelölés'"></span>
+        </header>
+        <p class="muted">
+            Ez a verzió ezekből a vizuális parancsokból készült. A jelölések csak
+            olvashatók, a 3D nézetben szürkén látszanak.
+        </p>
+        <template x-for="(annotation, index) in storedAnnotations" :key="index">
+            <div class="annotation-row annotation-row-stored">
+                <div class="annotation-meta">
+                    <span class="badge" x-text="annotationKindLabel(annotation)"></span>
+                    <code x-text="annotationPointLabel(annotation)"></code>
+                </div>
+                <p class="annotation-instruction"
+                   x-text="annotation.instruction || 'Nincs külön utasítás.'"></p>
+            </div>
+        </template>
     </section>
 </section>

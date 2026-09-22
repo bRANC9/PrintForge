@@ -467,6 +467,23 @@ ul.error-box {
     gap: 0.5rem;
 }
 
+/* Stored (read-only) annotation list: the visual prompts a version was built
+   from. Muted and dashed so it reads as provenance, not an editable panel. */
+.annotation-panel-stored {
+    border-style: dashed;
+    background: transparent;
+}
+
+.annotation-row-stored {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.annotation-instruction {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
 /* Notifications bell ------------------------------------------------------ */
 
 .visually-hidden {

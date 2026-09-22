@@ -21,6 +21,11 @@
 // annotation into a multi-triangle region; clicking empty space clears the
 // current selection. Every change is broadcast as a bubbling CustomEvent on
 // the container (`viewer-annotation-*`, `viewer-selection-changed`).
+//
+// Stored annotations (`setStoredAnnotations`) render the visual prompts a
+// version was built from, read-only and muted in gray. They are not
+// interactive and are cleared when the model changes or annotation mode is
+// entered; the page (project.js) re-applies them on version selection.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
@@ -31,6 +36,9 @@ const GRID_MINOR = 0x232b33;
 
 const ANNOTATION_COLOR = 0xffb020;
 const ANNOTATION_ACTIVE_COLOR = 0x6fe3ff;
+// Stored (previous-version) visual prompts are read-only and visually muted so
+// they never look like part of the current editable selection.
+const STORED_ANNOTATION_COLOR = 0x9aa4b2;
 const DRAG_THRESHOLD_PX = 5;
 
 const instances = new WeakMap();
@@ -90,6 +98,41 @@ function directionToArray(vector) {
     return [round3(vector.x), round3(vector.y), round3(vector.z)];
 }
 
+/** Finite number triple with per-component fallbacks (stored annotations). */
+function normalizeTriple(raw, fallback) {
+    const source = Array.isArray(raw) ? raw : [];
+    return fallback.map((fallbackValue, index) => {
+        const value = Number(source[index]);
+        return Number.isFinite(value) ? value : fallbackValue;
+    });
+}
+
+/**
+ * Coerce one stored (`ModelVersion.annotations_json`) annotation onto the
+ * viewer's internal shape. Stored data is read-only provenance written by the
+ * backend, so every field is guarded; missing coordinates degrade to the
+ * origin / up vector instead of breaking the render loop.
+ */
+function normalizeStoredAnnotation(raw, index) {
+    const annotation = raw && typeof raw === "object" ? raw : {};
+    const faces = Array.isArray(annotation.faces)
+        ? annotation.faces
+              .map((face) => Number(face))
+              .filter((face) => Number.isInteger(face) && face >= 0)
+        : [];
+    return {
+        id: annotation.id ? String(annotation.id) : `stored-${index}`,
+        kind: annotation.kind === "region" ? "region" : "point",
+        point: normalizeTriple(annotation.point, [0, 0, 0]),
+        normal: normalizeTriple(annotation.normal, [0, 1, 0]),
+        faces,
+        region: annotation.region && typeof annotation.region === "object"
+            ? Object.assign({}, annotation.region)
+            : null,
+        instruction: typeof annotation.instruction === "string" ? annotation.instruction : "",
+    };
+}
+
 function niceGridSize(maxDim) {
     const dimensions = Math.max(maxDim || 1, 0.001);
     const magnitude = Math.pow(10, Math.floor(Math.log10(dimensions)));
@@ -120,6 +163,11 @@ class StlViewer {
         this.activeAnnotationId = null;
         this.annotationSeq = 0;
         this.annotationVisuals = new Map();
+
+        // Read-only stored annotations of the selected version (the visual
+        // prompts that produced it). Kept separate from the editable set.
+        this.storedAnnotations = [];
+        this.storedAnnotationVisuals = [];
         this.raycaster = new THREE.Raycaster();
         this.pointer = new THREE.Vector2();
         this.pointerDown = null;
@@ -210,11 +258,15 @@ class StlViewer {
             this.requestToken += 1;
             this.currentUrl = null;
             this.token = token;
+            this.clearStoredAnnotations();
             this.clearModel();
             emit(this.container, "empty", "Nincs STL ehhez a verzióhoz.");
             return;
         }
         if (stlUrl === this.currentUrl && token === this.token) return;
+        // A new version invalidates the previous version's stored markers; the
+        // page re-applies them through `setStoredAnnotations` on selection.
+        this.clearStoredAnnotations();
         this.token = token;
         this.load(stlUrl);
     }
@@ -284,6 +336,11 @@ class StlViewer {
         // Marker/arrow sizing relative to the model, so it reads on any scale.
         this.annotationScale = Math.max(maxDim * 0.08, 0.8);
 
+        // Stored annotations live in original STL coordinates, so rebuild their
+        // visuals against the new offset/scale (this also covers the case where
+        // the page set them before the STL finished loading).
+        this.refreshStoredAnnotationVisuals();
+
         this.grid.geometry.dispose();
         disposeMaterial(this.grid.material);
         this.scene.remove(this.grid);
@@ -334,6 +391,11 @@ class StlViewer {
         const next = Boolean(enabled);
         if (this.annotationMode === next) return;
         this.annotationMode = next;
+        if (next) {
+            // The editable selection takes over while annotating; stored markers
+            // are not restored automatically when the mode is switched off.
+            this.clearStoredAnnotations();
+        }
         if (this.renderer && this.renderer.domElement) {
             this.renderer.domElement.style.cursor = next ? "crosshair" : "";
         }
@@ -605,15 +667,70 @@ class StlViewer {
         this.annotationVisuals.delete(id);
     }
 
-    buildAnnotationVisual(annotation) {
+    // ------------------------------------------------------------------
+    // Stored (read-only) annotations
+    // ------------------------------------------------------------------
+
+    /**
+     * Render the stored annotations of a version read-only: the same marker +
+     * normal-arrow visuals as live annotations, but in the muted
+     * `STORED_ANNOTATION_COLOR`, with no raycast/editing and no events. The
+     * markers persist while orbiting because they are static scene objects.
+     * Repeated calls replace the previous stored set.
+     */
+    setStoredAnnotations(annotations) {
+        this.clearStoredAnnotations();
+        const list = Array.isArray(annotations) ? annotations : [];
+        this.storedAnnotations = list.map((raw, index) => normalizeStoredAnnotation(raw, index));
+        this.storedAnnotations.forEach((annotation) => this.addStoredAnnotationVisual(annotation));
+        return this.storedAnnotations.length;
+    }
+
+    /** Drop the stored markers and their data (temporary resources disposed). */
+    clearStoredAnnotations() {
+        this.disposeStoredVisuals();
+        this.storedAnnotations = [];
+    }
+
+    disposeStoredVisuals() {
+        this.storedAnnotationVisuals.forEach((visual) => {
+            this.annotationGroup.remove(visual);
+            disposeObject(visual);
+        });
+        this.storedAnnotationVisuals = [];
+    }
+
+    /**
+     * Rebuild the stored visuals against the current `viewerOffset`/scale.
+     * Called after a model loads; the data survives so the page does not have to
+     * re-set it when geometry arrives.
+     */
+    refreshStoredAnnotationVisuals() {
+        if (!this.storedAnnotations.length) return;
+        this.disposeStoredVisuals();
+        this.storedAnnotations.forEach((annotation) => this.addStoredAnnotationVisual(annotation));
+    }
+
+    addStoredAnnotationVisual(annotation) {
+        const visual = this.buildAnnotationVisual(annotation, true);
+        if (!visual) return;
+        this.annotationGroup.add(visual);
+        this.storedAnnotationVisuals.push(visual);
+    }
+
+    buildAnnotationVisual(annotation, stored) {
         const group = new THREE.Group();
         const displayPoint = new THREE.Vector3().fromArray(annotation.point).add(this.viewerOffset);
         const normal = new THREE.Vector3().fromArray(annotation.normal);
         if (normal.lengthSq() === 0) normal.set(0, 1, 0);
         normal.normalize();
 
-        const active = annotation.id === this.activeAnnotationId;
-        const color = active ? ANNOTATION_ACTIVE_COLOR : ANNOTATION_COLOR;
+        const active = !stored && annotation.id === this.activeAnnotationId;
+        const color = stored
+            ? STORED_ANNOTATION_COLOR
+            : active
+              ? ANNOTATION_ACTIVE_COLOR
+              : ANNOTATION_COLOR;
         const scale = this.annotationScale || 1;
 
         const markerGeometry = new THREE.SphereGeometry(Math.max(scale * 0.35, 0.2), 16, 12);
@@ -624,7 +741,7 @@ class StlViewer {
 
         group.add(this.buildArrow(displayPoint, normal, Math.max(scale * 1.2, 0.5), color, Math.max(scale * 0.09, 0.03)));
 
-        const selection = this.buildSelectionVisual(annotation, active);
+        const selection = this.buildSelectionVisual(annotation, active, stored);
         if (selection) group.add(selection);
 
         return group;
@@ -661,7 +778,7 @@ class StlViewer {
     }
 
     /** Translucent overlay + wireframe edges over the selected triangles. */
-    buildSelectionVisual(annotation, active) {
+    buildSelectionVisual(annotation, active, stored) {
         const faces = annotation.faces || [];
         if (!faces.length || !this.mesh) return null;
         const position = this.mesh.geometry.getAttribute("position");
@@ -681,7 +798,11 @@ class StlViewer {
         });
         if (!coords.length) return null;
 
-        const color = active ? ANNOTATION_ACTIVE_COLOR : ANNOTATION_COLOR;
+        const color = stored
+            ? STORED_ANNOTATION_COLOR
+            : active
+              ? ANNOTATION_ACTIVE_COLOR
+              : ANNOTATION_COLOR;
         const overlayGeometry = new THREE.BufferGeometry();
         overlayGeometry.setAttribute("position", new THREE.Float32BufferAttribute(coords, 3));
 
@@ -690,7 +811,7 @@ class StlViewer {
             new THREE.MeshBasicMaterial({
                 color,
                 transparent: true,
-                opacity: active ? 0.5 : 0.32,
+                opacity: stored ? 0.2 : active ? 0.5 : 0.32,
                 side: THREE.DoubleSide,
                 depthWrite: false,
                 polygonOffset: true,
@@ -704,7 +825,7 @@ class StlViewer {
             new THREE.LineBasicMaterial({
                 color,
                 transparent: true,
-                opacity: 0.9,
+                opacity: stored ? 0.45 : 0.9,
             })
         );
 
@@ -723,6 +844,7 @@ class StlViewer {
         this.resizeObserver.disconnect();
         this.renderer.setAnimationLoop(null);
         this.clearModel();
+        this.clearStoredAnnotations();
         this.controls.dispose();
         this.renderer.dispose();
         if (canvas.parentNode === this.container) {

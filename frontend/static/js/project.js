@@ -138,6 +138,16 @@
                 return version ? `v${version.version} · ${projectName}` : "";
             },
 
+            /**
+             * Read-only visual prompts the selected version was built from
+             * (`ModelVersion.annotations_json`, api-dev). Empty for base versions.
+             */
+            get storedAnnotations() {
+                const version = this.selectedVersion;
+                const stored = version ? version.annotations_json : null;
+                return Array.isArray(stored) ? stored : [];
+            },
+
             get stlUrl() {
                 return this.selectedVersionId
                     ? PF.endpoints.artifact(this.selectedVersionId, "stl")
@@ -307,6 +317,38 @@
                     this.clearAnnotations();
                 }
                 this.selectedVersionId = version.id;
+                this.showStoredAnnotations(version);
+            },
+
+            /**
+             * Render the selected version's stored (previous) visual prompts
+             * read-only in the viewer.
+             *
+             * The viewer's `apply()` clears stored markers whenever the STL
+             * URL/token changes, so this runs on a macrotask — after Alpine has
+             * flushed the `x-stl-viewer` directive effect — and waits for the
+             * lazily mounted viewer instance.
+             */
+            showStoredAnnotations(version) {
+                if (!version) return;
+                const versionId = String(version.id);
+                const stored = Array.isArray(version.annotations_json)
+                    ? version.annotations_json
+                    : [];
+                let attempts = 40;
+                const render = () => {
+                    // A newer selection supersedes this (async) render.
+                    if (String(this.selectedVersionId) !== versionId) return;
+                    const viewer = this.viewerInstance();
+                    if (!viewer) {
+                        if (attempts <= 0) return;
+                        attempts -= 1;
+                        window.setTimeout(render, 50);
+                        return;
+                    }
+                    viewer?.setStoredAnnotations?.(stored);
+                };
+                window.setTimeout(render, 0);
             },
 
             // -------------------------------------------------------------
@@ -619,6 +661,11 @@
                 this.errors = [];
                 this.statusText = "Verzió létrehozása…";
                 try {
+                    // Snapshot what we already know before submitting: the agent
+                    // path may only switch to a version/run that is newer than
+                    // these, otherwise a failed run would silently reuse the old
+                    // model (bug: "whatever the input, the model is the same").
+                    const baselineVersionId = this.newestVersionId();
                     const baselineRunId = await this.latestAgentRunId();
                     const formData = new FormData();
                     formData.append("prompt", prompt);
@@ -638,13 +685,34 @@
 
                     if (created && created.mode === "agent") {
                         // The AI workflow builds the specification and creates the
-                        // version itself; wait for the run, then load the result.
-                        await this.pollAgentRun(baselineRunId);
+                        // version itself; only switch to it once the run finished
+                        // successfully AND a version newer than the baseline
+                        // exists. A failed/timed-out run must not silently keep
+                        // showing the previous model as if it were the result.
+                        const status = await this.pollAgentRun(baselineRunId);
                         await this.loadVersions();
-                        if (this.versions.length) {
-                            this.selectedVersionId = this.versions[0].id;
-                            this.viewerToken += 1;
+                        if (status !== "done") {
+                            this.error = status === "failed"
+                                ? "A generálás nem sikerült: nem készült új verzió, a korábbi modell maradt kiválasztva."
+                                : "Időtúllépés: a generálás nem fejeződött be, a korábbi modell maradt kiválasztva.";
+                            if (!this.errors.length) {
+                                this.errors = [this.error];
+                            }
+                            return;
                         }
+                        const newest = this.versions
+                            .filter((version) => Number(version.id) > Number(baselineVersionId))
+                            .reduce(
+                                (max, version) => (!max || version.id > max.id ? version : max),
+                                null
+                            );
+                        if (!newest) {
+                            this.error = "A generálás befejeződött, de nem készült új verzió.";
+                            this.errors = ["Nem készült új verzió."];
+                            return;
+                        }
+                        this.selectedVersionId = newest.id;
+                        this.viewerToken += 1;
                         return;
                     }
 
@@ -665,6 +733,14 @@
                 }
             },
 
+            /** Highest version id currently loaded (0 when there is none). */
+            newestVersionId() {
+                return this.versions.reduce(
+                    (max, version) => Math.max(max, Number(version.id) || 0),
+                    0
+                );
+            },
+
             /** Highest agent-run id already recorded for this project. */
             async latestAgentRunId() {
                 try {
@@ -677,7 +753,12 @@
                 }
             },
 
-            /** Poll the AI run started by this submit until it is terminal. */
+            /**
+             * Poll the AI run started by this submit until it is terminal.
+             * Returns "done" | "failed" | "timeout" so the caller never has to
+             * guess whether the run is usable (the old implicit `undefined` made
+             * a failed run look like a finished one).
+             */
             async pollAgentRun(baselineRunId) {
                 this.polling = true;
                 const deadline = Date.now() + POLL_TIMEOUT_MS;
@@ -705,24 +786,29 @@
                         this.statusText = `AI: ${run.status}`;
                         if (state === "done") {
                             this.statusText = "A modell elkészült.";
-                            return;
+                            return "done";
                         }
                         if (state === "failed") {
                             this.errors = run.error ? [run.error] : ["A generálás nem sikerült."];
                             this.statusText = "A generálás nem sikerült.";
-                            return;
+                            return "failed";
                         }
                     }
                     this.statusText = "Időtúllépés a generálás közben.";
+                    return "timeout";
                 } finally {
                     this.polling = false;
                 }
             },
 
+            /**
+             * Poll a version's processing status until terminal.
+             * Returns "done" | "failed" | "timeout" (callers that only care
+             * about the side effects may ignore the return value).
+             */
             async pollVersion(versionId) {
                 this.polling = true;
                 const deadline = Date.now() + POLL_TIMEOUT_MS;
-                let finished = false;
                 try {
                     while (Date.now() < deadline) {
                         let status = null;
@@ -739,21 +825,17 @@
                                 .join(" · ");
                             const kind = PF.statusKind(state);
                             if (kind === "done") {
-                                finished = true;
-                                break;
+                                return "done";
                             }
                             if (kind === "failed") {
                                 this.error = "A generálás sikertelen.";
-                                finished = true;
-                                break;
+                                return "failed";
                             }
                         }
                         await sleep(POLL_INTERVAL_MS);
                     }
-                    if (!finished) {
-                        this.error = "Időtúllépés: a generálás állapota nem vált készre.";
-                    }
-                    return finished;
+                    this.error = "Időtúllépés: a generálás állapota nem vált készre.";
+                    return "timeout";
                 } finally {
                     this.polling = false;
                 }
@@ -907,6 +989,8 @@
                     await this.loadVersions();
                     this.selectedVersionId = created.id;
                     this.viewerToken += 1;
+                    // Surface the prompts this edit was built from, read-only.
+                    this.showStoredAnnotations(created);
                     this.notice = `Az új verzió elkészült (v${created.version}).`;
                 } catch (error) {
                     this.error = error.message || String(error);
@@ -939,10 +1023,22 @@
                         }
                         const created = derived.reduce((a, b) => (a.id > b.id ? a : b));
                         this.versions = versions;
-                        const ready = await this.pollVersion(created.id);
-                        return ready ? created : null;
+                        const status = await this.pollVersion(created.id);
+                        if (status !== "done") {
+                            // A failed/timed-out derived version must not be
+                            // selected: keep the previous model visible and make
+                            // the failure explicit.
+                            if (!this.error) {
+                                this.error = "Az annotáció-alapú szerkesztés nem sikerült, a korábbi modell maradt kiválasztva.";
+                            }
+                            return null;
+                        }
+                        return created;
                     }
                     this.statusText = "Időtúllépés a szerkesztés közben.";
+                    if (!this.error) {
+                        this.error = "Időtúllépés: az annotáció-alapú szerkesztés nem fejeződött be, a korábbi modell maradt kiválasztva.";
+                    }
                     return null;
                 } finally {
                     this.polling = false;
