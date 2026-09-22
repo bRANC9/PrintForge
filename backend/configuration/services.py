@@ -372,9 +372,6 @@ def list_ollama_models() -> list[dict]:
                 "family": details.get("family"),
                 "parameter_size": details.get("parameter_size"),
                 "quantization": details.get("quantization_level"),
-                # Ollama >= 0.34 reports e.g. ["completion", "tools"] or
-                # ["embedding"]; older versions omit it (empty list => show all).
-                "capabilities": [str(cap) for cap in (item.get("capabilities") or [])],
             }
         )
     return result

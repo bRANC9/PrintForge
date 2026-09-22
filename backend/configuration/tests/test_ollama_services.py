@@ -61,7 +61,6 @@ def test_list_ollama_models_maps_fields(monkeypatch):
                         "parameter_size": "8B",
                         "quantization_level": "Q4_0",
                     },
-                    "capabilities": ["completion", "tools"],
                 }
             ]
         },
@@ -79,21 +78,8 @@ def test_list_ollama_models_maps_fields(monkeypatch):
             "family": "llama",
             "parameter_size": "8B",
             "quantization": "Q4_0",
-            "capabilities": ["completion", "tools"],
         }
     ]
-
-
-def test_list_ollama_models_defaults_capabilities_to_empty(monkeypatch):
-    """Older Ollama versions omit ``capabilities``; the UI falls back to all."""
-    monkeypatch.setattr(
-        "configuration.services._ollama_json",
-        lambda *a, **k: {"models": [{"name": "bge-m3", "details": {}}]},
-    )
-
-    models = list_ollama_models()
-
-    assert models[0]["capabilities"] == []
 
 
 def test_show_ollama_model_posts_the_name(monkeypatch):
