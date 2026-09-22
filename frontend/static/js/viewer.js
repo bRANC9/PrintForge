@@ -13,6 +13,14 @@
 // Vendored versions: three r170 (three.module.min.js), Alpine 3.17.4.
 // The module exposes `window.PrintForgeViewer` so the classic Alpine code in
 // app.js can drive it without a build step.
+//
+// Annotation mode (docs/visual-editing.md 3.6): the user clicks the model
+// surface to place a visual prompt. Clicks are ray-cast against the mesh and
+// the hit is mapped back to the original STL / OpenSCAD coordinate space
+// (`modelPoint = hit.point - viewerOffset`). Shift+click grows the active
+// annotation into a multi-triangle region; clicking empty space clears the
+// current selection. Every change is broadcast as a bubbling CustomEvent on
+// the container (`viewer-annotation-*`, `viewer-selection-changed`).
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
@@ -20,6 +28,10 @@ import { STLLoader } from "three/addons/loaders/STLLoader.js";
 const MODEL_COLOR = 0x4c8dff;
 const GRID_MAJOR = 0x3a4652;
 const GRID_MINOR = 0x232b33;
+
+const ANNOTATION_COLOR = 0xffb020;
+const ANNOTATION_ACTIVE_COLOR = 0x6fe3ff;
+const DRAG_THRESHOLD_PX = 5;
 
 const instances = new WeakMap();
 
@@ -33,6 +45,15 @@ function emit(container, state, message, extra) {
     );
 }
 
+function emitAnnotation(container, name, detail) {
+    container.dispatchEvent(
+        new CustomEvent(name, {
+            bubbles: true,
+            detail: detail || {},
+        })
+    );
+}
+
 function disposeMaterial(material) {
     if (!material) return;
     if (Array.isArray(material)) {
@@ -42,8 +63,31 @@ function disposeMaterial(material) {
     }
 }
 
+/** Dispose every geometry/material under a temporary object graph. */
+function disposeObject(root) {
+    if (!root) return;
+    root.traverse((node) => {
+        if (node.geometry) node.geometry.dispose();
+        if (node.material) disposeMaterial(node.material);
+    });
+}
+
 function round(value) {
     return Math.round(value * 10) / 10;
+}
+
+function round3(value) {
+    return Math.round(value * 1000) / 1000;
+}
+
+/** Millimetre coordinate triple, rounded to display precision. */
+function pointToArray(vector) {
+    return [round(vector.x), round(vector.y), round(vector.z)];
+}
+
+/** Unit direction triple (normals are translation-invariant). */
+function directionToArray(vector) {
+    return [round3(vector.x), round3(vector.y), round3(vector.z)];
 }
 
 function niceGridSize(maxDim) {
@@ -64,6 +108,21 @@ class StlViewer {
         this.requestToken = 0;
         this.mesh = null;
         this.dimensions = null;
+
+        // Translation applied in `setGeometry` to center/rest the model; the
+        // inverse maps a raycast hit back to original STL/OpenSCAD coordinates.
+        this.viewerOffset = new THREE.Vector3();
+        this.annotationScale = 1;
+
+        // Annotation state (docs/visual-editing.md 3.6).
+        this.annotationMode = false;
+        this.annotations = [];
+        this.activeAnnotationId = null;
+        this.annotationSeq = 0;
+        this.annotationVisuals = new Map();
+        this.raycaster = new THREE.Raycaster();
+        this.pointer = new THREE.Vector2();
+        this.pointerDown = null;
 
         this.scene = new THREE.Scene();
         this.scene.background = null;
@@ -103,9 +162,21 @@ class StlViewer {
         this.modelGroup = new THREE.Group();
         this.scene.add(this.modelGroup);
 
+        // Markers / selection overlays live outside the model mesh so a model
+        // reload can dispose them independently (and they never get ray-cast).
+        this.annotationGroup = new THREE.Group();
+        this.scene.add(this.annotationGroup);
+
         this.loader = new STLLoader();
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(container);
+
+        this.onPointerDown = this.handlePointerDown.bind(this);
+        this.onPointerUp = this.handlePointerUp.bind(this);
+        this.onPointerLeave = this.handlePointerLeave.bind(this);
+        this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
+        this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
+        this.renderer.domElement.addEventListener("pointerleave", this.onPointerLeave);
 
         this.animate = this.animate.bind(this);
         this.renderer.setAnimationLoop(this.animate);
@@ -130,6 +201,10 @@ class StlViewer {
         const settings = config || {};
         const stlUrl = settings.stlUrl || "";
         const token = settings.token === undefined || settings.token === null ? 0 : settings.token;
+
+        if (settings.annotationMode !== undefined) {
+            this.setAnnotationMode(settings.annotationMode);
+        }
 
         if (!stlUrl) {
             this.requestToken += 1;
@@ -189,6 +264,11 @@ class StlViewer {
         geometry.translate(0, rawSize.y / 2, 0);
         geometry.computeBoundingBox();
 
+        // Net translation applied to the geometry, kept so annotation clicks
+        // can be mapped back to the original STL/OpenSCAD coordinate space
+        // (docs/visual-editing.md 6.).
+        this.viewerOffset.set(-center.x, -center.y + rawSize.y / 2, -center.z);
+
         const size = geometry.boundingBox.getSize(new THREE.Vector3());
         const material = new THREE.MeshStandardMaterial({
             color: MODEL_COLOR,
@@ -201,6 +281,8 @@ class StlViewer {
 
         const maxDim = Math.max(size.x, size.y, size.z) || 1;
         this.dimensions = { x: round(size.x), y: round(size.y), z: round(size.z) };
+        // Marker/arrow sizing relative to the model, so it reads on any scale.
+        this.annotationScale = Math.max(maxDim * 0.08, 0.8);
 
         this.grid.geometry.dispose();
         disposeMaterial(this.grid.material);
@@ -235,6 +317,7 @@ class StlViewer {
     }
 
     clearModel() {
+        this.clearAnnotations();
         if (!this.mesh) return;
         this.modelGroup.remove(this.mesh);
         this.mesh.geometry.dispose();
@@ -243,15 +326,407 @@ class StlViewer {
         this.dimensions = null;
     }
 
+    // ------------------------------------------------------------------
+    // Annotation mode
+    // ------------------------------------------------------------------
+
+    setAnnotationMode(enabled) {
+        const next = Boolean(enabled);
+        if (this.annotationMode === next) return;
+        this.annotationMode = next;
+        if (this.renderer && this.renderer.domElement) {
+            this.renderer.domElement.style.cursor = next ? "crosshair" : "";
+        }
+        if (!next) this.pointerDown = null;
+    }
+
+    getAnnotations() {
+        return this.annotations.map((annotation) => this.cloneAnnotation(annotation));
+    }
+
+    clearAnnotations() {
+        if (!this.annotations.length && !this.annotationVisuals.size) {
+            this.activeAnnotationId = null;
+            return [];
+        }
+        const removed = this.annotations.slice();
+        this.annotations = [];
+        this.activeAnnotationId = null;
+        removed.forEach((annotation) => this.disposeAnnotationVisual(annotation.id));
+        removed.forEach((annotation) => {
+            emitAnnotation(this.container, "viewer-annotation-removed", {
+                annotation: this.cloneAnnotation(annotation),
+                annotations: this.getAnnotations(),
+            });
+        });
+        this.emitSelection();
+        return removed.map((annotation) => this.cloneAnnotation(annotation));
+    }
+
+    removeAnnotation(id) {
+        const index = this.annotations.findIndex((annotation) => annotation.id === id);
+        if (index === -1) return null;
+        const removed = this.annotations.splice(index, 1)[0];
+        if (this.activeAnnotationId === id) this.activeAnnotationId = null;
+        this.disposeAnnotationVisual(id);
+        emitAnnotation(this.container, "viewer-annotation-removed", {
+            annotation: this.cloneAnnotation(removed),
+            annotations: this.getAnnotations(),
+        });
+        this.emitSelection();
+        return this.cloneAnnotation(removed);
+    }
+
+    cloneAnnotation(annotation) {
+        if (!annotation) return null;
+        return {
+            id: annotation.id,
+            kind: annotation.kind,
+            point: annotation.point.slice(),
+            normal: annotation.normal.slice(),
+            faces: annotation.faces.slice(),
+            region: annotation.region ? Object.assign({}, annotation.region) : null,
+            instruction: annotation.instruction || "",
+        };
+    }
+
+    /**
+     * Map a raycast hit on the translated display geometry back to the original
+     * STL/OpenSCAD coordinate space. The translation does not change normals.
+     */
+    modelPointFromHit(hit) {
+        return hit.point.clone().sub(this.viewerOffset);
+    }
+
+    handlePointerDown(event) {
+        if (!this.annotationMode || event.button !== 0) return;
+        this.pointerDown = {
+            x: event.clientX,
+            y: event.clientY,
+            shift: event.shiftKey,
+        };
+    }
+
+    handlePointerLeave() {
+        this.pointerDown = null;
+    }
+
+    handlePointerUp(event) {
+        if (!this.annotationMode || event.button !== 0) return;
+        const down = this.pointerDown;
+        this.pointerDown = null;
+        if (!down) return;
+        const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+        // A drag is an orbit/pan gesture, not a placement click.
+        if (moved > DRAG_THRESHOLD_PX) return;
+        this.handleAnnotationClick(event, event.shiftKey || down.shift);
+    }
+
+    raycast(event) {
+        if (!this.mesh) return null;
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        this.pointer.set(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+        this.raycaster.setFromCamera(this.pointer, this.camera);
+        const hits = this.raycaster.intersectObject(this.mesh, false);
+        return hits.length ? hits[0] : null;
+    }
+
+    handleAnnotationClick(event, shiftKey) {
+        const hit = this.raycast(event);
+        if (!hit) {
+            this.clearSelection();
+            return;
+        }
+        const faceIndex = typeof hit.faceIndex === "number" ? hit.faceIndex : null;
+        const point = this.modelPointFromHit(hit);
+        const normal = hit.face ? hit.face.normal.clone() : new THREE.Vector3(0, 1, 0);
+
+        const active = this.activeAnnotationId
+            ? this.annotations.find((annotation) => annotation.id === this.activeAnnotationId)
+            : null;
+
+        if (shiftKey && active && faceIndex !== null) {
+            if (!active.faces.includes(faceIndex)) {
+                active.faces.push(faceIndex);
+                this.recomputeAnnotation(active);
+                this.refreshAnnotationVisual(active);
+                emitAnnotation(this.container, "viewer-annotation-updated", {
+                    annotation: this.cloneAnnotation(active),
+                    annotations: this.getAnnotations(),
+                });
+            }
+            this.emitSelection();
+            return;
+        }
+
+        const annotation = this.createAnnotation(point, normal, faceIndex);
+        const previousActiveId = this.activeAnnotationId;
+        this.annotations.push(annotation);
+        this.activeAnnotationId = annotation.id;
+        if (previousActiveId && previousActiveId !== annotation.id) {
+            const previous = this.annotations.find((item) => item.id === previousActiveId);
+            if (previous) this.refreshAnnotationVisual(previous);
+        }
+        this.addAnnotationVisual(annotation);
+        emitAnnotation(this.container, "viewer-annotation-added", {
+            annotation: this.cloneAnnotation(annotation),
+            annotations: this.getAnnotations(),
+        });
+        this.emitSelection();
+    }
+
+    /** Clear the current selection: the active (last) annotation, if any. */
+    clearSelection() {
+        if (this.activeAnnotationId) {
+            this.removeAnnotation(this.activeAnnotationId);
+            return;
+        }
+        this.emitSelection();
+    }
+
+    emitSelection() {
+        const active = this.activeAnnotationId
+            ? this.annotations.find((annotation) => annotation.id === this.activeAnnotationId)
+            : null;
+        emitAnnotation(this.container, "viewer-selection-changed", {
+            selection: active ? this.cloneAnnotation(active) : null,
+            annotations: this.getAnnotations(),
+        });
+    }
+
+    createAnnotation(point, normal, faceIndex) {
+        this.annotationSeq += 1;
+        const annotation = {
+            id: `a${this.annotationSeq}`,
+            kind: "point",
+            point: pointToArray(point),
+            normal: directionToArray(normal),
+            faces: faceIndex === null ? [] : [faceIndex],
+            region: null,
+            instruction: "",
+        };
+        this.recomputeAnnotation(annotation);
+        return annotation;
+    }
+
+    /**
+     * A single triangle is a `point` (the hit point/normal); two or more form a
+     * `region` summarised by centroid / averaged normal / axis-aligned size.
+     */
+    recomputeAnnotation(annotation) {
+        const faces = annotation.faces || [];
+        if (faces.length <= 1) {
+            annotation.kind = "point";
+            annotation.region = null;
+            return;
+        }
+        annotation.kind = "region";
+        annotation.region = this.regionSummary(faces);
+        annotation.point = annotation.region.centroid.slice();
+        annotation.normal = annotation.region.normal.slice();
+    }
+
+    regionSummary(faces) {
+        const fallback = {
+            centroid: [0, 0, 0],
+            normal: [0, 0, 1],
+            size: [0, 0, 0],
+            count: 0,
+        };
+        if (!this.mesh) return fallback;
+        const position = this.mesh.geometry.getAttribute("position");
+        if (!position) return fallback;
+
+        const centroid = new THREE.Vector3();
+        const normal = new THREE.Vector3();
+        const box = new THREE.Box3();
+        const a = new THREE.Vector3();
+        const b = new THREE.Vector3();
+        const c = new THREE.Vector3();
+        const cb = new THREE.Vector3();
+        const ab = new THREE.Vector3();
+        const faceNormal = new THREE.Vector3();
+        let count = 0;
+
+        faces.forEach((faceIndex) => {
+            const base = faceIndex * 3;
+            if (base + 2 >= position.count) return;
+            a.fromBufferAttribute(position, base);
+            b.fromBufferAttribute(position, base + 1);
+            c.fromBufferAttribute(position, base + 2);
+            cb.subVectors(c, b);
+            ab.subVectors(a, b);
+            faceNormal.crossVectors(cb, ab).normalize();
+            normal.add(faceNormal);
+            centroid.add(a).add(b).add(c).multiplyScalar(1 / 3);
+            box.expandByPoint(a);
+            box.expandByPoint(b);
+            box.expandByPoint(c);
+            count += 1;
+        });
+
+        if (!count) return fallback;
+        centroid.multiplyScalar(1 / count).sub(this.viewerOffset);
+        if (normal.lengthSq() > 0) {
+            normal.normalize();
+        } else {
+            normal.set(0, 1, 0);
+        }
+        const size = box.getSize(new THREE.Vector3());
+        return {
+            centroid: pointToArray(centroid),
+            normal: directionToArray(normal),
+            size: pointToArray(size),
+            count,
+        };
+    }
+
+    addAnnotationVisual(annotation) {
+        const visual = this.buildAnnotationVisual(annotation);
+        if (!visual) return;
+        this.annotationGroup.add(visual);
+        this.annotationVisuals.set(annotation.id, visual);
+    }
+
+    refreshAnnotationVisual(annotation) {
+        this.disposeAnnotationVisual(annotation.id);
+        this.addAnnotationVisual(annotation);
+    }
+
+    disposeAnnotationVisual(id) {
+        const visual = this.annotationVisuals.get(id);
+        if (!visual) return;
+        this.annotationGroup.remove(visual);
+        disposeObject(visual);
+        this.annotationVisuals.delete(id);
+    }
+
+    buildAnnotationVisual(annotation) {
+        const group = new THREE.Group();
+        const displayPoint = new THREE.Vector3().fromArray(annotation.point).add(this.viewerOffset);
+        const normal = new THREE.Vector3().fromArray(annotation.normal);
+        if (normal.lengthSq() === 0) normal.set(0, 1, 0);
+        normal.normalize();
+
+        const active = annotation.id === this.activeAnnotationId;
+        const color = active ? ANNOTATION_ACTIVE_COLOR : ANNOTATION_COLOR;
+        const scale = this.annotationScale || 1;
+
+        const markerGeometry = new THREE.SphereGeometry(Math.max(scale * 0.35, 0.2), 16, 12);
+        const markerMaterial = new THREE.MeshBasicMaterial({ color });
+        const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+        marker.position.copy(displayPoint);
+        group.add(marker);
+
+        group.add(this.buildArrow(displayPoint, normal, Math.max(scale * 1.2, 0.5), color, Math.max(scale * 0.09, 0.03)));
+
+        const selection = this.buildSelectionVisual(annotation, active);
+        if (selection) group.add(selection);
+
+        return group;
+    }
+
+    /**
+     * Hand-built shaft + head arrow. Deliberately not `THREE.ArrowHelper`,
+     * which shares module-level geometries that must not be disposed.
+     */
+    buildArrow(origin, direction, length, color, radius) {
+        const shaftLength = Math.max(length * 0.7, 0.1);
+        const headLength = Math.max(length * 0.3, 0.1);
+        const material = new THREE.MeshBasicMaterial({ color });
+        const group = new THREE.Group();
+
+        const shaft = new THREE.Mesh(
+            new THREE.CylinderGeometry(radius, radius, shaftLength, 12, 1, false),
+            material
+        );
+        shaft.position.y = shaftLength / 2;
+        group.add(shaft);
+
+        const head = new THREE.Mesh(
+            new THREE.ConeGeometry(radius * 2.4, headLength, 16),
+            material
+        );
+        head.position.y = shaftLength + headLength / 2;
+        group.add(head);
+
+        const axis = new THREE.Vector3(0, 1, 0);
+        group.quaternion.setFromUnitVectors(axis, direction.clone().normalize());
+        group.position.copy(origin);
+        return group;
+    }
+
+    /** Translucent overlay + wireframe edges over the selected triangles. */
+    buildSelectionVisual(annotation, active) {
+        const faces = annotation.faces || [];
+        if (!faces.length || !this.mesh) return null;
+        const position = this.mesh.geometry.getAttribute("position");
+        if (!position) return null;
+
+        const coords = [];
+        faces.forEach((faceIndex) => {
+            const base = faceIndex * 3;
+            if (base + 2 >= position.count) return;
+            for (let corner = 0; corner < 3; corner += 1) {
+                coords.push(
+                    position.getX(base + corner),
+                    position.getY(base + corner),
+                    position.getZ(base + corner)
+                );
+            }
+        });
+        if (!coords.length) return null;
+
+        const color = active ? ANNOTATION_ACTIVE_COLOR : ANNOTATION_COLOR;
+        const overlayGeometry = new THREE.BufferGeometry();
+        overlayGeometry.setAttribute("position", new THREE.Float32BufferAttribute(coords, 3));
+
+        const overlay = new THREE.Mesh(
+            overlayGeometry,
+            new THREE.MeshBasicMaterial({
+                color,
+                transparent: true,
+                opacity: active ? 0.5 : 0.32,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                polygonOffset: true,
+                polygonOffsetFactor: -2,
+                polygonOffsetUnits: -2,
+            })
+        );
+
+        const wire = new THREE.LineSegments(
+            new THREE.WireframeGeometry(overlayGeometry),
+            new THREE.LineBasicMaterial({
+                color,
+                transparent: true,
+                opacity: 0.9,
+            })
+        );
+
+        const group = new THREE.Group();
+        group.add(overlay);
+        group.add(wire);
+        return group;
+    }
+
     dispose() {
         this.requestToken += 1;
+        const canvas = this.renderer.domElement;
+        canvas.removeEventListener("pointerdown", this.onPointerDown);
+        canvas.removeEventListener("pointerup", this.onPointerUp);
+        canvas.removeEventListener("pointerleave", this.onPointerLeave);
         this.resizeObserver.disconnect();
         this.renderer.setAnimationLoop(null);
         this.clearModel();
         this.controls.dispose();
         this.renderer.dispose();
-        if (this.renderer.domElement.parentNode === this.container) {
-            this.container.removeChild(this.renderer.domElement);
+        if (canvas.parentNode === this.container) {
+            this.container.removeChild(canvas);
         }
     }
 }

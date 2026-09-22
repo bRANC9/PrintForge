@@ -3,6 +3,10 @@
     `stlUrl`, `scadUrl`, `viewerLabel`, `viewerState`, `viewerMessage` and
     `dimensions` (see `projectWorkspace` in static/js/project.js). The import map
     and the `viewer.js` module live in the including page's `extra_head` block.
+
+    The annotation panel additionally uses `annotationMode`, `annotations`,
+    `annotationPrompt`, `sendingAnnotations`, `activeAnnotationId` and the
+    matching handlers from the same component (docs/visual-editing.md 3.6).
 {% endcomment %}
 <section class="panel viewer-panel">
     <header class="viewer-toolbar">
@@ -14,6 +18,13 @@
             </p>
         </div>
         <div class="viewer-actions">
+            <button type="button"
+                    class="btn"
+                    :class="annotationMode ? 'btn-primary' : ''"
+                    :aria-pressed="annotationMode ? 'true' : 'false'"
+                    @click="toggleAnnotationMode()"
+                    :disabled="!selectedVersionId"
+                    x-text="annotationMode ? 'Annotáció mód be' : 'Annotáció mód'"></button>
             <a class="btn"
                :href="stlUrl || '#'"
                :aria-disabled="stlUrl ? 'false' : 'true'"
@@ -27,11 +38,58 @@
         </div>
     </header>
     <div class="viewer-canvas"
-         x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken }">
+         x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken, annotationMode: annotationMode }">
         <div class="viewer-overlay" x-show="viewerState !== 'ready'" x-cloak>
             <span class="spinner" x-show="viewerState === 'loading'" aria-hidden="true"></span>
             <span x-text="viewerMessage || 'Nincs megjeleníthető modell.'"></span>
         </div>
     </div>
-    <p class="viewer-hint muted">Bal gomb: forgatás · Görgő: zoom · Jobb gomb: eltolás</p>
+    <p class="viewer-hint muted" x-show="!annotationMode">Bal gomb: forgatás · Görgő: zoom · Jobb gomb: eltolás</p>
+    <p class="viewer-hint muted" x-show="annotationMode" x-cloak>
+        Bal kattintás: felület kijelölése · Shift+kattintás: további polygon hozzáadása · Üres terület: kijelölés törlése
+    </p>
+    <section class="annotation-panel"
+             x-show="annotationMode || annotations.length"
+             x-cloak>
+        <header class="annotation-head">
+            <h3>Annotációk</h3>
+            <span class="badge" x-text="annotations.length + ' jelölés'"></span>
+        </header>
+        <p class="muted"
+           x-show="!annotations.length">Kapcsold be az annotációs módot, majd kattints a modell felületére.</p>
+        <template x-for="annotation in annotations" :key="annotation.id">
+            <div class="annotation-row">
+                <div class="annotation-meta">
+                    <span class="badge" x-text="annotationKindLabel(annotation)"></span>
+                    <code x-text="annotationPointLabel(annotation)"></code>
+                </div>
+                <input class="input"
+                       type="text"
+                       placeholder="Utasítás ehhez a jelöléshez"
+                       :value="annotation.instruction"
+                       @input="addAnnotationInstruction(annotation, $event.target.value)"
+                       :disabled="sendingAnnotations">
+                <button type="button"
+                        class="btn btn-danger btn-small"
+                        @click="removeAnnotation(annotation)"
+                        :disabled="sendingAnnotations">Törlés</button>
+            </div>
+        </template>
+        <textarea class="input annotation-prompt"
+                  rows="2"
+                  placeholder="Összesített utasítás (opcionális)"
+                  x-model="annotationPrompt"
+                  :disabled="sendingAnnotations"></textarea>
+        <div class="annotation-actions">
+            <button type="button"
+                    class="btn"
+                    @click="clearAnnotations()"
+                    :disabled="sendingAnnotations || !annotations.length">Kijelölések törlése</button>
+            <button type="button"
+                    class="btn btn-primary"
+                    @click="submitAnnotations()"
+                    :disabled="sendingAnnotations || !annotations.length"
+                    x-text="sendingAnnotations ? 'Küldés…' : 'Küldés AI-nak'"></button>
+        </div>
+    </section>
 </section>

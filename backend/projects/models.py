@@ -75,6 +75,7 @@ class Project(models.Model):
         related_name="projects",
     )
     download_count = models.PositiveIntegerField(default=0)
+    print_count = models.PositiveIntegerField(default=0)
     description_source = models.CharField(
         max_length=10,
         choices=ContentSource.choices,
@@ -188,7 +189,12 @@ class Rating(models.Model):
 
 
 class ModelDownload(models.Model):
-    """Letöltési napló a közösségi statisztikákhoz (Phase 8)."""
+    """Letöltési napló a közösségi statisztikákhoz (Phase 8).
+
+    A ``download_count`` dedupolva nő: bejelentkezett userenként egy sor,
+    anonim látogatónként pedig a böngészőben generált ``visitor_id`` alapján egy
+    sor. A ``visitor_id`` hiányában minden kérés külön letöltésnek számít.
+    """
 
     project = models.ForeignKey(
         Project,
@@ -210,6 +216,7 @@ class ModelDownload(models.Model):
         related_name="downloads",
     )
     ip_hash = models.CharField(max_length=64, blank=True, default="")
+    visitor_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -217,3 +224,45 @@ class ModelDownload(models.Model):
 
     def __str__(self) -> str:
         return f"Download {self.project_id} @ {self.created_at}"
+
+
+class ProjectPrint(models.Model):
+    """„Én is nyomtattam” jelölés (Phase 8).
+
+    Egy sor egy projektet jelöl meg, amit a user (vagy egy anonim böngésző a
+    ``visitor_id``-jével) kinyomtatott. A ``Project.print_count`` ebből a
+    táblából származik, szintén dedupolva: userenként, illetve visitoronként egy.
+    """
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="prints",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="printed_projects",
+    )
+    visitor_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "user"],
+                condition=models.Q(user__isnull=False),
+                name="uniq_project_print_user",
+            ),
+            models.UniqueConstraint(
+                fields=["project", "visitor_id"],
+                condition=models.Q(user__isnull=True) & ~models.Q(visitor_id=""),
+                name="uniq_project_print_visitor",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Print {self.project_id} @ {self.created_at}"

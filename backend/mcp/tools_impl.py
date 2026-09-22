@@ -32,6 +32,7 @@ from projects.services import (
     create_build_plate,
     create_project,
     generate_project_description,
+    mark_project_printed,
     project_rating_summary,
     projects_for_workspace,
     publish_project,
@@ -263,6 +264,7 @@ def _public_project(project: Project) -> dict:
         "description": project.description,
         "license": project.license,
         "download_count": project.download_count,
+        "print_count": project.print_count,
         "rating": {
             "average": round(float(average), 2) if average is not None else None,
             "count": int(count),
@@ -317,7 +319,7 @@ def record_download_tool(
         model_version = ModelVersion.objects.get(pk=model_version_id)
         if model_version.project_id != project.id:
             raise ValueError("model_version does not belong to the given project")
-    download = record_download(
+    download, counted = record_download(
         project,
         model_version=model_version,
         user=user,
@@ -326,7 +328,24 @@ def record_download_tool(
     return {
         "download_id": download.id,
         "project_id": project.id,
+        "counted": counted,
         "download_count": project.download_count,
+    }
+
+
+@register(
+    "mark_project_printed",
+    "Register 'én is nyomtattam' once per user and bump the project counter (requires MEMBER)",
+    authorize=_project_member,
+)
+def mark_project_printed_tool(*, project_id: int, user_id: int) -> dict:
+    project = Project.objects.get(pk=project_id)
+    user = User.objects.get(pk=user_id)
+    _print_row, counted = mark_project_printed(project, user=user)
+    return {
+        "project_id": project.id,
+        "counted": counted,
+        "print_count": project.print_count,
     }
 
 

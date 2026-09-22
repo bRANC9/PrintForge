@@ -220,6 +220,38 @@ def test_download_records_and_returns_the_stl_url(project, version, owner):
     assert project.download_count == 1
 
 
+def test_download_is_deduped_per_user(project, version, owner):
+    version.stl_file.name = f"projects/{project.pk}/v{version.version}/model.stl"
+    version.save(update_fields=["stl_file"])
+    client = auth(owner)
+
+    first = client.get(f"/api/v1/projects/{project.pk}/download/")
+    second = client.get(f"/api/v1/projects/{project.pk}/download/")
+
+    assert first.json()["counted"] is True
+    assert second.json()["counted"] is False
+    project.refresh_from_db()
+    assert project.download_count == 1
+
+
+def test_print_marks_and_dedupes_per_user(project, owner):
+    client = auth(owner)
+
+    first = client.post(f"/api/v1/projects/{project.pk}/print/")
+    second = client.post(f"/api/v1/projects/{project.pk}/print/")
+
+    assert first.status_code == 200
+    assert first.json() == {"counted": True, "print_count": 1}
+    assert second.json() == {"counted": False, "print_count": 1}
+    project.refresh_from_db()
+    assert project.print_count == 1
+
+
+def test_print_requires_membership(project, outsider):
+    response = auth(outsider).post(f"/api/v1/projects/{project.pk}/print/")
+    assert response.status_code in (403, 404)
+
+
 def test_share_create_list_and_revoke(project, owner, outsider):
     client = auth(owner)
 

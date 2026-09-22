@@ -19,9 +19,10 @@ Example payload (terv.md 8.)::
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 # ---------------------------------------------------------------------------
 # Sane physical bounds (millimetres / degrees).
@@ -37,6 +38,21 @@ MAX_WALL_MM = 100.0
 MAX_ANGLE_DEG = 180.0
 #: Upper bound for mounting points/holes.
 MAX_MOUNTING_COUNT = 64
+
+# ---------------------------------------------------------------------------
+# Bounds for annotation-driven parametric operations (docs/visual-editing.md 3.1).
+# ---------------------------------------------------------------------------
+
+#: Smallest printable feature (below a 0.4 mm nozzle this is not printable).
+MIN_OPERATION_MM = 0.4
+#: Upper bound for a cut/extrusion depth (mm).
+MAX_OPERATION_DEPTH_MM = 200.0
+#: Upper bound for planar operation dimensions (width/height/length, mm).
+MAX_OPERATION_SIZE_MM = 500.0
+#: Upper bound for a cylindrical operation diameter (mm).
+MAX_OPERATION_DIAMETER_MM = 200.0
+#: Maximum length of the optional human-readable operation label.
+MAX_OPERATION_LABEL = 120
 
 
 class Mounting(BaseModel):
@@ -66,6 +82,68 @@ class Dimensions(BaseModel):
     thickness: float = Field(gt=0, le=MAX_DIMENSION_MM, description="Thickness in mm.")
 
 
+class Vec3(BaseModel):
+    """A point or direction in model coordinates, millimetres (docs 3.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float
+    y: float
+    z: float
+
+
+class EditOperation(BaseModel):
+    """One validated parametric feature derived from a visual annotation.
+
+    The LLM emits operations -- never OpenSCAD code -- and the CAD backend
+    re-validates and clamps every value (docs/visual-editing.md 3.1, 3.3).
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    kind: Literal["hole", "pocket", "boss", "slot", "cut", "add"] = Field(
+        description="Feature type: subtraction (hole/pocket/cut/slot) or addition (boss/add).",
+    )
+    origin: Vec3 = Field(description="Feature origin in model coordinates (mm).")
+    normal: Vec3 = Field(
+        description="Operation axis; need not be unit length (the CAD backend normalises).",
+    )
+    depth: float = Field(
+        ge=MIN_OPERATION_MM,
+        le=MAX_OPERATION_DEPTH_MM,
+        description="Cut depth / boss height in mm.",
+    )
+    width: float | None = Field(
+        default=None,
+        ge=MIN_OPERATION_MM,
+        le=MAX_OPERATION_SIZE_MM,
+        description="Rectangular feature width in mm (pocket/cut/add).",
+    )
+    height: float | None = Field(
+        default=None,
+        ge=MIN_OPERATION_MM,
+        le=MAX_OPERATION_SIZE_MM,
+        description="Rectangular feature height in mm (pocket/cut/add).",
+    )
+    diameter: float | None = Field(
+        default=None,
+        ge=MIN_OPERATION_MM,
+        le=MAX_OPERATION_DIAMETER_MM,
+        description="Cylindrical feature diameter in mm (hole/boss/slot).",
+    )
+    length: float | None = Field(
+        default=None,
+        ge=MIN_OPERATION_MM,
+        le=MAX_OPERATION_SIZE_MM,
+        description="Slot length in mm.",
+    )
+    label: str = Field(
+        default="",
+        max_length=MAX_OPERATION_LABEL,
+        description="Optional short human-readable label.",
+    )
+
+
 class ModelSpecification(BaseModel):
     """The single validated contract between the LLM and the CAD backend."""
 
@@ -93,12 +171,31 @@ class ModelSpecification(BaseModel):
         max_length=64,
         description='Filament material, e.g. "PLA", "PETG", "ABS", "TPU".',
     )
+    operations: list[EditOperation] = Field(
+        default_factory=list,
+        description="Validated parametric features applied to the base part (visual prompts).",
+    )
 
     @field_validator("material")
     @classmethod
     def _normalise_material(cls, value: str) -> str:
         """Upper-case the material so downstream CAD logic can match reliably."""
         return value.strip().upper()
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_operations(
+        self, handler: Callable[[ModelSpecification], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Keep the base specification canonical by omitting an empty ``operations``.
+
+        The field always exists on the model and in the JSON schema; it is only
+        left out of the serialised payload when there are no features, so a spec
+        without operations round-trips byte-for-byte to the terv.md 8. example.
+        """
+        data = handler(self)
+        if not self.operations:
+            data.pop("operations", None)
+        return data
 
     @classmethod
     def to_json_schema(cls) -> dict[str, Any]:
@@ -110,7 +207,12 @@ class ModelSpecification(BaseModel):
 
     @classmethod
     def example(cls) -> dict[str, Any]:
-        """Return the terv.md 8. example as a validated, normalised dict."""
+        """Return the terv.md 8. example as a validated, normalised dict.
+
+        The base example carries no features, so the empty ``operations`` field
+        is omitted by the model serializer and the payload stays byte-for-byte
+        the terv.md 8. example.
+        """
         return cls.model_validate(
             {
                 "object": "phone_holder",

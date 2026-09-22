@@ -16,9 +16,10 @@ from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from factories import ModelVersionFactory, ProjectFactory, UserFactory
 
-from projects.models import ContentSource, ModelDownload, ProjectShare, Rating
+from projects.models import ContentSource, ModelDownload, ProjectPrint, ProjectShare, Rating
 from projects.services import (
     create_share,
+    mark_project_printed,
     project_download_url,
     project_rating_summary,
     publish_project,
@@ -224,9 +225,10 @@ def test_record_download_bumps_the_counter_and_logs_the_row():
     version = ModelVersionFactory(project=project)
     user = UserFactory()
 
-    download = record_download(project, model_version=version, user=user, ip_hash="abc")
+    download, counted = record_download(project, model_version=version, user=user, ip_hash="abc")
 
     project.refresh_from_db()
+    assert counted is True
     assert project.download_count == 1
     assert download.project_id == project.id
     assert download.model_version_id == version.id
@@ -242,10 +244,64 @@ def test_record_download_bumps_the_counter_and_logs_the_row():
 def test_record_download_treats_anonymous_as_no_user():
     project = ProjectFactory()
 
-    download = record_download(project, user=AnonymousUser(), ip_hash="")
+    download, counted = record_download(project, user=AnonymousUser(), ip_hash="")
 
+    assert counted is True
     assert download.user is None
     assert download.ip_hash == ""
+
+
+def test_record_download_dedupes_the_same_user():
+    project = ProjectFactory()
+    user = UserFactory()
+
+    _first, counted = record_download(project, user=user)
+    _second, counted_again = record_download(project, user=user)
+
+    project.refresh_from_db()
+    assert (counted, counted_again) == (True, False)
+    assert project.download_count == 1
+    assert ModelDownload.objects.filter(project=project).count() == 1
+
+
+def test_record_download_dedupes_anonymous_visitors_by_id():
+    project = ProjectFactory()
+
+    _a1, first = record_download(project, visitor_id="visitor-a")
+    _a2, repeat = record_download(project, visitor_id="visitor-a")
+    _b1, other = record_download(project, visitor_id="visitor-b")
+
+    project.refresh_from_db()
+    assert (first, repeat, other) == (True, False, True)
+    assert project.download_count == 2
+    assert ModelDownload.objects.filter(project=project, visitor_id="visitor-a").count() == 1
+
+
+# ---------------------------------------------------------------------------
+# „Én is nyomtattam” (print counter)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_project_printed_dedupes_per_user_and_visitor():
+    project = ProjectFactory()
+    user = UserFactory()
+
+    _row, counted = mark_project_printed(project, user=user)
+    _again, counted_again = mark_project_printed(project, user=user)
+
+    project.refresh_from_db()
+    assert (counted, counted_again) == (True, False)
+    assert project.print_count == 1
+
+    # Anonymous visitors are deduped by their browser id, independently of users.
+    _va, visitor_first = mark_project_printed(project, visitor_id="visitor-a")
+    _va2, visitor_repeat = mark_project_printed(project, visitor_id="visitor-a")
+    _vb, visitor_other = mark_project_printed(project, visitor_id="visitor-b")
+
+    project.refresh_from_db()
+    assert (visitor_first, visitor_repeat, visitor_other) == (True, False, True)
+    assert project.print_count == 3
+    assert ProjectPrint.objects.filter(project=project).count() == 3
 
 
 # ---------------------------------------------------------------------------

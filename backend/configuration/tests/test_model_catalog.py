@@ -41,7 +41,23 @@ def test_recommend_prefers_a_comfortable_quant():
 def test_recommend_filters_by_category():
     results = model_catalog.recommend(24, categories=["embedding"])
     assert results
-    assert all(model["category"] == "embedding" for model in results)
+    assert all("embedding" in model["categories"] for model in results)
+
+
+def test_models_can_belong_to_multiple_categories():
+    coding = {model["name"] for model in model_catalog.recommend(24, categories=["coding"])}
+    chat = {model["name"] for model in model_catalog.recommend(24, categories=["chat"])}
+    vision = {model["name"] for model in model_catalog.recommend(24, categories=["vision"])}
+
+    # A coder is also a chat model; a multimodal model is chat + vision.
+    assert "qwen2.5-coder:7b" in coding
+    assert "qwen2.5-coder:7b" in chat
+    assert "gemma3:12b" in chat
+    assert "gemma3:12b" in vision
+
+    by_name = {model["name"]: model for model in model_catalog.recommend(24)}
+    assert by_name["qwen2.5-coder:7b"]["categories"] == ["coding", "chat"]
+    assert by_name["gemma3:12b"]["categories"] == ["chat", "vision"]
 
 
 def test_recommend_includes_installed_models_not_in_catalog():
@@ -55,13 +71,24 @@ def test_recommend_includes_installed_models_not_in_catalog():
     assert extra["estimated_gb"] == 4.0
 
 
-def test_recommend_marks_catalog_model_installed_by_base_name():
+def test_recommend_marks_installed_by_exact_tag():
     installed = [{"name": "llama3.1:8b", "size": 5 * 1024**3}]
 
     results = model_catalog.recommend(8, installed=installed)
     model = next(item for item in results if item["name"] == "llama3.1:8b")
 
     assert model["installed"] is True
+
+
+def test_recommend_does_not_mark_other_tags_of_the_same_family():
+    # An installed ``qwen2.5-coder:1.5b`` must not mark ``qwen2.5-coder:7b``.
+    installed = [{"name": "qwen2.5-coder:1.5b", "size": 1 * 1024**3}]
+
+    results = model_catalog.recommend(8, installed=installed)
+    installed_names = {item["name"] for item in results if item["installed"]}
+
+    assert "qwen2.5-coder:1.5b" in installed_names
+    assert "qwen2.5-coder:7b" not in installed_names
 
 
 def test_recommendation_tiers_pick_the_biggest_comfortable_model():

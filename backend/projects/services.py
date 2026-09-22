@@ -31,6 +31,7 @@ from .models import (
     ContentSource,
     ModelDownload,
     Project,
+    ProjectPrint,
     ProjectShare,
     Rating,
     Tag,
@@ -45,6 +46,7 @@ __all__ = [
     "create_project",
     "create_share",
     "generate_project_description",
+    "mark_project_printed",
     "maybe_autofill_project_metadata",
     "project_download_url",
     "project_rating_summary",
@@ -173,19 +175,72 @@ def record_download(
     model_version=None,
     user: User | None = None,
     ip_hash: str = "",
-) -> ModelDownload:
-    """Log one download and bump ``Project.download_count`` atomically."""
+    visitor_id: str = "",
+) -> tuple[ModelDownload, bool]:
+    """Log a download once per user (or anonymous visitor) and bump the counter.
+
+    Returns ``(download, counted)``. ``counted`` is ``False`` when this user or
+    ``visitor_id`` already downloaded ``project`` (the existing row is returned
+    unchanged, so the counter does not move). An anonymous caller without a
+    ``visitor_id`` is counted on every request.
+    """
     if user is not None and not getattr(user, "is_authenticated", False):
         user = None
+    visitor_id = visitor_id or ""
+
+    existing = None
+    if user is not None:
+        existing = ModelDownload.objects.filter(project=project, user=user).first()
+    elif visitor_id:
+        existing = ModelDownload.objects.filter(
+            project=project, user__isnull=True, visitor_id=visitor_id
+        ).first()
+    if existing is not None:
+        return existing, False
+
     download = ModelDownload.objects.create(
         project=project,
         model_version=model_version,
         user=user,
         ip_hash=ip_hash or "",
+        visitor_id=visitor_id,
     )
     Project.objects.filter(pk=project.pk).update(download_count=F("download_count") + 1)
     project.refresh_from_db(fields=["download_count"])
-    return download
+    return download, True
+
+
+@transaction.atomic
+def mark_project_printed(
+    project: Project,
+    *,
+    user: User | None = None,
+    visitor_id: str = "",
+) -> tuple[ProjectPrint, bool]:
+    """Register „én is nyomtattam” once per user (or anonymous visitor).
+
+    Returns ``(print, counted)`` where ``counted`` is ``False`` when the caller
+    already marked the project. An anonymous caller without a ``visitor_id`` is
+    counted on every call.
+    """
+    if user is not None and not getattr(user, "is_authenticated", False):
+        user = None
+    visitor_id = visitor_id or ""
+
+    if user is not None:
+        print_row, created = ProjectPrint.objects.get_or_create(project=project, user=user)
+    elif visitor_id:
+        print_row, created = ProjectPrint.objects.get_or_create(
+            project=project, user=None, visitor_id=visitor_id
+        )
+    else:
+        print_row = ProjectPrint.objects.create(project=project, user=None, visitor_id="")
+        created = True
+
+    if created:
+        Project.objects.filter(pk=project.pk).update(print_count=F("print_count") + 1)
+        project.refresh_from_db(fields=["print_count"])
+    return print_row, created
 
 
 def _get_or_create_tags(names: Iterable[str]) -> list[Tag]:

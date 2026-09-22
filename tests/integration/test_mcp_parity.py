@@ -41,6 +41,7 @@ from projects.services import (
     create_build_plate,
     create_project,
     generate_project_description,
+    mark_project_printed,
     project_rating_summary,
     projects_for_workspace,
     publish_project,
@@ -71,6 +72,7 @@ PARITY_TOOLS = {
     "set_project_tags",
     "rate_project",
     "record_download",
+    "mark_project_printed",
     "generate_project_description",
     # Build plates / print queue (terv.md 28., 14.).
     "create_build_plate",
@@ -243,9 +245,7 @@ def test_export_model_stl_tool_matches_storage_services(settings, tmp_path):
     version.stl_file.name = relative
     version.save(update_fields=["stl_file"])
 
-    result = call(
-        "export_model_stl", version_id=version.id, user_id=version.project.created_by_id
-    )
+    result = call("export_model_stl", version_id=version.id, user_id=version.project.created_by_id)
 
     direct_path = artifact_path(version, "stl")
     assert direct_path == relative
@@ -256,9 +256,7 @@ def test_export_model_stl_tool_matches_missing_artifact(settings, tmp_path):
     settings.MEDIA_ROOT = str(tmp_path)
     version = ModelVersionFactory()
 
-    result = call(
-        "export_model_stl", version_id=version.id, user_id=version.project.created_by_id
-    )
+    result = call("export_model_stl", version_id=version.id, user_id=version.project.created_by_id)
 
     assert artifact_path(version, "stl") is None
     assert result == {"path": None, "exists": False, "size": 0}
@@ -377,6 +375,7 @@ def test_record_download_tool_delegates_to_service():
     assert result == {
         "download_id": result["download_id"],
         "project_id": project.id,
+        "counted": True,
         "download_count": 1,
     }
     logged = ModelDownload.objects.get(pk=result["download_id"])
@@ -537,16 +536,45 @@ def test_rate_project_tool_rejects_an_out_of_range_score():
 
 def test_record_download_tool_increments_the_counter():
     project = ProjectFactory()
-    user = _member_of(project)
+    first_user = _member_of(project)
+    second_user = UserFactory()
+    add_member(workspace=project.workspace, user=second_user, role=WorkspaceRole.MEMBER)
 
-    first = call("record_download", project_id=project.id, user_id=user.id)
-    second = call("record_download", project_id=project.id, user_id=user.id)
+    first = call("record_download", project_id=project.id, user_id=first_user.id)
+    second = call("record_download", project_id=project.id, user_id=second_user.id)
 
     project.refresh_from_db()
     assert first["download_count"] == 1
     assert second["download_count"] == 2
     assert project.download_count == 2
     assert ModelDownload.objects.filter(project=project).count() == 2
+
+
+def test_record_download_tool_dedupes_the_same_user():
+    project = ProjectFactory()
+    user = _member_of(project)
+
+    first = call("record_download", project_id=project.id, user_id=user.id)
+    second = call("record_download", project_id=project.id, user_id=user.id)
+
+    project.refresh_from_db()
+    assert first["counted"] is True
+    assert second["counted"] is False
+    assert project.download_count == 1
+    assert ModelDownload.objects.filter(project=project).count() == 1
+
+
+def test_mark_project_printed_tool_delegates_to_service():
+    project = ProjectFactory()
+    user = _member_of(project)
+
+    with patch("mcp.tools_impl.mark_project_printed", wraps=mark_project_printed) as service:
+        result = call("mark_project_printed", project_id=project.id, user_id=user.id)
+
+    service.assert_called_once_with(project, user=user)
+    project.refresh_from_db()
+    assert result == {"project_id": project.id, "counted": True, "print_count": 1}
+    assert project.print_count == 1
 
 
 def test_record_download_tool_without_a_version_logs_none():

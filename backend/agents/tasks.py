@@ -22,6 +22,12 @@ reference. The raw bytes never reach ``AgentRun.state_json``: only the
 ``reference_image_used`` flag, the presence flag and the optional warning are
 summarised. Without ``version_id`` the task behaves exactly as before.
 
+For a visual-prompt edit (docs/visual-editing.md 3.5) the caller passes
+``base_version_id`` + ``annotations``. The base version is loaded only when it
+belongs to the project, its ``specification_json`` seeds the Editor, and the new
+``ModelVersion`` records ``parent_version`` + ``annotations_json``. Only the
+annotation *count* reaches ``AgentRun.state_json`` -- never the raw payload.
+
 The workflow dependencies (LLM provider + CAD backend + RAG ``retrieve``) are
 built by :func:`build_dependencies`, which tests monkeypatch to inject fakes --
 no live Ollama, OpenSCAD or pgvector is ever required.
@@ -51,7 +57,12 @@ from files.services import get_storage
 from notifications.services import NotificationKind, notify_project_members
 from projects.models import Project
 
-__all__ = ["build_dependencies", "load_reference_image", "run_agent_workflow"]
+__all__ = [
+    "build_dependencies",
+    "load_reference_image",
+    "load_reference_image_bytes",
+    "run_agent_workflow",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +91,22 @@ def build_dependencies() -> WorkflowDeps:
     )
 
 
+def load_reference_image_bytes(name: str | None) -> bytes | None:
+    """Return the raw bytes stored at ``name``, or ``None`` on any error.
+
+    A reference photo must never block a run: a missing name or any storage
+    error is logged and treated as "no image".
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    try:
+        return get_storage().read_bytes(name)
+    except Exception:  # noqa: BLE001 - a broken reference image must not fail the run
+        logger.warning("Could not read reference image %r", name, exc_info=True)
+        return None
+
+
 def load_reference_image(version: ModelVersion | None) -> bytes | None:
     """Return the raw bytes of *version*'s optional reference image.
 
@@ -93,18 +120,7 @@ def load_reference_image(version: ModelVersion | None) -> bytes | None:
     if version is None:
         return None
     name = getattr(getattr(version, "reference_image", None), "name", "") or ""
-    if not name:
-        return None
-    try:
-        return get_storage().read_bytes(name)
-    except Exception:  # noqa: BLE001 - a broken reference image must not fail the run
-        logger.warning(
-            "Could not read reference image %r for ModelVersion %s",
-            name,
-            version.pk,
-            exc_info=True,
-        )
-        return None
+    return load_reference_image_bytes(name)
 
 
 def _autofill_project_metadata(project: Project) -> None:
@@ -203,11 +219,17 @@ def _workflow_error(
     )
 
 
-def _summarise_state(state: dict[str, Any]) -> dict[str, Any]:
+def _summarise_state(
+    state: dict[str, Any],
+    *,
+    annotations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Reduce the in-memory state to a JSON-serialisable ``AgentRun`` summary.
 
     The raw ``stl_bytes`` are deliberately not persisted on the run: only their
-    size is kept (the artifact itself is written to the storage backend).
+    size is kept (the artifact itself is written to the storage backend). The
+    visual-prompt payload (docs/visual-editing.md) is likewise reduced to its
+    count -- never the raw annotation JSON.
     """
     scad_source = str(state.get("scad_source") or "")
     stl_bytes = state.get("stl_bytes") or b""
@@ -224,6 +246,8 @@ def _summarise_state(state: dict[str, Any]) -> dict[str, Any]:
         "reference_image_used": bool(state.get("reference_image_used", False)),
         "reference_image_note": str(state.get("reference_image_note") or ""),
         "reference_image_warning": state.get("reference_image_warning"),
+        # Visual-prompt provenance (docs/visual-editing.md): count only.
+        "annotation_count": len(annotations or []),
         "validation": dict(state.get("validation") or {}),
         "scad_chars": len(scad_source),
         "stl_bytes": len(stl_bytes),
@@ -239,6 +263,8 @@ def _persist_version(
     run: Any,
     state: dict[str, Any],
     reference_image_name: str = "",
+    parent_version: ModelVersion | None = None,
+    annotations: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Create the next ``ModelVersion`` and store the CAD artifacts on it.
 
@@ -248,6 +274,10 @@ def _persist_version(
 
     The optional reference image/note (terv.md 27.) is copied onto the new
     version for reproducibility when the run was seeded from a version.
+
+    For a visual-prompt edit (docs/visual-editing.md 3.5) the new version also
+    records ``parent_version`` (the edited base) and ``annotations_json`` (the
+    exact input payload), forming the reproducible edit chain.
     """
     reference_image = state.get("reference_image")
     reference_note = str(state.get("reference_image_note") or "")
@@ -274,6 +304,8 @@ def _persist_version(
 
     version.scad_file.name = scad_rel
     version.stl_file.name = stl_rel
+    version.parent_version = parent_version
+    version.annotations_json = list(annotations or [])
     version.validation_json = {
         "status": "done",
         "stage": "done",
@@ -284,12 +316,22 @@ def _persist_version(
         "research_sources": list(state.get("research_sources") or []),
         "reference_image_used": bool(state.get("reference_image_used", False)),
         "reference_image_provided": bool(state.get("reference_image")),
+        "parent_version": parent_version.pk if parent_version is not None else None,
+        "annotation_count": len(annotations or []),
         "scad_file": scad_rel,
         "stl_file": stl_rel,
         "stl_bytes": len(stl_bytes),
         "completed_at": timezone.now().isoformat(),
     }
-    version.save(update_fields=["scad_file", "stl_file", "validation_json"])
+    version.save(
+        update_fields=[
+            "scad_file",
+            "stl_file",
+            "parent_version",
+            "annotations_json",
+            "validation_json",
+        ]
+    )
     return version
 
 
@@ -299,6 +341,10 @@ def run_agent_workflow(
     prompt: str,
     user_id: int | None = None,
     version_id: int | None = None,
+    reference_image_name: str = "",
+    reference_note: str = "",
+    base_version_id: int | None = None,
+    annotations: list[dict[str, Any]] | None = None,
 ) -> int:
     """Run the full agent workflow for ``project_id`` and return the ``AgentRun`` id.
 
@@ -306,10 +352,22 @@ def run_agent_workflow(
     ``finish_run`` or ``fail_run``; a workflow-level failure never leaves the
     run stuck in ``RUNNING``.
 
-    ``version_id`` is optional (terv.md 27. fejezet): when given, that version's
-    ``reference_image``/``reference_note`` seed the graph state so the agents can
-    use the photo as a reference. It must belong to ``project_id``; a missing or
-    foreign version is simply ignored (text-only run).
+    The reference photo (terv.md 27.) can be supplied two ways:
+
+    * ``version_id`` -- seed from an existing version's
+      ``reference_image``/``reference_note`` (the original flow); a missing or
+      foreign version is ignored;
+    * ``reference_image_name``/``reference_note`` -- a storage path written by
+      the caller (the API stores the upload before enqueueing, so no
+      placeholder version is needed).
+
+    Either way the image stays optional and never fails the run.
+
+    For a visual-prompt edit (docs/visual-editing.md 3.5) the caller passes
+    ``base_version_id`` + ``annotations``: the base version must belong to
+    ``project`` (a missing/foreign id is ignored), its ``specification_json`` is
+    fed to the Editor as ``base_specification``, and the persisted new version
+    records ``parent_version`` + ``annotations_json``.
     """
     project = Project.objects.get(pk=project_id)
     user = User.objects.filter(pk=user_id).first() if user_id else None
@@ -318,9 +376,30 @@ def run_agent_workflow(
     version = (
         ModelVersion.objects.filter(pk=version_id, project=project).first() if version_id else None
     )
-    reference_image = load_reference_image(version)
-    reference_image_note = str(getattr(version, "reference_note", "") or "")
-    reference_image_name = str(getattr(getattr(version, "reference_image", None), "name", "") or "")
+    if version is not None:
+        reference_image = load_reference_image(version)
+        reference_image_note = str(getattr(version, "reference_note", "") or "")
+        reference_image_name = str(
+            getattr(getattr(version, "reference_image", None), "name", "") or ""
+        )
+    else:
+        reference_image = load_reference_image_bytes(reference_image_name)
+        reference_image_note = str(reference_note or "")
+
+    # Visual-prompt edit: load the base version only when it belongs to this
+    # project; a missing/foreign id is ignored and the run falls back to a fresh
+    # generation so a bad request can never produce an orphan edit.
+    base_version = (
+        ModelVersion.objects.filter(pk=base_version_id, project=project).first()
+        if base_version_id
+        else None
+    )
+    if base_version_id and base_version is None:
+        logger.warning(
+            "Ignoring base version %s: not found in project %s", base_version_id, project.pk
+        )
+    edit_annotations = list(annotations or []) if base_version is not None else []
+    base_specification = dict(getattr(base_version, "specification_json", None) or {})
 
     try:
         state = run_workflow(
@@ -329,6 +408,8 @@ def run_agent_workflow(
             company_id=str(project.workspace_id),
             reference_image=reference_image,
             reference_image_note=reference_image_note,
+            base_specification=base_specification,
+            annotations=edit_annotations,
         )
     except Exception as exc:  # noqa: BLE001 - never leave a run RUNNING
         logger.exception("Agent workflow crashed for AgentRun %s", run.pk)
@@ -352,6 +433,8 @@ def run_agent_workflow(
                 run=run,
                 state=state,
                 reference_image_name=reference_image_name,
+                parent_version=base_version,
+                annotations=edit_annotations,
             )
         except Exception as exc:  # noqa: BLE001 - storage/DB failure must fail the run
             logger.exception("Could not persist ModelVersion for AgentRun %s", run.pk)
@@ -366,7 +449,7 @@ def run_agent_workflow(
                 ),
             )
 
-        summary = _summarise_state(state)
+        summary = _summarise_state(state, annotations=edit_annotations)
         summary["version_id"] = version.pk
         summary["version"] = version.version
         finish_run(run=run, state=summary)

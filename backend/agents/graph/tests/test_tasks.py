@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from django.conf import settings
-from factories import ProjectFactory
+from factories import ModelVersionFactory, ProjectFactory
 
 from agents.graph import WorkflowDeps
 from agents.graph.tests.fakes import FakeCADBackend, FakeProvider
@@ -94,6 +94,30 @@ def test_task_without_user_leaves_created_by_empty(monkeypatch, tmp_path):
 
     assert AgentRun.objects.get(pk=run_id).status == AgentRunStatus.DONE
     assert project.versions.get().created_by_id is None
+
+
+def test_task_loads_a_reference_image_from_a_storage_path(monkeypatch, tmp_path):
+    """The API stores the upload and passes its path; the task seeds from it."""
+    project = ProjectFactory()
+    storage = _install(monkeypatch, tmp_path, _deps())
+    name = f"reference_uploads/{project.pk}/photo.png"
+    storage.write_bytes(name, b"\x89PNG-fake")
+
+    run_id = run_agent_workflow(
+        project.pk,
+        "make a holder",
+        project.created_by_id,
+        reference_image_name=name,
+        reference_note="70 mm wide",
+    )
+
+    run = AgentRun.objects.get(pk=run_id)
+    assert run.status == AgentRunStatus.DONE
+    assert run.state_json["reference_image_provided"] is True
+    version = project.versions.get()
+    assert version.reference_note == "70 mm wide"
+    assert "photo" in version.reference_image.name
+    assert version.reference_image.name.endswith(".png")
 
 
 def test_task_marks_run_failed_when_validation_exhausts_retries(monkeypatch, tmp_path):
@@ -252,3 +276,67 @@ def test_build_dependencies_injects_the_embeddings_retrieve_service():
     # function itself respects settings.RAG_ENABLED (returns [] when disabled).
     assert deps.retrieve_fn is embeddings_retrieve
     assert deps.max_attempts == settings.AGENT_MAX_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# Visual-prompt edits (docs/visual-editing.md 3.5)
+# ---------------------------------------------------------------------------
+
+ANNOTATIONS: list[dict[str, Any]] = [
+    {
+        "id": "c1",
+        "kind": "point",
+        "point": [35.0, 12.5, 8.0],
+        "normal": [0.0, 0.0, 1.0],
+        "faces": [],
+        "instruction": "4 mm-es átmenő lyuk",
+    }
+]
+
+
+def test_task_persists_an_edit_version_with_parent_and_annotations(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    base = ModelVersionFactory(project=project, version=1)
+    _install(monkeypatch, tmp_path, _deps())
+
+    run_id = run_agent_workflow(
+        project.pk,
+        "A kijelölt peremre tegyél egy lyukat.",
+        project.created_by_id,
+        base_version_id=base.pk,
+        annotations=ANNOTATIONS,
+    )
+
+    run = AgentRun.objects.get(pk=run_id)
+    assert run.status == AgentRunStatus.DONE
+    # Only the annotation count reaches the run summary, never the raw payload.
+    assert run.state_json["annotation_count"] == len(ANNOTATIONS)
+
+    new_version = project.versions.get(version=2)
+    assert new_version.parent_version_id == base.pk
+    assert new_version.annotations_json == ANNOTATIONS
+    assert new_version.validation_json["parent_version"] == base.pk
+    assert new_version.validation_json["annotation_count"] == len(ANNOTATIONS)
+
+
+def test_task_ignores_a_missing_or_foreign_base_version(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    other_project = ProjectFactory()
+    foreign = ModelVersionFactory(project=other_project, version=1)
+    _install(monkeypatch, tmp_path, _deps())
+
+    run_id = run_agent_workflow(
+        project.pk,
+        "make a holder",
+        project.created_by_id,
+        base_version_id=foreign.pk,
+        annotations=ANNOTATIONS,
+    )
+
+    run = AgentRun.objects.get(pk=run_id)
+    assert run.status == AgentRunStatus.DONE
+    # A foreign base is ignored: the run falls back to a fresh generation.
+    version = project.versions.get()
+    assert version.parent_version_id is None
+    assert version.annotations_json == []
+    assert run.state_json["annotation_count"] == 0

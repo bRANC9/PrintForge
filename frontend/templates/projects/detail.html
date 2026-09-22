@@ -42,10 +42,21 @@
                         <span class="badge"
                               x-text="'Leírás: ' + sourceLabel(project.description_source)"></span>
                         <span class="badge" x-text="'Címkék: ' + sourceLabel(project.tags_source)"></span>
-                        <span class="badge" x-text="project.download_count + ' letöltés'"></span>
+                        <span class="badge" x-text="downloadCount + ' letöltés'"></span>
+                        <span class="badge" x-text="printLabel"></span>
                     </p>
                 </div>
                 <div class="page-head-actions">
+                    <button type="button"
+                            class="btn btn-primary"
+                            @click="downloadLatest()"
+                            :disabled="downloadBusy"
+                            x-text="downloadBusy ? 'Letöltés…' : 'STL letöltése'"></button>
+                    <button type="button"
+                            class="btn"
+                            @click="markPrinted()"
+                            :disabled="printBusy || printed"
+                            x-text="printBusy ? 'Küldés…' : (printed ? 'Nyomtattad ✓' : 'Én is nyomtattam')"></button>
                     <button type="button"
                             class="btn"
                             @click="togglePublish()"
@@ -57,97 +68,8 @@
                             @click="generateAiDescription()"
                             :disabled="aiBusy"
                             x-text="aiBusy ? 'AI dolgozik…' : 'Leírás AI-val'"></button>
-                    <button type="button"
-                            class="btn btn-primary"
-                            @click="downloadLatest()"
-                            :disabled="downloadBusy"
-                            x-text="downloadBusy ? 'Letöltés…' : 'STL letöltése'"></button>
                 </div>
             </header>
-        </template>
-        <template x-if="project">
-            <div class="meta-grid">
-                <section class="panel">
-                    <h2>Projekt adatai</h2>
-                    <div class="form-row">
-                        <label for="project-description">Leírás</label>
-                        <textarea id="project-description"
-                                  class="textarea"
-                                  rows="4"
-                                  x-model="descriptionDraft"
-                                  :disabled="savingMeta"></textarea>
-                    </div>
-                    <div class="form-row">
-                        <label for="project-license">Licenc</label>
-                        <select id="project-license"
-                                class="input"
-                                x-model="licenseDraft"
-                                :disabled="savingMeta">
-                            <option value="">Nincs licenc</option>
-                            <template x-for="item in licenses" :key="item.value">
-                                <option :value="item.value" x-text="item.label"></option>
-                            </template>
-                        </select>
-                    </div>
-                    <div class="form-row">
-                        <label for="project-tag-input">Címkék</label>
-                        <p class="tag-row">
-                            <template x-for="(name, index) in tagNames" :key="name + index">
-                                <span class="badge tag-chip">
-                                    <span x-text="name"></span>
-                                    <button type="button"
-                                            class="link-btn"
-                                            @click="removeTag(index)"
-                                            aria-label="Címke törlése">×</button>
-                                </span>
-                            </template>
-                            <span class="muted" x-show="!tagNames.length">Nincs címke.</span>
-                        </p>
-                        <input id="project-tag-input"
-                               class="input"
-                               type="text"
-                               list="project-tag-options"
-                               placeholder="Címke, majd Enter"
-                               x-model="tagInput"
-                               @keydown.enter.prevent="addTag()"
-                               :disabled="savingMeta">
-                        <datalist id="project-tag-options">
-                            <template x-for="item in tagCatalogue" :key="item.id">
-                                <option :value="item.name"></option>
-                            </template>
-                        </datalist>
-                        <p class="muted field-hint">Enterrel adhatsz hozzá címkéket (vesszővel elválasztva is). Mentéskor a lista lecserélődik.</p>
-                    </div>
-                    <div class="form-actions">
-                        <button type="button"
-                                class="btn btn-primary"
-                                @click="saveMeta()"
-                                :disabled="savingMeta"
-                                x-text="savingMeta ? 'Mentés…' : 'Adatok mentése'"></button>
-                    </div>
-                </section>
-                <section class="panel">
-                    <h2>Értékelés</h2>
-                    <div class="rating-widget">
-                        <template x-for="n in [1, 2, 3, 4, 5]" :key="n">
-                            <button type="button"
-                                    class="star"
-                                    :class="{ 'is-on': myRating && n &lt;= myRating }"
-                                    @click="rate(n)"
-                                    :disabled="ratingBusy"
-                                    :aria-label="'Értékelés: ' + n + ' csillag'"
-                                    x-text="'★'"></button>
-                        </template>
-                        <span class="muted" x-text="ratingLabel"></span>
-                        <button type="button"
-                                class="link-btn"
-                                x-show="myRating"
-                                @click="unrate()"
-                                :disabled="ratingBusy">Értékelés törlése</button>
-                    </div>
-                    <p class="muted field-hint">Az összesített átlag a saját értékelés beküldése után frissül (a nyilvános átlag a közösségi oldalon látható).</p>
-                </section>
-            </div>
         </template>
         <div class="project-layout">
             <section class="panel">
@@ -233,46 +155,135 @@
             {% include "designs/viewer.html" %}
         </div>
         <template x-if="project">
-            <section class="panel share-panel">
-                <h2>Megosztás</h2>
-                <p class="error-box" x-show="shareError" x-cloak x-text="shareError"></p>
-                <div class="share-create">
-                    <input class="input"
-                           type="number"
-                           min="1"
-                           placeholder="Felhasználó azonosító"
-                           x-model="shareUserId"
-                           :disabled="shareBusy">
+            <div class="meta-grid">
+                <section class="panel">
+                    <h2>Projekt adatai</h2>
+                    <div class="form-row">
+                        <label for="project-description">Leírás</label>
+                        <textarea id="project-description"
+                                  class="textarea"
+                                  rows="4"
+                                  x-model="descriptionDraft"
+                                  :disabled="savingMeta"></textarea>
+                    </div>
+                    <div class="form-row">
+                        <label for="project-license">Licenc</label>
+                        <select id="project-license"
+                                class="input"
+                                x-model="licenseDraft"
+                                :disabled="savingMeta">
+                            <option value="">Nincs licenc</option>
+                            <template x-for="item in licenses" :key="item.value">
+                                <option :value="item.value" x-text="item.label"></option>
+                            </template>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label for="project-tag-input">Címkék</label>
+                        <p class="tag-row">
+                            <template x-for="(name, index) in tagNames" :key="name + index">
+                                <span class="badge tag-chip">
+                                    <span x-text="name"></span>
+                                    <button type="button"
+                                            class="link-btn"
+                                            @click="removeTag(index)"
+                                            aria-label="Címke törlése">×</button>
+                                </span>
+                            </template>
+                            <span class="muted" x-show="!tagNames.length">Nincs címke.</span>
+                        </p>
+                        <input id="project-tag-input"
+                               class="input"
+                               type="text"
+                               list="project-tag-options"
+                               placeholder="Címke, majd Enter"
+                               x-model="tagInput"
+                               @keydown.enter.prevent="addTag()"
+                               :disabled="savingMeta">
+                        <datalist id="project-tag-options">
+                            <template x-for="item in tagCatalogue" :key="item.id">
+                                <option :value="item.name"></option>
+                            </template>
+                        </datalist>
+                        <p class="muted field-hint">Enterrel adhatsz hozzá címkéket (vesszővel elválasztva is). Mentéskor a lista lecserélődik.</p>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button"
+                                class="btn btn-primary"
+                                @click="saveMeta()"
+                                :disabled="savingMeta"
+                                x-text="savingMeta ? 'Mentés…' : 'Adatok mentése'"></button>
+                    </div>
+                </section>
+                <section class="panel">
+                    <h2>Értékelés</h2>
+                    <div class="rating-widget">
+                        <template x-for="n in [1, 2, 3, 4, 5]" :key="n">
+                            <button type="button"
+                                    class="star"
+                                    :class="{ 'is-on': myRating && n &lt;= myRating }"
+                                    @click="rate(n)"
+                                    :disabled="ratingBusy"
+                                    :aria-label="'Értékelés: ' + n + ' csillag'"
+                                    x-text="'★'"></button>
+                        </template>
+                        <span class="muted" x-text="ratingLabel"></span>
+                        <button type="button"
+                                class="link-btn"
+                                x-show="myRating"
+                                @click="unrate()"
+                                :disabled="ratingBusy">Értékelés törlése</button>
+                    </div>
+                    <p class="muted field-hint">Az összesített átlag a saját értékelés beküldése után frissül (a nyilvános átlag a közösségi oldalon látható).</p>
+                    <h3>Nyomtatás</h3>
+                    <p class="muted" x-text="printLabel"></p>
                     <button type="button"
                             class="btn"
-                            @click="createUserShare()"
-                            :disabled="shareBusy">Megosztás felhasználóval</button>
-                    <button type="button"
-                            class="btn"
-                            @click="createShareLink()"
-                            :disabled="shareBusy">Nyilvános link</button>
-                </div>
-                <p class="muted" x-show="!shares.length">Még nincs megosztás.</p>
-                <ul class="share-list">
-                    <template x-for="share in shares" :key="share.id">
-                        <li>
-                            <span class="badge" x-text="shareLabel(share)"></span>
-                            <code class="share-token" x-show="share.token" x-text="share.token"></code>
-                            <time class="muted" x-text="formatDate(share.created_at)"></time>
-                            <button type="button"
-                                    class="btn-small"
-                                    x-show="share.token"
-                                    @click="copyToken(share)"
-                                    x-text="copiedShareId === share.id ? 'Másolva' : 'Token másolása'"></button>
-                            <button type="button"
-                                    class="btn btn-danger btn-small"
-                                    @click="revokeShare(share)"
-                                    :disabled="shareBusy">Visszavonás</button>
-                        </li>
-                    </template>
-                </ul>
-                <p class="muted field-hint">A tokenes linkhez jelenleg nincs nyilvános megnyitó útvonal; a tokent kézzel kell megosztani.</p>
-            </section>
+                            @click="markPrinted()"
+                            :disabled="printBusy || printed"
+                            x-text="printBusy ? 'Küldés…' : (printed ? 'Nyomtattad ✓' : 'Én is nyomtattam')"></button>
+                </section>
+                <section class="panel share-panel">
+                    <h2>Megosztás</h2>
+                    <p class="error-box" x-show="shareError" x-cloak x-text="shareError"></p>
+                    <div class="share-create">
+                        <input class="input"
+                               type="number"
+                               min="1"
+                               placeholder="Felhasználó azonosító"
+                               x-model="shareUserId"
+                               :disabled="shareBusy">
+                        <button type="button"
+                                class="btn"
+                                @click="createUserShare()"
+                                :disabled="shareBusy">Megosztás felhasználóval</button>
+                        <button type="button"
+                                class="btn"
+                                @click="createShareLink()"
+                                :disabled="shareBusy">Nyilvános link</button>
+                    </div>
+                    <p class="muted" x-show="!shares.length">Még nincs megosztás.</p>
+                    <ul class="share-list">
+                        <template x-for="share in shares" :key="share.id">
+                            <li>
+                                <span class="badge" x-text="shareLabel(share)"></span>
+                                <code class="share-token" x-show="share.token" x-text="share.token"></code>
+                                <time class="muted" x-text="formatDate(share.created_at)"></time>
+                                <button type="button"
+                                        class="btn-small"
+                                        x-show="share.token"
+                                        @click="copyToken(share)"
+                                        x-text="copiedShareId === share.id ? 'Másolva' : 'Token másolása'"></button>
+                                <button type="button"
+                                        class="btn btn-danger btn-small"
+                                        @click="revokeShare(share)"
+                                        :disabled="shareBusy">Visszavonás</button>
+                            </li>
+                        </template>
+                    </ul>
+                    <p class="muted field-hint">A tokenes linkhez jelenleg nincs nyilvános megnyitó útvonal; a tokent kézzel kell megosztani.</p>
+                </section>
+            </div>
         </template>
     </div>
 {% endblock %}

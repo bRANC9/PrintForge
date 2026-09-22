@@ -68,56 +68,57 @@ VRAM_TIERS: tuple[int, ...] = (4, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64)
 #: Curated catalog of models that run locally with Ollama. ``params_b`` is the
 #: total parameter count (for MoE models this is the sum of all experts, which
 #: is what must be resident in memory). ``name`` is the exact ``ollama pull``
-#: tag.
+#: tag. A model belongs to one or more ``categories`` (e.g. a coder is both
+#: ``coding`` and ``chat``; a multimodal model is both ``chat`` and ``vision``).
 CATALOG: tuple[dict[str, Any], ...] = (
-    # -- Coding ------------------------------------------------------------
+    # -- Coding (also usable as chat) --------------------------------------
     {
         "name": "qwen2.5-coder:1.5b",
         "family": "Qwen2.5-Coder",
         "params_b": 1.5,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "Gyors kód-modell kis GPU/CPU-ra.",
     },
     {
         "name": "qwen2.5-coder:7b",
         "family": "Qwen2.5-Coder",
         "params_b": 7.0,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "Népszerű kód-modell, jó ár/érték.",
     },
     {
         "name": "qwen2.5-coder:14b",
         "family": "Qwen2.5-Coder",
         "params_b": 14.0,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "Erősebb kód-modell, ~10 GB Q4-en.",
     },
     {
         "name": "qwen2.5-coder:32b",
         "family": "Qwen2.5-Coder",
         "params_b": 32.0,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "Csúcs lokális kód-modell 24 GB-tól.",
     },
     {
         "name": "qwen3-coder:30b",
         "family": "Qwen3-Coder",
         "params_b": 30.0,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "MoE (A3B), nagy tudás, 24 GB-tól.",
     },
     {
         "name": "deepseek-coder-v2:16b",
         "family": "DeepSeek-Coder-V2",
         "params_b": 16.0,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "MoE kód-modell, gyors aktív paraméterekkel.",
     },
     {
         "name": "codellama:7b",
         "family": "Code Llama",
         "params_b": 7.0,
-        "category": "coding",
+        "categories": ["coding", "chat"],
         "notes": "Régi, de stabil kód-modell.",
     },
     # -- Chat / general ----------------------------------------------------
@@ -125,156 +126,149 @@ CATALOG: tuple[dict[str, Any], ...] = (
         "name": "llama3.2:1b",
         "family": "Llama 3.2",
         "params_b": 1.0,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Nagyon kicsi, gyors asszisztens.",
     },
     {
         "name": "llama3.2:3b",
         "family": "Llama 3.2",
         "params_b": 3.0,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Kis, gyors chat modell.",
     },
     {
         "name": "llama3.1:8b",
         "family": "Llama 3.1",
         "params_b": 8.0,
-        "category": "chat",
-        "notes": "Általános chat, 8 GB-on kényelmesen.",
-    },
-    {
-        "name": "llama3.1:8b",
-        "family": "Llama 3.1",
-        "params_b": 8.0,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Általános chat, 8 GB-on kényelmesen.",
     },
     {
         "name": "llama3.1:70b",
         "family": "Llama 3.1",
         "params_b": 70.0,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Nagy 70B; Q2_K-val is ~28 GB VRAM kell.",
     },
     {
         "name": "mistral:7b",
         "family": "Mistral",
         "params_b": 7.0,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Kiegyensúlyozott 7B modell.",
     },
     {
         "name": "mistral-nemo:12b",
         "family": "Mistral Nemo",
         "params_b": 12.0,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Hosszú kontextus, 12B.",
     },
     {
         "name": "gemma3:4b",
         "family": "Gemma 3",
         "params_b": 4.0,
-        "category": "chat",
+        "categories": ["chat", "vision"],
         "notes": "Kis, multimodális (vision) is.",
     },
     {
         "name": "gemma3:12b",
         "family": "Gemma 3",
         "params_b": 12.0,
-        "category": "chat",
+        "categories": ["chat", "vision"],
         "notes": "Multimodális, 12B.",
     },
     {
         "name": "gemma3:27b",
         "family": "Gemma 3",
         "params_b": 27.0,
-        "category": "chat",
+        "categories": ["chat", "vision"],
         "notes": "Nagy multimodális modell, 24 GB-tól.",
     },
     {
         "name": "phi4:14b",
         "family": "Phi-4",
         "params_b": 14.0,
-        "category": "chat",
+        "categories": ["chat", "reasoning"],
         "notes": "Erős 14B, jó érvelés.",
     },
     {
         "name": "phi3:mini",
         "family": "Phi-3",
         "params_b": 3.8,
-        "category": "chat",
+        "categories": ["chat"],
         "notes": "Kicsi, CPU-n is elfut.",
     },
     {
         "name": "qwen2.5:7b",
         "family": "Qwen2.5",
         "params_b": 7.0,
-        "category": "chat",
+        "categories": ["chat", "coding"],
         "notes": "Általános chat/kód 7B.",
     },
     {
         "name": "qwen2.5:14b",
         "family": "Qwen2.5",
         "params_b": 14.0,
-        "category": "chat",
-        "notes": "Általános chat 14B.",
+        "categories": ["chat", "coding"],
+        "notes": "Általános chat/kód 14B.",
     },
     {
         "name": "qwen2.5:32b",
         "family": "Qwen2.5",
         "params_b": 32.0,
-        "category": "chat",
+        "categories": ["chat", "coding"],
         "notes": "Erős 32B, 24 GB-tól.",
     },
-    # -- Reasoning ---------------------------------------------------------
+    # -- Reasoning (also chat) ---------------------------------------------
     {
         "name": "deepseek-r1:7b",
         "family": "DeepSeek-R1",
         "params_b": 7.0,
-        "category": "reasoning",
+        "categories": ["reasoning", "chat"],
         "notes": "Gondolkodó (reasoning) 7B.",
     },
     {
         "name": "deepseek-r1:14b",
         "family": "DeepSeek-R1",
         "params_b": 14.0,
-        "category": "reasoning",
+        "categories": ["reasoning", "chat"],
         "notes": "Gondolkodó 14B, ~10 GB Q4-en.",
     },
     {
         "name": "deepseek-r1:32b",
         "family": "DeepSeek-R1",
         "params_b": 32.0,
-        "category": "reasoning",
+        "categories": ["reasoning", "chat"],
         "notes": "Gondolkodó 32B, 24 GB-tól.",
     },
-    # -- Vision ------------------------------------------------------------
+    # -- Vision (also chat) ------------------------------------------------
     {
         "name": "llava:7b",
         "family": "LLaVA",
         "params_b": 7.0,
-        "category": "vision",
+        "categories": ["vision", "chat"],
         "notes": "Kép + szöveg, 7B.",
     },
     {
         "name": "llava:13b",
         "family": "LLaVA",
         "params_b": 13.0,
-        "category": "vision",
+        "categories": ["vision", "chat"],
         "notes": "Kép + szöveg, 13B.",
     },
     {
         "name": "qwen2.5vl:7b",
         "family": "Qwen2.5-VL",
         "params_b": 7.0,
-        "category": "vision",
+        "categories": ["vision", "chat"],
         "notes": "Erős vision modell, 7B.",
     },
     {
         "name": "llama3.2-vision:11b",
         "family": "Llama 3.2 Vision",
         "params_b": 11.0,
-        "category": "vision",
+        "categories": ["vision", "chat"],
         "notes": "Vision + chat, 11B.",
     },
     # -- Embedding ---------------------------------------------------------
@@ -282,28 +276,28 @@ CATALOG: tuple[dict[str, Any], ...] = (
         "name": "bge-m3",
         "family": "BGE-M3",
         "params_b": 0.6,
-        "category": "embedding",
+        "categories": ["embedding"],
         "notes": "Többnyelvű embedding (a PrintForge alapértéke).",
     },
     {
         "name": "nomic-embed-text",
         "family": "Nomic Embed",
         "params_b": 0.14,
-        "category": "embedding",
+        "categories": ["embedding"],
         "notes": "Kicsi, gyors angol embedding.",
     },
     {
         "name": "mxbai-embed-large",
         "family": "MixedBread",
         "params_b": 0.34,
-        "category": "embedding",
+        "categories": ["embedding"],
         "notes": "Nagyobb, erős angol embedding.",
     },
     {
         "name": "all-minilm",
         "family": "All-MiniLM",
         "params_b": 0.02,
-        "category": "embedding",
+        "categories": ["embedding"],
         "notes": "Nagyon kicsi embedding, CPU-ra.",
     },
 )
@@ -366,29 +360,35 @@ def recommend(
     """
     wanted = set(categories) if categories else None
     installed_list = list(installed or ())
-    installed_bases = {_base_name(item.get("name", "")) for item in installed_list}
+    # Match by exact tag: an installed ``qwen2.5-coder:1.5b`` must not mark the
+    # whole ``qwen2.5-coder`` family as installed. An untagged installed name
+    # (Ollama's implicit ``:latest``) matches any catalog tag of that base.
+    installed_names = {item.get("name", "") for item in installed_list}
+    installed_untagged = {name for name in installed_names if ":" not in name}
+    catalog_names = {entry["name"] for entry in CATALOG}
 
     results: list[dict[str, Any]] = []
-    catalog_bases: set[str] = set()
     for entry in CATALOG:
-        if wanted and entry["category"] not in wanted:
+        if wanted and not (set(entry["categories"]) & wanted):
             continue
-        catalog_bases.add(_base_name(entry["name"]))
         quant, estimate, fits = _best_quant(entry["params_b"], vram_gb, context)
+        is_installed = (
+            entry["name"] in installed_names or _base_name(entry["name"]) in installed_untagged
+        )
         results.append(
             {
                 **entry,
                 "suggested_quant": quant,
                 "estimated_gb": estimate,
                 "fits": fits,
-                "installed": _base_name(entry["name"]) in installed_bases,
+                "installed": is_installed,
             }
         )
 
     # Installed-but-uncatalogued models (real size, so memory is exact-ish).
     for item in installed_list:
         name = item.get("name") or ""
-        if not name or _base_name(name) in catalog_bases:
+        if not name or name in catalog_names:
             continue
         size_bytes = item.get("size")
         size_gb = round(float(size_bytes) / 1024**3, 1) if size_bytes else None
@@ -397,7 +397,7 @@ def recommend(
                 "name": name,
                 "family": item.get("family") or "",
                 "params_b": None,
-                "category": "installed",
+                "categories": ["installed"],
                 "notes": "Telepített modell (a katalóguson kívül).",
                 "suggested_quant": item.get("quantization") or "",
                 "estimated_gb": size_gb,

@@ -48,11 +48,15 @@
         publish: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/publish/`,
         unpublish: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/unpublish/`,
         download: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/download/`,
+        printProject: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/print/`,
         rate: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/rate/`,
         shares: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/share/`,
         share: (id, shareId) =>
             `${API_BASE}/projects/${encodeURIComponent(id)}/shares/${encodeURIComponent(shareId)}/`,
         descriptionAi: (id) => `${API_BASE}/projects/${encodeURIComponent(id)}/description-ai/`,
+        // Visual-prompt model editing (docs/visual-editing.md 3.4/3.6).
+        annotationEdit: (versionId) =>
+            `${API_BASE}/versions/${encodeURIComponent(versionId)}/annotations/`,
         // Build plates (#28).
         buildPlates: (params) => withQuery(`${API_BASE}/build-plates/`, params),
         buildPlate: (id) => `${API_BASE}/build-plates/${encodeURIComponent(id)}/`,

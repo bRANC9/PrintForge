@@ -27,6 +27,28 @@ RESEARCH_DOC = {
     "score": 0.91,
 }
 
+EDIT_SPEC: dict[str, Any] = {
+    **DEFAULT_SPEC,
+    "operations": [
+        {
+            "kind": "hole",
+            "origin": {"x": 35.0, "y": 12.5, "z": 8.0},
+            "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
+            "depth": 8.0,
+            "diameter": 4.0,
+            "label": "4 mm hole",
+        }
+    ],
+}
+ANNOTATION = {
+    "id": "c1",
+    "kind": "point",
+    "point": [35.0, 12.5, 8.0],
+    "normal": [0.0, 0.0, 1.0],
+    "faces": [],
+    "instruction": "4 mm-es átmenő lyuk",
+}
+
 
 def _never_retrieve(*args: Any, **kwargs: Any) -> list[dict]:
     raise AssertionError("retrieve() must not be called when research is not needed")
@@ -162,6 +184,66 @@ def test_research_with_rag_disabled_keeps_the_planner_spec():
     assert provider.calls == ["PlannerPlan"]
     assert state["specification"] == DEFAULT_SPEC
     assert cad.validated_models[0].specification == DEFAULT_SPEC
+
+
+# ---------------------------------------------------------------------------
+# Visual-prompt edit mode (docs/visual-editing.md 3.5)
+# ---------------------------------------------------------------------------
+
+
+def test_route_entry_selects_editor_only_in_edit_mode():
+    from agents.graph.workflow import route_entry
+
+    assert route_entry({"edit_mode": True}) == "editor"
+    assert route_entry({"edit_mode": False}) == "planner"
+    # An empty/absent flag keeps the pre-existing planner entry.
+    assert route_entry({}) == "planner"
+
+
+def test_edit_mode_routes_start_through_the_editor():
+    provider = FakeProvider(
+        plan={
+            "specification": EDIT_SPEC,
+            "needs_research": False,
+            "research_query": None,
+        }
+    )
+    cad = FakeCADBackend()
+
+    state = run_workflow(
+        "A kijelölt peremre tegyél egy 4 mm-es lyukat.",
+        deps=_deps(provider, cad),
+        base_specification=DEFAULT_SPEC,
+        annotations=[ANNOTATION],
+    )
+
+    assert state["edit_mode"] is True
+    assert state["base_specification"] == DEFAULT_SPEC
+    assert state["annotations"] == [ANNOTATION]
+    assert state["status"] == "done"
+
+    # The Editor (PlannerPlan schema, same fake call) produced the operations.
+    assert provider.calls == ["PlannerPlan"]
+    operations = state["specification"]["operations"]
+    assert len(operations) == 1
+    assert operations[0]["kind"] == "hole"
+    assert operations[0]["diameter"] == 4.0
+    assert operations[0]["origin"] == {"x": 35.0, "y": 12.5, "z": 8.0}
+    assert operations[0]["normal"] == {"x": 0.0, "y": 0.0, "z": 1.0}
+    assert any("edit" in entry.lower() for entry in state["history"])
+
+
+def test_no_annotations_keeps_the_planner_entry_and_empty_edit_fields():
+    provider = FakeProvider()
+    cad = FakeCADBackend()
+
+    state = run_workflow("make a phone holder", deps=_deps(provider, cad))
+
+    assert state["edit_mode"] is False
+    assert state["base_specification"] == {}
+    assert state["annotations"] == []
+    assert state["status"] == "done"
+    assert state["specification"] == DEFAULT_SPEC
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,19 @@ class ModelVersion(models.Model):
     specification_json = models.JSONField(default=dict, blank=True)
     validation_json = models.JSONField(default=dict, blank=True)
 
+    # Edit-chain source: the version this one was derived from via a
+    # visual-prompt edit (docs/visual-editing.md 3.2).
+    parent_version = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="derived_versions",
+    )
+    # Visual-prompt input (the annotation payload) stored verbatim so the
+    # edit can be reproduced and its provenance audited.
+    annotations_json = models.JSONField(default=list, blank=True)
+
     scad_file = models.FileField(upload_to=model_artifact_path, blank=True)
     stl_file = models.FileField(upload_to=model_artifact_path, blank=True)
     glb_file = models.FileField(upload_to=model_artifact_path, blank=True)

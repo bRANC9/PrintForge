@@ -9,7 +9,8 @@ the scoped list. A VIEWER may not create projects.
 from __future__ import annotations
 
 import pytest
-from factories import UserFactory, WorkspaceFactory
+from django.test import Client as DjangoClient
+from factories import ProjectFactory, UserFactory, WorkspaceFactory
 from rest_framework.test import APIClient
 
 from projects.models import Project
@@ -23,6 +24,21 @@ def auth(user) -> APIClient:
     client = APIClient()
     client.force_authenticate(user=user)
     return client
+
+
+def test_project_detail_page_renders_the_workspace_layout():
+    project = ProjectFactory()
+
+    response = DjangoClient().get(f"/projects/{project.pk}/")
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    # The new layout: versions on the left, the 3D viewer on the right and the
+    # combined data/rating/share row plus the "én is nyomtattam" action.
+    assert "Verzió előzmények" in html
+    assert "3D előnézet" in html
+    assert "Én is nyomtattam" in html
+    assert "Megosztás" in html
 
 
 def test_authenticated_user_can_create_a_workspace_and_project_then_list_it():

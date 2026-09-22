@@ -42,6 +42,7 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from string import Template
@@ -61,6 +62,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_IMAGE",
+    "MAX_OPERATIONS",
     "SANDBOX_FLAGS",
     "HolderParameters",
     "OpenSCADBackend",
@@ -68,7 +70,9 @@ __all__ = [
     "OpenSCADError",
     "OpenSCADTimeout",
     "OpenSCADValidationError",
+    "RenderOperation",
     "build_parameters",
+    "parse_operations",
     "render_scad",
     "scan_for_forbidden",
     "strip_scad_comments",
@@ -305,6 +309,198 @@ def build_parameters(specification: dict[str, Any] | None) -> HolderParameters:
 
 
 # ---------------------------------------------------------------------------
+# Annotation-driven operations (docs/visual-editing.md 3.1 / 3.3)
+# ---------------------------------------------------------------------------
+
+# Mirrors ``agents.spec`` bounds (which the CAD package must not import, to keep
+# it decoupled from ``llm-provider``). Every operation value is re-coerced and
+# re-bounded here because the LLM payload is untrusted.
+MIN_OPERATION_MM = 0.4
+MAX_OPERATION_DEPTH_MM = 200.0
+MAX_OPERATION_SIZE_MM = 500.0
+MAX_OPERATION_DIAMETER_MM = 200.0
+MAX_OPERATION_LABEL = 120
+#: Upper bound for operation coordinates/normal components (mm), catching unit
+#: mistakes and absurd values that could produce degenerate geometry.
+MAX_OPERATION_COORD_MM = 10_000.0
+MAX_OPERATION_NORMAL_COMPONENT = 1_000.0
+#: Hard cap on the number of rendered features: unbounded lists are a DoS vector.
+MAX_OPERATIONS = 256
+
+OPERATION_KINDS: tuple[str, ...] = ("hole", "pocket", "boss", "slot", "cut", "add")
+_ADDITIVE_KINDS = frozenset({"boss", "add"})
+_SUBTRACTIVE_KINDS = frozenset({"hole", "pocket", "cut", "slot"})
+_RECTANGULAR_KINDS = frozenset({"pocket", "cut", "add"})
+
+# Labels are only ever emitted inside a ``//`` comment, but sanitise anyway so a
+# hostile label cannot close the comment or smuggle a forbidden construct.
+_RE_LABEL = re.compile(r"[^\w\- .,:/]+")
+
+
+@dataclass(frozen=True)
+class RenderOperation:
+    """A validated, bounded parametric feature ready for rendering.
+
+    ``origin``/``normal`` are plain float tuples (not ``agents.spec.Vec3``) so
+    the CAD package stays independent of the LLM layer.
+    """
+
+    kind: str
+    origin: tuple[float, float, float]
+    normal: tuple[float, float, float]
+    depth: float
+    width: float | None = None
+    height: float | None = None
+    diameter: float | None = None
+    length: float | None = None
+    label: str = ""
+
+    @property
+    def is_additive(self) -> bool:
+        """True for features union-ed onto the base (``boss``/``add``)."""
+        return self.kind in _ADDITIVE_KINDS
+
+
+def _op_float(
+    item: dict[str, Any],
+    field: str,
+    path: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """Coerce ``item[field]`` with operation-scoped error context."""
+    try:
+        return _coerce_float(item, field, minimum=minimum, maximum=maximum)
+    except SpecificationError as exc:
+        raise SpecificationError(f"{path}.{field}: {exc}") from exc
+
+
+def _op_optional_float(
+    item: dict[str, Any],
+    field: str,
+    path: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    """Coerce an optional operation dimension; ``None``/missing stays ``None``."""
+    value = item.get(field)
+    if value is None:
+        return None
+    return _op_float(item, field, path, minimum=minimum, maximum=maximum)
+
+
+def _coerce_vec3(
+    item: dict[str, Any],
+    field: str,
+    path: str,
+    *,
+    limit: float,
+    require_nonzero: bool = False,
+) -> tuple[float, float, float]:
+    """Parse ``item[field]`` as a bounded ``{x, y, z}`` vector."""
+    value = item.get(field)
+    if value is None:
+        raise SpecificationError(f"{path}.{field}: missing required vector")
+    if not isinstance(value, dict):
+        raise SpecificationError(f"{path}.{field}: must be an object with x, y, z")
+    components = tuple(
+        _op_float(value, axis, f"{path}.{field}", minimum=-limit, maximum=limit)
+        for axis in ("x", "y", "z")
+    )
+    if require_nonzero and all(component == 0.0 for component in components):
+        raise SpecificationError(f"{path}.{field}: must not be a zero-length vector")
+    return components  # type: ignore[return-value]
+
+
+def _sanitize_label(value: Any) -> str:
+    text = str(value) if value is not None else ""
+    text = text.replace("\r", " ").replace("\n", " ")
+    return _RE_LABEL.sub("", text).strip()[:MAX_OPERATION_LABEL]
+
+
+def _parse_operation(item: Any, index: int) -> RenderOperation:
+    path = f"operations[{index}]"
+    if not isinstance(item, dict):
+        raise SpecificationError(f"{path} must be an object")
+
+    kind_value = item.get("kind")
+    if kind_value is None:
+        raise SpecificationError(f"Missing required field '{path}.kind'")
+    kind = str(kind_value).strip().lower()
+    if kind not in OPERATION_KINDS:
+        raise SpecificationError(
+            f"{path}.kind: must be one of {list(OPERATION_KINDS)} (got {kind_value!r})"
+        )
+
+    origin = _coerce_vec3(item, "origin", path, limit=MAX_OPERATION_COORD_MM)
+    normal = _coerce_vec3(
+        item, "normal", path, limit=MAX_OPERATION_NORMAL_COMPONENT, require_nonzero=True
+    )
+    depth = _op_float(item, "depth", path, minimum=MIN_OPERATION_MM, maximum=MAX_OPERATION_DEPTH_MM)
+    width = _op_optional_float(
+        item, "width", path, minimum=MIN_OPERATION_MM, maximum=MAX_OPERATION_SIZE_MM
+    )
+    height = _op_optional_float(
+        item, "height", path, minimum=MIN_OPERATION_MM, maximum=MAX_OPERATION_SIZE_MM
+    )
+    diameter = _op_optional_float(
+        item, "diameter", path, minimum=MIN_OPERATION_MM, maximum=MAX_OPERATION_DIAMETER_MM
+    )
+    length = _op_optional_float(
+        item, "length", path, minimum=MIN_OPERATION_MM, maximum=MAX_OPERATION_SIZE_MM
+    )
+
+    if kind in ("hole", "boss") and diameter is None:
+        raise SpecificationError(f"{path}.diameter is required for a '{kind}' operation")
+    if kind in _RECTANGULAR_KINDS:
+        if width is None:
+            raise SpecificationError(f"{path}.width is required for a '{kind}' operation")
+        if height is None:
+            raise SpecificationError(f"{path}.height is required for a '{kind}' operation")
+    if kind == "slot":
+        if diameter is None:
+            raise SpecificationError(f"{path}.diameter is required for a 'slot' operation")
+        if length is None:
+            raise SpecificationError(f"{path}.length is required for a 'slot' operation")
+
+    return RenderOperation(
+        kind=kind,
+        origin=origin,
+        normal=normal,
+        depth=depth,
+        width=width,
+        height=height,
+        diameter=diameter,
+        length=length,
+        label=_sanitize_label(item.get("label", "")),
+    )
+
+
+def parse_operations(specification: dict[str, Any] | None) -> list[RenderOperation]:
+    """Validate ``specification['operations']`` and return bounded features.
+
+    Missing/``None``/empty ``operations`` yields ``[]`` (the base part alone).
+    Malformed entries, a zero-length ``normal`` and out-of-bounds numbers all
+    raise :class:`SpecificationError`, which ``validate()`` surfaces as blocking
+    problems. The LLM never supplies OpenSCAD code: only these coerced numbers
+    reach the template.
+    """
+    spec: dict[str, Any] = specification if isinstance(specification, dict) else {}
+    raw = spec.get("operations")
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise SpecificationError("Field 'operations' must be a list")
+    if len(raw) > MAX_OPERATIONS:
+        raise SpecificationError(
+            f"Field 'operations' must have at most {MAX_OPERATIONS} entries (got {len(raw)})"
+        )
+    return [_parse_operation(item, index) for index, item in enumerate(raw)]
+
+
+# ---------------------------------------------------------------------------
 # Template
 # ---------------------------------------------------------------------------
 
@@ -366,10 +562,13 @@ module holder() {
         device_slot();
     }
 }
-
-holder();
 """
 )
+
+#: Top-level call for the base part. Kept out of the template so the operations
+#: block can wrap ``holder();`` in ``difference(){ union(){ holder(); ... } ... }``
+#: while the no-operation render stays byte-for-byte identical to before.
+_HOLDER_CALL = "holder();\n"
 
 
 def _num(value: float) -> str:
@@ -380,9 +579,17 @@ def _num(value: float) -> str:
     return text + "0" if text.endswith(".") else text
 
 
-def render_scad(parameters: HolderParameters) -> str:
-    """Render the self-contained OpenSCAD template for validated parameters."""
-    return _SCAD_TEMPLATE.substitute(
+def render_scad(
+    parameters: HolderParameters, operations: Sequence[RenderOperation] | None = None
+) -> str:
+    """Render the self-contained OpenSCAD template for validated parameters.
+
+    Without operations the output is byte-for-byte the base part. With features
+    the holder is wrapped as
+    ``difference() { union() { holder(); <adds> } <subs> }`` so subtractive
+    operations are cut from both the base and any added bosses.
+    """
+    rendered = _SCAD_TEMPLATE.substitute(
         object_name=parameters.object_name,
         width=_num(parameters.width),
         height=_num(parameters.height),
@@ -393,6 +600,140 @@ def render_scad(parameters: HolderParameters) -> str:
         hole_d=_num(parameters.hole_diameter),
         hole_count=str(parameters.hole_count),
     )
+    features = list(operations or [])
+    if not features:
+        # No operations: preserve the historical render exactly.
+        return rendered + "\n" + _HOLDER_CALL
+    return rendered + "\n" + render_operations(features) + "\n"
+
+
+#: Extent the local cutters overshoot their surface so booleans are robust.
+_MARGIN = 2.0
+
+
+def _normalize(vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    x, y, z = vector
+    length = math.sqrt(x * x + y * y + z * z)
+    if length < 1e-9:
+        raise SpecificationError("Operation normal must not be a zero-length vector")
+    return (x / length, y / length, z / length)
+
+
+def _cross(
+    a: tuple[float, float, float], b: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def _local_frame(
+    origin: tuple[float, float, float], normal: tuple[float, float, float]
+) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    """Return the orthonormal ``(u, v, n)`` frame for an operation.
+
+    ``n`` is the (normalised) operation axis; ``u``/``v`` span the plane. The
+    reference axis switches away from ``z`` when the normal is nearly parallel
+    to it, so ``cross(ref, n)`` can never be degenerate.
+    """
+    n = _normalize(normal)
+    reference = (0.0, 0.0, 1.0) if abs(n[2]) < 0.9 else (1.0, 0.0, 0.0)
+    u = _normalize(_cross(reference, n))
+    v = _cross(n, u)
+    return u, v, n
+
+
+def _matrix_literal(
+    u: tuple[float, float, float],
+    v: tuple[float, float, float],
+    n: tuple[float, float, float],
+    origin: tuple[float, float, float],
+) -> str:
+    """Format an OpenSCAD ``multmatrix`` value.
+
+    OpenSCAD matrices are row-major with the translation in the 4th column, so
+    the columns hold the local frame axes ``u``/``v``/``n`` plus ``origin``.
+    """
+    rows = (
+        (u[0], v[0], n[0], origin[0]),
+        (u[1], v[1], n[1], origin[1]),
+        (u[2], v[2], n[2], origin[2]),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    body = ", ".join("[" + ", ".join(_num(value) for value in row) + "]" for row in rows)
+    return "[" + body + "]"
+
+
+def _required(value: float | None, operation: RenderOperation, field: str) -> float:
+    if value is None:
+        raise SpecificationError(
+            f"Operation '{operation.kind}' is missing required field '{field}'"
+        )
+    return value
+
+
+def _local_geometry(operation: RenderOperation) -> str:
+    """OpenSCAD statement for ``operation`` expressed in its own local frame."""
+    if operation.kind == "hole":
+        diameter = _required(operation.diameter, operation, "diameter")
+        return (
+            f"translate([0.0, 0.0, {_num(-_MARGIN)}]) "
+            f"cylinder(d={_num(diameter)}, h={_num(operation.depth + 2 * _MARGIN)});"
+        )
+    if operation.kind == "boss":
+        diameter = _required(operation.diameter, operation, "diameter")
+        return f"cylinder(d={_num(diameter)}, h={_num(operation.depth)});"
+    if operation.kind in ("pocket", "cut"):
+        width = _required(operation.width, operation, "width")
+        height = _required(operation.height, operation, "height")
+        return (
+            f"translate([{_num(-width / 2)}, {_num(-height / 2)}, {_num(-_MARGIN)}]) "
+            f"cube([{_num(width)}, {_num(height)}, {_num(operation.depth + 2 * _MARGIN)}]);"
+        )
+    if operation.kind == "add":
+        width = _required(operation.width, operation, "width")
+        height = _required(operation.height, operation, "height")
+        return (
+            f"translate([{_num(-width / 2)}, {_num(-height / 2)}, 0.0]) "
+            f"cube([{_num(width)}, {_num(height)}, {_num(operation.depth)}]);"
+        )
+    # slot: a capsule / stadium hull of two end cylinders along the local x axis.
+    diameter = _required(operation.diameter, operation, "diameter")
+    length = _required(operation.length, operation, "length")
+    cutter_height = _num(operation.depth + 2 * _MARGIN)
+    return (
+        "hull() { "
+        f"translate([{_num(-length / 2)}, 0.0, {_num(-_MARGIN)}]) "
+        f"cylinder(d={_num(diameter)}, h={cutter_height}); "
+        f"translate([{_num(length / 2)}, 0.0, {_num(-_MARGIN)}]) "
+        f"cylinder(d={_num(diameter)}, h={cutter_height}); "
+        "}"
+    )
+
+
+def _render_operation(operation: RenderOperation, indent: str) -> str:
+    u, v, n = _local_frame(operation.origin, operation.normal)
+    matrix = _matrix_literal(u, v, n, operation.origin)
+    comment = f"{indent}// operation: {operation.kind}"
+    if operation.label:
+        comment += f" -- {operation.label}"
+    return f"{comment}\n{indent}multmatrix({matrix}) {_local_geometry(operation)}"
+
+
+def render_operations(operations: Sequence[RenderOperation]) -> str:
+    """Render the ``difference``/``union`` block combining base + features."""
+    adds = [operation for operation in operations if operation.is_additive]
+    subs = [operation for operation in operations if operation.kind in _SUBTRACTIVE_KINDS]
+    lines = ["difference() {", "    union() {", "        holder();"]
+    for operation in adds:
+        lines.append(_render_operation(operation, "        "))
+    lines.append("    }")
+    for operation in subs:
+        lines.append(_render_operation(operation, "    "))
+    lines.append("}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +889,9 @@ class OpenSCADBackend(CADBackend):
 
     def generate(self, specification: dict[str, Any]) -> str:
         """Validate ``specification`` and render self-contained OpenSCAD source."""
-        return render_scad(build_parameters(specification))
+        parameters = build_parameters(specification)
+        operations = parse_operations(specification)
+        return render_scad(parameters, operations)
 
     def validate(self, model: GeneratedModel | str) -> list[str]:
         """Return blocking safety/parameter problems (empty list == valid)."""
@@ -567,6 +910,10 @@ class OpenSCADBackend(CADBackend):
                     problems.append(
                         f"mounting hole diameter {parameters.hole_diameter}mm is too small"
                     )
+            try:
+                parse_operations(model.specification)
+            except SpecificationError as exc:
+                problems.append(str(exc))
         return problems
 
     def export(self, model: GeneratedModel | str, format: str) -> bytes:

@@ -18,8 +18,12 @@
                 <button type="button" class="btn" @click="loadAll()" :disabled="loading">Frissítés</button>
             </div>
         </header>
-        <p class="error-box" x-show="forbidden" x-cloak>Nincs jogosultságod az Ollama kezeléséhez (csak adminisztrátoroknak).</p>
-        <p class="warning-box" x-show="serverError" x-cloak>Az Ollama nem érhető el: <span x-text="serverError"></span></p>
+        <p class="error-box"
+           x-show="forbidden"
+           x-cloak>Nincs jogosultságod az Ollama kezeléséhez (csak adminisztrátoroknak).</p>
+        <p class="warning-box"
+           x-show="serverError"
+           x-cloak>Az Ollama nem érhető el: <span x-text="serverError"></span></p>
         <p class="error-box" x-show="error && !forbidden" x-cloak x-text="error"></p>
         <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
         <p class="muted" x-show="loading">Betöltés…</p>
@@ -81,7 +85,9 @@
                                                         class="btn btn-small btn-danger"
                                                         @click="deleteModel(model)"
                                                         :disabled="busyModel === model.name">Igen, törlés</button>
-                                                <button type="button" class="btn btn-small" @click="confirmDelete = ''">Mégse</button>
+                                                <button type="button"
+                                                        class="btn btn-small"
+                                                        @click="confirmDelete = ''">Mégse</button>
                                             </span>
                                         </template>
                                         <template x-if="confirmDelete !== model.name">
@@ -132,7 +138,9 @@
         </div>
     </div>
     <div data-ollama-advisor x-data="ollamaAdvisor" x-cloak>
-        <p class="error-box" x-show="forbidden" x-cloak>Nincs jogosultságod a modell ajánlóhoz (csak adminisztrátoroknak).</p>
+        <p class="error-box"
+           x-show="forbidden"
+           x-cloak>Nincs jogosultságod a modell ajánlóhoz (csak adminisztrátoroknak).</p>
         <section class="panel" x-show="!forbidden">
             <h2>Modell ajánló</h2>
             <p class="muted">Add meg a GPU VRAM méretét. A becslés a modellsúlyokból, a KV-cache-ből és egy runtime pufferből számol (konzervatív).</p>
@@ -200,7 +208,11 @@
                                           :class="model.fits ? 'is-ok' : 'is-danger'"
                                           x-text="model.fits ? 'elfér' : 'nem fér el'"></span>
                                 </td>
-                                <td class="muted" x-text="model.category"></td>
+                                <td>
+                                    <template x-for="cat in model.categories" :key="cat">
+                                        <span class="badge" x-text="cat"></span>
+                                    </template>
+                                </td>
                                 <td class="muted" x-text="model.params_b ? model.params_b + 'B' : '—'"></td>
                                 <td x-text="model.suggested_quant || '—'"></td>
                                 <td x-text="model.estimated_gb !== null && model.estimated_gb !== undefined ? '~' + model.estimated_gb + ' GB' : '—'">

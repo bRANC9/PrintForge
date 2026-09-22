@@ -15,12 +15,15 @@
         workspaces: () => `${API_BASE}/workspaces/`,
         projects: () => `${API_BASE}/projects/`,
         project: (projectId) => `${API_BASE}/projects/${encodeURIComponent(projectId)}/`,
+        projectPrint: (projectId) => `${API_BASE}/projects/${encodeURIComponent(projectId)}/print/`,
         versions: (projectId) => `${API_BASE}/projects/${encodeURIComponent(projectId)}/versions/`,
         versionStatus: (versionId) => `${API_BASE}/versions/${encodeURIComponent(versionId)}/status/`,
         artifact: (versionId, kind) =>
             `${API_BASE}/versions/${encodeURIComponent(versionId)}/artifact/${encodeURIComponent(kind)}/`,
         // Phase 7 (multi-user): print history + notifications.
         printJobs: () => `${API_BASE}/print-jobs/`,
+        // AI workflow runs (terv.md 6.): the generate path polls these.
+        agentRuns: () => `${API_BASE}/agent-runs/`,
         printJobStart: (jobId) => `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/start/`,
         printJobCancel: (jobId) => `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/cancel/`,
         printJobTransition: (jobId) =>
@@ -98,6 +101,30 @@
         return "";
     }
 
+    //: localStorage key holding the anonymous visitor id (download/print dedup).
+    const VISITOR_STORAGE_KEY = "printforge.visitor_id";
+
+    /**
+     * A stable, browser-local id used to count anonymous downloads/prints once
+     * per browser. Falls back to "" (count every request) when storage is
+     * unavailable (private mode, disabled cookies).
+     */
+    function visitorId() {
+        try {
+            let value = window.localStorage.getItem(VISITOR_STORAGE_KEY);
+            if (!value) {
+                value =
+                    window.crypto && window.crypto.randomUUID
+                        ? window.crypto.randomUUID()
+                        : `v-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                window.localStorage.setItem(VISITOR_STORAGE_KEY, value);
+            }
+            return value;
+        } catch (error) {
+            return "";
+        }
+    }
+
     function unwrapList(payload) {
         if (Array.isArray(payload)) return payload;
         if (payload && Array.isArray(payload.results)) return payload.results;
@@ -166,6 +193,8 @@
             credentials: "same-origin",
             headers: Object.assign({ Accept: "application/json" }, options.headers || {}),
         };
+        const visitor = visitorId();
+        if (visitor) config.headers["X-Visitor-Id"] = visitor;
         if (options.body !== undefined) {
             config.headers["Content-Type"] = "application/json";
             config.body = JSON.stringify(options.body);
@@ -195,6 +224,7 @@
         listProjects: async () => unwrapList(await request(endpoints.projects())),
         getProject: (projectId) => request(endpoints.project(projectId)),
         createProject: (payload) => request(endpoints.projects(), { method: "POST", body: payload }),
+        markPrinted: (projectId) => request(endpoints.projectPrint(projectId), { method: "POST" }),
         listWorkspaces: async () => unwrapList(await request(endpoints.workspaces())),
         createWorkspace: (name) => request(endpoints.workspaces(), { method: "POST", body: { name } }),
         listVersions: async (projectId) => unwrapList(await request(endpoints.versions(projectId))),
@@ -202,6 +232,7 @@
             request(endpoints.versions(projectId), { method: "POST", body: { prompt } }),
         versionStatus: (versionId) => request(endpoints.versionStatus(versionId)),
         listPrintJobs: async () => unwrapList(await request(endpoints.printJobs())),
+        listAgentRuns: async () => unwrapList(await request(endpoints.agentRuns())),
         startPrintJob: (jobId) => request(endpoints.printJobStart(jobId), { method: "POST" }),
         cancelPrintJob: (jobId) => request(endpoints.printJobCancel(jobId), { method: "POST" }),
         transitionPrintJob: (jobId, status) =>

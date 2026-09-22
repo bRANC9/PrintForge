@@ -400,6 +400,73 @@ ul.error-box {
     font-size: 0.8rem;
 }
 
+/* Annotation panel (visual editing) --------------------------------------- */
+
+.annotation-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0.9rem;
+    padding: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.annotation-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.annotation-head h3 {
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.annotation-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.annotation-meta {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.annotation-meta code {
+    overflow: hidden;
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.annotation-row .input {
+    min-width: 0;
+}
+
+.annotation-prompt {
+    width: 100%;
+    font: inherit;
+    resize: vertical;
+}
+
+.annotation-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+
 /* Notifications bell ------------------------------------------------------ */
 
 .visually-hidden {

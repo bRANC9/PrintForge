@@ -75,6 +75,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             "license",
             "tags",
             "download_count",
+            "print_count",
             "description_source",
             "tags_source",
             "created_by",
@@ -87,6 +88,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             "updated_at",
             "is_public",
             "download_count",
+            "print_count",
             "description_source",
             "tags_source",
         ]
@@ -200,6 +202,11 @@ class ModelVersionSerializer(serializers.ModelSerializer):
     """Read-only representation of a :class:`designs.ModelVersion`."""
 
     status = serializers.SerializerMethodField()
+    # The edit-chain parent is exposed as the raw id (docs/visual-editing.md
+    # 3.4); the FK relation itself is never writable through the API.
+    parent_version = serializers.IntegerField(
+        source="parent_version_id", read_only=True, allow_null=True
+    )
 
     class Meta:
         model = ModelVersion
@@ -210,6 +217,8 @@ class ModelVersionSerializer(serializers.ModelSerializer):
             "prompt",
             "specification_json",
             "validation_json",
+            "parent_version",
+            "annotations_json",
             "scad_file",
             "stl_file",
             "glb_file",
@@ -227,6 +236,8 @@ class ModelVersionSerializer(serializers.ModelSerializer):
             "prompt",
             "specification_json",
             "validation_json",
+            "parent_version",
+            "annotations_json",
             "scad_file",
             "stl_file",
             "glb_file",
@@ -240,6 +251,42 @@ class ModelVersionSerializer(serializers.ModelSerializer):
 
     def get_status(self, obj: ModelVersion) -> str:
         return (obj.validation_json or {}).get("status") or "pending"
+
+
+class AnnotationSerializer(serializers.Serializer):
+    """One visual prompt annotation (docs/visual-editing.md 2., 3.4).
+
+    Coordinates are mm in the original STL / OpenSCAD world space. The service
+    layer (and, behind it, the LLM) only trusts the summarised ``region``, never
+    the raw triangle list, but the payload shape is still validated here.
+    """
+
+    id = serializers.CharField(required=False, allow_blank=True, default="")
+    kind = serializers.ChoiceField(choices=["point", "region"])
+    point = serializers.ListField(
+        child=serializers.FloatField(),
+        min_length=3,
+        max_length=3,
+    )
+    normal = serializers.ListField(
+        child=serializers.FloatField(),
+        min_length=3,
+        max_length=3,
+    )
+    faces = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        default=list,
+    )
+    region = serializers.DictField(required=False, default=dict)
+    instruction = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class AnnotationEditSerializer(serializers.Serializer):
+    """Write payload for ``POST /api/v1/versions/{id}/annotations/``."""
+
+    prompt = serializers.CharField(max_length=2000)
+    annotations = AnnotationSerializer(many=True, allow_empty=False)
 
 
 class VersionCreateSerializer(serializers.Serializer):

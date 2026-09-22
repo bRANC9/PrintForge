@@ -8,6 +8,7 @@ from django.test import override_settings
 from rest_framework.test import APIClient
 
 from agents.models import AgentRun
+from agents.tasks import run_agent_workflow
 from designs.services import create_next_version
 from designs.tasks import render_model_stl
 from files.services import LocalStorage
@@ -39,9 +40,18 @@ def project(user):
 
 @pytest.fixture(autouse=True)
 def no_broker(monkeypatch):
-    """Never talk to a real Celery broker during these tests."""
-    calls: list[int] = []
-    monkeypatch.setattr(render_model_stl, "delay", lambda pk: calls.append(pk))
+    """Never talk to a real Celery broker during these tests.
+
+    Records both enqueue paths: ``render`` (manual specification) and ``agent``
+    (prompt-only AI workflow).
+    """
+    calls: dict[str, list] = {"render": [], "agent": []}
+    monkeypatch.setattr(render_model_stl, "delay", lambda pk: calls["render"].append(pk))
+    monkeypatch.setattr(
+        run_agent_workflow,
+        "delay",
+        lambda *args, **kwargs: calls["agent"].append((args, kwargs)),
+    )
     return calls
 
 
@@ -68,10 +78,10 @@ def test_versions_are_listed_newest_first(client, project, user):
     assert body[0]["prompt"] == "v2"
 
 
-def test_create_version_enqueues_and_returns_queued(client, project, no_broker):
+def test_create_version_with_specification_renders_directly(client, project, no_broker):
     response = client.post(
         f"/api/v1/projects/{project.pk}/versions/",
-        {"prompt": "make it"},
+        {"prompt": "make it", "specification_json": {"object": "cube"}},
         format="json",
     )
 
@@ -80,10 +90,35 @@ def test_create_version_enqueues_and_returns_queued(client, project, no_broker):
     assert body["version"] == 1
     assert body["prompt"] == "make it"
     assert body["created_by"] is not None
-    assert no_broker == [body["id"]]
+    assert body["specification_json"] == {"object": "cube"}
+    assert no_broker["render"] == [body["id"]]
+    assert no_broker["agent"] == []
 
     status_response = client.get(f"/api/v1/versions/{body['id']}/status/")
     assert status_response.json() == {"status": "queued", "stage": "queued", "errors": []}
+
+
+def test_prompt_only_version_enqueues_the_agent(client, project, user, no_broker):
+    response = client.post(
+        f"/api/v1/projects/{project.pk}/versions/",
+        {"prompt": "make it"},
+        format="json",
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "queued", "mode": "agent"}
+    # No version is created here: the agent creates it when it finishes.
+    assert not project.versions.exists()
+    assert no_broker["render"] == []
+    assert no_broker["agent"] == [
+        (
+            (project.pk, "make it", user.pk),
+            {
+                "reference_image_name": "",
+                "reference_note": "",
+            },
+        )
+    ]
 
 
 def test_create_version_requires_authentication(project):
@@ -94,10 +129,10 @@ def test_create_version_requires_authentication(project):
 
 
 def test_create_version_returns_503_when_broker_is_down(client, project, monkeypatch):
-    def boom(pk):
+    def boom(*args, **kwargs):
         raise RuntimeError("redis is down")
 
-    monkeypatch.setattr(render_model_stl, "delay", boom)
+    monkeypatch.setattr(run_agent_workflow, "delay", boom)
 
     response = client.post(
         f"/api/v1/projects/{project.pk}/versions/",
@@ -107,9 +142,7 @@ def test_create_version_returns_503_when_broker_is_down(client, project, monkeyp
 
     assert response.status_code == 503
     assert "queue" in response.json()["detail"].lower()
-    version = project.versions.get()
-    assert version.validation_json["status"] == "failed"
-    assert version.validation_json["stage"] == "enqueue"
+    assert not project.versions.exists()
 
 
 def test_version_detail_exposes_specification_and_validation(client, project, user):

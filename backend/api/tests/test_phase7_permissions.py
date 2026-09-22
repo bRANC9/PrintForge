@@ -8,6 +8,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
+from agents.tasks import run_agent_workflow
 from designs.services import create_next_version
 from designs.tasks import render_model_stl
 from notifications.services import mark_all_read, mark_read, notify, unread_count
@@ -141,6 +142,15 @@ def test_viewer_can_read_but_not_write(workspace, project, version):
 
 def test_member_can_create_projects_and_versions(workspace, monkeypatch):
     monkeypatch.setattr(render_model_stl, "delay", lambda pk: None)
+    enqueued: list[tuple] = []
+
+    def record(*args, **kwargs):
+        enqueued.append((args, kwargs))
+
+    # A prompt-only version now goes through the AI agent workflow (202); the
+    # agent task creates the version, so record its enqueue instead of the
+    # synchronous render.
+    monkeypatch.setattr(run_agent_workflow, "delay", record)
     member = make_user("member")
     add_member(workspace=workspace, user=member, role=WorkspaceRole.MEMBER)
     client = auth(member)
@@ -155,8 +165,12 @@ def test_member_can_create_projects_and_versions(workspace, monkeypatch):
         {"prompt": "make it"},
         format="json",
     )
-    assert version.status_code == 201
-    assert version.json()["created_by"] == member.pk
+    assert version.status_code == 202, version.content
+    assert version.json() == {"status": "queued", "mode": "agent"}
+
+    ((args, kwargs),) = enqueued
+    assert args == (created.json()["id"], "make it", member.pk)
+    assert kwargs == {"reference_image_name": "", "reference_note": ""}
 
 
 def test_only_admin_can_update_a_workspace(workspace):

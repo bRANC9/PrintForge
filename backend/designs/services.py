@@ -24,6 +24,7 @@ __all__ = [
     "ARTIFACT_KINDS",
     "RenderEnqueueError",
     "artifact_path",
+    "create_annotation_edit",
     "create_next_version",
     "latest_version",
     "read_artifact",
@@ -77,6 +78,43 @@ def create_next_version(
         reference_note=reference_note or "",
         reference_image=reference_image,
     )
+
+
+def create_annotation_edit(
+    *,
+    base_version: ModelVersion,
+    prompt: str,
+    annotations: list[dict[str, Any]],
+    created_by: User | None = None,
+) -> None:
+    """Enqueue the visual-prompt edit workflow for ``base_version``.
+
+    Unlike :func:`create_next_version`, this does **not** create a
+    ``ModelVersion``: the agent task creates the derived version and records
+    ``parent_version`` / ``annotations_json`` on it itself, avoiding a duplicate
+    placeholder row (docs/visual-editing.md 3.4). The UI polls the project's
+    version list and waits for the version whose ``parent_version`` is the base.
+
+    Raises :class:`RenderEnqueueError` when the Celery broker is unavailable so
+    the API can translate it into a retryable ``503``.
+    """
+    # Imported lazily: ``agents.tasks`` imports ``designs.services`` at module
+    # load time, so a top-level import would create an import cycle.
+    from agents.tasks import run_agent_workflow
+
+    try:
+        run_agent_workflow.delay(
+            project_id=base_version.project_id,
+            prompt=prompt,
+            user_id=created_by.pk if created_by else None,
+            base_version_id=base_version.pk,
+            annotations=list(annotations),
+        )
+    except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways
+        message = (
+            "The edit queue is unavailable, the model could not be queued. Please try again later."
+        )
+        raise RenderEnqueueError(message) from exc
 
 
 def latest_version(project: Project) -> ModelVersion | None:

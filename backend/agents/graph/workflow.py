@@ -2,22 +2,23 @@
 
 Graph shape::
 
-    START
-      |
-      v
-    planner --(needs_research)--> research
-      |                               |
-      | (no research)                 |
-      +-------------------------------+
-      |
-      v
-     cad <-----------------+
-      |                    |
-      v                    | invalid (attempt < max)
-   validate ---------------+
-      |
-      +-- valid --> END
-      +-- invalid after max attempts --> END (status=failed)
+    START --(route_entry)--> planner --(needs_research)--> research
+                             |                               |
+                             | (no research)                 |
+                             +-------------------------------+
+                             |
+                             v
+                            cad <-----------------+
+                             |                    |
+                             v                    | invalid (attempt < max)
+                          validate ---------------+
+                             |
+                             +-- valid --> END
+                             +-- invalid after max attempts --> END (status=failed)
+
+    In edit mode (non-empty annotations) ``START`` routes to ``editor`` instead
+    of ``planner``; the editor returns the same partial state, so the rest of
+    the graph is unchanged (docs/visual-editing.md 3.5).
 
 Every node is built by a factory that receives its dependencies (``LLMProvider``,
 ``CADBackend``, ``retrieve``) so the whole graph is mockable: tests inject fakes
@@ -38,12 +39,13 @@ from agents.rag import retrieve
 from designs.cad.base import CADBackend
 
 from .cad import SpecReviser, make_cad_node
+from .editor import make_editor_node
 from .planner import make_planner_node
 from .research import make_research_node
 from .state import WorkflowState
 from .validator import make_validate_node
 
-__all__ = ["WorkflowDeps", "build_workflow", "run_workflow"]
+__all__ = ["WorkflowDeps", "build_workflow", "route_entry", "run_workflow"]
 
 
 def _default_max_attempts() -> int:
@@ -74,6 +76,16 @@ class WorkflowDeps:
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
+
+
+def route_entry(state: WorkflowState) -> str:
+    """Pick the first agent: ``editor`` for a visual-prompt edit, else ``planner``.
+
+    A run enters edit mode only when the annotation payload is non-empty
+    (``edit_mode``), so a fresh generation and all pre-existing callers keep the
+    exact ``START -> planner`` behaviour (docs/visual-editing.md 3.5).
+    """
+    return "editor" if state.get("edit_mode") else "planner"
 
 
 def route_after_planner(state: WorkflowState) -> str:
@@ -118,6 +130,10 @@ def build_workflow(deps: WorkflowDeps):
         make_planner_node(provider=deps.provider, max_attempts=deps.max_attempts),
     )
     graph.add_node(
+        "editor",
+        make_editor_node(provider=deps.provider, max_attempts=deps.max_attempts),
+    )
+    graph.add_node(
         "research",
         make_research_node(
             provider=deps.provider,
@@ -134,9 +150,20 @@ def build_workflow(deps: WorkflowDeps):
         make_validate_node(cad_backend=deps.cad_backend),
     )
 
-    graph.add_edge(START, "planner")
+    graph.add_conditional_edges(
+        START,
+        route_entry,
+        {"planner": "planner", "editor": "editor"},
+    )
     graph.add_conditional_edges(
         "planner",
+        route_after_planner,
+        {"research": "research", "cad": "cad", END: END},
+    )
+    # The Editor returns the same partial state as the Planner, so it reuses the
+    # same routing: [research] -> cad -> validate.
+    graph.add_conditional_edges(
+        "editor",
         route_after_planner,
         {"research": "research", "cad": "cad", END: END},
     )
@@ -166,6 +193,8 @@ def run_workflow(
     company_id: str | None = None,
     reference_image: bytes | None = None,
     reference_image_note: str = "",
+    base_specification: dict[str, Any] | None = None,
+    annotations: list[dict[str, Any]] | None = None,
 ) -> WorkflowState:
     """Run the prompt -> specification -> SCAD -> STL workflow once.
 
@@ -174,15 +203,23 @@ def run_workflow(
         deps: Injected dependencies (provider/CAD backend/RAG).
         company_id: Optional workspace scope for RAG retrieval.
         reference_image: Optional reference photo bytes (terv.md 27. fejezet).
-            Kept in-process only and offered to the Planner/Research LLM calls
-            when the provider supports vision; absent -> unchanged behaviour.
+            Kept in-process only and offered to the Editor/Planner/Research LLM
+            calls when the provider supports vision; absent -> unchanged
+            behaviour.
         reference_image_note: Optional free-text note for the reference photo.
+        base_specification: Specification of the version being edited
+            (docs/visual-editing.md 3.5); empty/absent for a fresh generation.
+        annotations: Visual-prompt annotation payload. A non-empty list switches
+            the graph into edit mode (``START -> editor``); ``None``/empty keeps
+            ``START -> planner``.
 
     Returns the final state. A failed run has ``status == "failed"`` and a
     structured ``error`` JSON string; it never raises for a workflow-level
     failure (only programming/DB errors propagate).
     """
     compiled = build_workflow(deps)
+    base_specification = dict(base_specification or {})
+    annotations = list(annotations or [])
     initial: WorkflowState = {
         "prompt": prompt,
         "company_id": company_id,
@@ -190,6 +227,11 @@ def run_workflow(
         "reference_image_note": reference_image_note or "",
         "reference_image_used": False,
         "reference_image_warning": None,
+        # Visual-prompt edit mode (docs/visual-editing.md 3.5): the annotations
+        # decide the entry route; the base spec is what the Editor updates.
+        "edit_mode": bool(annotations),
+        "base_specification": base_specification,
+        "annotations": annotations,
         "attempt": 0,
         "max_attempts": deps.max_attempts,
         "research_sources": [],

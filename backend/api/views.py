@@ -10,6 +10,7 @@ Object-level roles are enforced by :class:`api.permissions.WorkspaceScopePermiss
 """
 
 import hashlib
+import uuid
 from http import HTTPStatus
 
 from django.conf import settings
@@ -23,6 +24,7 @@ from rest_framework.views import APIView
 
 from agents.models import AgentRun
 from agents.services import runs_accessible_to
+from agents.tasks import run_agent_workflow
 from configuration.models import OllamaPull
 from configuration.services import (
     OllamaError,
@@ -46,6 +48,7 @@ from designs.models import ModelVersion
 from designs.services import (
     ARTIFACT_CONTENT_TYPES,
     RenderEnqueueError,
+    create_annotation_edit,
     create_next_version,
     read_artifact,
     start_render,
@@ -53,6 +56,7 @@ from designs.services import (
     versions_accessible_to,
     versions_for_project,
 )
+from files.services import get_storage
 from notifications.models import Notification
 from notifications.services import (
     mark_all_read,
@@ -81,6 +85,7 @@ from projects.services import (
     create_project,
     create_share,
     generate_project_description,
+    mark_project_printed,
     project_download_url,
     project_rating_summary,
     publish_project,
@@ -100,6 +105,7 @@ from workspaces.services import create_workspace, workspaces_for_user
 from .permissions import IsStaff, WorkspaceScopePermission
 from .serializers import (
     AgentRunSerializer,
+    AnnotationEditSerializer,
     BuildPlateSerializer,
     CommunityProjectSerializer,
     ModelVersionSerializer,
@@ -140,6 +146,38 @@ def _hash_client_ip(request) -> str:
     if not ip:
         return ""
     return hashlib.sha256(ip.encode("utf-8")).hexdigest()
+
+
+#: Browser-generated id used to de-duplicate anonymous downloads/prints. It is
+#: deliberately opaque and short-lived; the server never trusts it for anything
+#: beyond counting.
+_VISITOR_ID_MAX_LENGTH = 64
+
+
+def _visitor_id(request) -> str:
+    """Read the anonymous visitor id from the ``X-Visitor-Id`` header.
+
+    Missing or oversized values degrade to ``""`` (which means "count every
+    request" for anonymous callers).
+    """
+    value = (request.headers.get("X-Visitor-Id") or "").strip()
+    if not value or len(value) > _VISITOR_ID_MAX_LENGTH:
+        return ""
+    return value
+
+
+def _store_reference_upload(project, uploaded) -> str:
+    """Persist an uploaded reference photo and return its storage path.
+
+    The bytes are written before the agent task is enqueued, so the task can
+    read them from storage without a placeholder ``ModelVersion``. The path is
+    scoped per project and made unique so two uploads never collide.
+    """
+    name = (getattr(uploaded, "name", "") or "reference").rsplit("/", 1)[-1]
+    key = f"reference_uploads/{project.pk}/{uuid.uuid4().hex}_{name}"
+    uploaded.seek(0)
+    get_storage().write_bytes(key, uploaded.read())
+    return key
 
 
 class WorkspaceViewSet(viewsets.ModelViewSet):
@@ -209,7 +247,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get", "post"], url_path="versions")
     def versions(self, request, pk=None):
-        """List versions (newest first) or create the next one and render it."""
+        """List versions, or generate the next one.
+
+        A request with an explicit ``specification_json`` renders that
+        specification directly (advanced/manual). A prompt-only request (with an
+        optional reference photo) goes through the AI workflow instead: the
+        agent turns the prompt into a validated specification and creates the
+        version itself, so the response is ``202`` with no version id yet.
+        """
         project = self.get_object()
 
         if request.method == "GET":
@@ -218,13 +263,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         payload = VersionCreateSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+
+        if data.get("specification_json") is None:
+            return self._generate_with_agent(request, project, data)
+
         version = create_next_version(
             project=project,
-            prompt=payload.validated_data.get("prompt", ""),
-            specification=payload.validated_data.get("specification_json"),
+            prompt=data.get("prompt", ""),
+            specification=data.get("specification_json"),
             created_by=request.user,
-            reference_note=payload.validated_data.get("reference_note", ""),
-            reference_image=payload.validated_data.get("reference_image"),
+            reference_note=data.get("reference_note", ""),
+            reference_image=data.get("reference_image"),
         )
         try:
             start_render(version)
@@ -234,6 +284,35 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return Response(
             ModelVersionSerializer(version).data,
             status=HTTPStatus.CREATED,
+        )
+
+    def _generate_with_agent(self, request, project, data) -> Response:
+        """Enqueue the AI workflow for a prompt-only generation request."""
+        reference_image = data.get("reference_image")
+        reference_image_name = ""
+        if reference_image is not None:
+            reference_image_name = _store_reference_upload(project, reference_image)
+        try:
+            run_agent_workflow.delay(
+                project.pk,
+                data.get("prompt", ""),
+                request.user.pk,
+                reference_image_name=reference_image_name,
+                reference_note=data.get("reference_note", ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways
+            return Response(
+                {
+                    "detail": (
+                        "The generation queue is unavailable, the model could not be "
+                        f"queued. Please try again later. ({type(exc).__name__})"
+                    )
+                },
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        return Response(
+            {"status": "queued", "mode": "agent"},
+            status=HTTPStatus.ACCEPTED,
         )
 
     @action(detail=True, methods=["post"], url_path="publish")
@@ -265,19 +344,32 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 {"detail": "No STL artifact is available for this project."},
                 status=HTTPStatus.NOT_FOUND,
             )
-        download = record_download(
+        download, counted = record_download(
             project=project,
             model_version=model_version,
             user=request.user if request.user.is_authenticated else None,
             ip_hash=_hash_client_ip(request),
+            visitor_id=_visitor_id(request),
         )
         return Response(
             {
                 "url": url,
                 "download_id": download.pk,
+                "counted": counted,
                 "download_count": project.download_count,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="print")
+    def mark_printed(self, request, pk=None):
+        """Register „én is nyomtattam” (MEMBER+), deduped per user/visitor."""
+        project = self.get_object()
+        _print_row, counted = mark_project_printed(
+            project,
+            user=request.user if request.user.is_authenticated else None,
+            visitor_id=_visitor_id(request),
+        )
+        return Response({"counted": counted, "print_count": project.print_count})
 
     @action(detail=True, methods=["get", "post", "delete"], url_path="rate")
     def rate(self, request, pk=None):
@@ -438,6 +530,32 @@ class ModelVersionViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     def status(self, request, pk=None):
         version = self.get_object()
         return Response(version_status(version))
+
+    @action(detail=True, methods=["post"], url_path="annotations")
+    def annotations(self, request, pk=None):
+        """Enqueue a visual-prompt edit of this version (MEMBER+).
+
+        The version is resolved through the workspace-scoped queryset (so a
+        foreign/nonexistent id 404s); the agent task creates the derived version,
+        hence the ``202`` with no new version id.
+        """
+        version = self.get_object()
+        payload = AnnotationEditSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            create_annotation_edit(
+                base_version=version,
+                prompt=payload.validated_data["prompt"],
+                annotations=payload.validated_data["annotations"],
+                created_by=request.user,
+            )
+        except RenderEnqueueError as exc:
+            # Broker down: 503 (retryable) instead of a 500.
+            return Response({"detail": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+        return Response(
+            {"queued": True, "parent_version": version.pk},
+            status=HTTPStatus.ACCEPTED,
+        )
 
     @action(detail=True, methods=["get"], url_path=r"artifact/(?P<kind>[^/.]+)")
     def artifact(self, request, pk=None, kind=None):

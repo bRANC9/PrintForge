@@ -28,6 +28,7 @@ from factories import (
 from rest_framework.test import APIClient
 
 from agents.services import start_run
+from agents.tasks import run_agent_workflow
 from designs.tasks import render_model_stl
 from files.services import LocalStorage
 from notifications.services import mark_all_read, mark_read, notify, unread_count
@@ -97,6 +98,15 @@ def test_viewer_can_read_but_cannot_write(workspace, project, version):
 
 def test_member_can_write_projects_but_not_manage_the_workspace(workspace, monkeypatch):
     monkeypatch.setattr(render_model_stl, "delay", lambda pk: None)
+    enqueued: list[tuple] = []
+
+    def record(*args, **kwargs):
+        enqueued.append((args, kwargs))
+
+    # A prompt-only version now goes through the AI agent workflow (202); the
+    # agent task creates the version, so record its enqueue instead of the
+    # synchronous render.
+    monkeypatch.setattr(run_agent_workflow, "delay", record)
     member = UserFactory()
     add_member(workspace=workspace, user=member, role=WorkspaceRole.MEMBER)
     client = auth(member)
@@ -112,7 +122,12 @@ def test_member_can_write_projects_but_not_manage_the_workspace(workspace, monke
         {"prompt": "make it"},
         format="json",
     )
-    assert version.status_code == 201, version.content
+    assert version.status_code == 202, version.content
+    assert version.json() == {"status": "queued", "mode": "agent"}
+
+    ((args, kwargs),) = enqueued
+    assert args == (created.json()["id"], "make it", member.id)
+    assert kwargs == {"reference_image_name": "", "reference_note": ""}
 
     # Workspace management is ADMIN+.
     assert (

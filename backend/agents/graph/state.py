@@ -45,6 +45,16 @@ class WorkflowState(TypedDict, total=False):
     #: Validated ``ModelSpecification`` as a plain dict (the only LLM<->CAD
     #: contract, terv.md 8. fejezet).
     specification: dict[str, Any]
+    #: True when the run is a visual-prompt edit (annotations present); START
+    #: routes to the Editor instead of the Planner (docs/visual-editing.md 3.5).
+    edit_mode: bool
+    #: Specification of the version being edited, as a plain validated dict; the
+    #: Editor keeps its non-edited values. Empty for a fresh generation.
+    base_specification: dict[str, Any]
+    #: Visual-prompt payload: one dict per user annotation (point/region + normal
+    #: + instruction, docs/visual-editing.md 2). Only structured JSON -- never
+    #: raw image bytes -- so it is safe to persist/audit.
+    annotations: list[dict[str, Any]]
     #: Whether the Planner asked for the Research agent.
     needs_research: bool
     #: Lookup query the Planner produced for the Research agent.
