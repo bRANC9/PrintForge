@@ -246,12 +246,36 @@ def test_json_schema_exposes_bounded_edit_operation():
     assert operation_schema["properties"]["depth"] == {
         "minimum": 0.4,
         "maximum": 200.0,
-        "description": "Cut depth / boss height in mm.",
+        "description": "Cut depth / boss height in mm; required for every operation.",
         "title": "Depth",
         "type": "number",
     }
     kinds = operation_schema["properties"]["kind"]["enum"]
     assert kinds == ["hole", "pocket", "boss", "slot", "cut", "add"]
+
+
+def test_json_schema_documents_per_kind_field_requirements():
+    """The schema the LLM sees must spell out which kinds need which fields.
+
+    Regression guard for the editor LLM emitting a ``slot`` operation without
+    ``diameter`` (the CAD parser then failed with "operations[0].diameter is
+    required for a 'slot' operation"): the requirement has to be explicit in
+    the structured-output schema, not only enforced downstream.
+    """
+    properties = ModelSpecification.to_json_schema()["$defs"]["EditOperation"]["properties"]
+    assert properties["diameter"]["description"] == (
+        "Required for kinds hole, boss and slot; ignored otherwise."
+    )
+    assert properties["length"]["description"] == ("Required for the slot kind; ignored otherwise.")
+    assert properties["width"]["description"] == (
+        "Required for kinds pocket, cut and add; ignored otherwise."
+    )
+    assert properties["height"]["description"] == (
+        "Required for kinds pocket, cut and add; ignored otherwise."
+    )
+    assert properties["depth"]["description"] == (
+        "Cut depth / boss height in mm; required for every operation."
+    )
 
 
 def test_example_helper_is_unchanged_by_operations_field():

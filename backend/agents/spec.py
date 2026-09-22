@@ -211,31 +211,31 @@ class EditOperation(BaseModel):
     depth: float = Field(
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_DEPTH_MM,
-        description="Cut depth / boss height in mm.",
+        description="Cut depth / boss height in mm; required for every operation.",
     )
     width: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_SIZE_MM,
-        description="Rectangular feature width in mm (pocket/cut/add).",
+        description="Required for kinds pocket, cut and add; ignored otherwise.",
     )
     height: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_SIZE_MM,
-        description="Rectangular feature height in mm (pocket/cut/add).",
+        description="Required for kinds pocket, cut and add; ignored otherwise.",
     )
     diameter: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_DIAMETER_MM,
-        description="Cylindrical feature diameter in mm (hole/boss/slot).",
+        description="Required for kinds hole, boss and slot; ignored otherwise.",
     )
     length: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_SIZE_MM,
-        description="Slot length in mm.",
+        description="Required for the slot kind; ignored otherwise.",
     )
     label: str = Field(
         default="",
