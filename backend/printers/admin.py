@@ -13,7 +13,16 @@ class PrinterAdmin(admin.ModelAdmin):
 
 @admin.register(PrintJob)
 class PrintJobAdmin(admin.ModelAdmin):
-    list_display = ("id", "project", "printer", "status", "priority", "created_at")
+    list_display = (
+        "id",
+        "project",
+        "model_version",
+        "build_plate",
+        "printer",
+        "status",
+        "priority",
+        "created_at",
+    )
     list_filter = ("status", "printer")
-    search_fields = ("project__name",)
+    search_fields = ("project__name", "build_plate__name")
     readonly_fields = ("created_at", "updated_at")

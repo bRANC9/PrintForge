@@ -27,11 +27,21 @@
         // Runtime settings (staff-only).
         settings: () => `${API_BASE}/settings/`,
         settingsTestOllama: () => `${API_BASE}/settings/test-ollama/`,
+        // Ollama model management (staff-only).
+        ollamaModels: () => `${API_BASE}/ollama/models/`,
+        ollamaModelDelete: (name) => `${API_BASE}/ollama/models/?name=${encodeURIComponent(name)}`,
+        ollamaModelUse: () => `${API_BASE}/ollama/models/use/`,
+        ollamaModelPull: () => `${API_BASE}/ollama/models/pull/`,
+        ollamaPulls: () => `${API_BASE}/ollama/pulls/`,
+        ollamaPull: (pullId) => `${API_BASE}/ollama/pulls/${encodeURIComponent(pullId)}/`,
     };
 
     const NOTIFICATION_POLL_MS = 60000;
+    const OLLAMA_POLL_MS = 2000;
     const POLL_INTERVAL_MS = 2000;
     const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+    const PULL_PENDING_STATUSES = ["PENDING", "RUNNING"];
+    const PULL_TERMINAL_STATUSES = ["DONE", "FAILED"];
 
     const PENDING_STATUSES = [
         "",
@@ -173,6 +183,13 @@
         getSettings: () => request(endpoints.settings()),
         updateSettings: (patch) => request(endpoints.settings(), { method: "PATCH", body: patch }),
         testOllama: () => request(endpoints.settingsTestOllama(), { method: "POST" }),
+        listOllamaModels: () => request(endpoints.ollamaModels()),
+        pullOllamaModel: (name) =>
+            request(endpoints.ollamaModelPull(), { method: "POST", body: { name } }),
+        listOllamaPulls: async () => unwrapList(await request(endpoints.ollamaPulls())),
+        deleteOllamaModel: (name) => request(endpoints.ollamaModelDelete(name), { method: "DELETE" }),
+        useOllamaModel: (name) =>
+            request(endpoints.ollamaModelUse(), { method: "POST", body: { name } }),
     };
 
     function statusKind(status) {
@@ -208,6 +225,37 @@
         return "is-muted";
     }
 
+    /** Byte count -> "1.4 GB". Returns "—" for missing/invalid values. */
+    function formatBytes(value) {
+        if (value === null || value === undefined || value === "") return "—";
+        let size = Number(value);
+        if (!Number.isFinite(size)) return "—";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let index = 0;
+        while (size >= 1024 && index < units.length - 1) {
+            size /= 1024;
+            index += 1;
+        }
+        return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+    }
+
+    /** Maps an OllamaPull status to a badge modifier class. */
+    function pullStatusClass(status) {
+        const state = String(status || "").toUpperCase();
+        if (state === "DONE") return "is-ok";
+        if (state === "FAILED") return "is-danger";
+        if (state === "RUNNING") return "is-active";
+        return "is-muted";
+    }
+
+    function isPullPending(status) {
+        return PULL_PENDING_STATUSES.includes(String(status || "").toUpperCase());
+    }
+
+    function isPullTerminal(status) {
+        return PULL_TERMINAL_STATUSES.includes(String(status || "").toUpperCase());
+    }
+
     window.PrintForge = {
         API_BASE,
         endpoints,
@@ -221,6 +269,10 @@
         labelFor,
         displayName,
         printStatusClass,
+        formatBytes,
+        pullStatusClass,
+        isPullPending,
+        isPullTerminal,
     };
 
     // ------------------------------------------------------------------
@@ -837,6 +889,249 @@
     }
 
     /**
+     * Ollama model management page (staff-only).
+     *
+     * GET    /api/v1/ollama/models/            -> {base_url, version, models, error}
+     * POST   /api/v1/ollama/models/pull/       -> 202 OllamaPull
+     * GET    /api/v1/ollama/pulls/             -> newest-first OllamaPull list
+     * DELETE /api/v1/ollama/models/?name=<m>   -> 204
+     * POST   /api/v1/ollama/models/use/        -> 200 (sets ollama_model)
+     */
+    function ollamaModelsComponent() {
+        return {
+            loading: true,
+            forbidden: false,
+            error: "",
+            notice: "",
+            baseUrl: "",
+            version: "",
+            serverError: "",
+            models: [],
+            activeModel: "",
+            pullName: "",
+            pulling: false,
+            pullError: "",
+            pulls: [],
+            busyModel: "",
+            confirmDelete: "",
+            pollTimer: null,
+
+            formatDate,
+            formatBytes,
+
+            async init() {
+                this.boundVisibility = () => this.handleVisibility();
+                document.addEventListener("visibilitychange", this.boundVisibility);
+                await this.loadAll();
+            },
+
+            destroy() {
+                this.stopPolling();
+                if (this.boundVisibility) {
+                    document.removeEventListener("visibilitychange", this.boundVisibility);
+                }
+            },
+
+            async loadAll() {
+                this.loading = true;
+                this.error = "";
+                this.forbidden = false;
+                try {
+                    await Promise.all([this.loadModels(), this.refreshPulls(), this.loadActiveModel()]);
+                } finally {
+                    this.loading = false;
+                }
+                this.ensurePolling();
+            },
+
+            async loadModels() {
+                try {
+                    const payload = (await api.listOllamaModels()) || {};
+                    this.baseUrl = payload.base_url || "";
+                    this.version = payload.version || "";
+                    this.serverError = payload.error || "";
+                    this.models = Array.isArray(payload.models) ? payload.models : [];
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.error = error.message || String(error);
+                }
+            },
+
+            /** The active model lives in the settings payload. */
+            async loadActiveModel() {
+                try {
+                    const payload = await api.getSettings();
+                    const effective = (payload && payload.effective) || {};
+                    this.activeModel = effective.ollama_model || "";
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                }
+            },
+
+            /**
+             * Refresh the pull list. Returns `false` when the request failed so
+             * callers never restart polling on top of a failing endpoint.
+             */
+            async refreshPulls() {
+                try {
+                    this.pulls = await api.listOllamaPulls();
+                    return true;
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    return false;
+                }
+            },
+
+            // ---------------------------------------------------------------
+            // Polling: every 2 s, only while a pull is pending, never hidden
+            // ---------------------------------------------------------------
+            get hasPendingPulls() {
+                return this.pulls.some((pull) => isPullPending(pull.status));
+            },
+
+            ensurePolling() {
+                if (this.hasPendingPulls && !document.hidden) this.startPolling();
+                else this.stopPolling();
+            },
+
+            startPolling() {
+                if (this.pollTimer) return;
+                this.pollTimer = window.setInterval(() => {
+                    if (document.hidden) {
+                        this.stopPolling();
+                        return;
+                    }
+                    this.refreshPulls().then((ok) => {
+                        // A failed poll stops polling instead of hammering the
+                        // endpoint; "Frissítés" restarts it on demand.
+                        if (ok) this.ensurePolling();
+                        else this.stopPolling();
+                    });
+                }, OLLAMA_POLL_MS);
+            },
+
+            stopPolling() {
+                if (!this.pollTimer) return;
+                window.clearInterval(this.pollTimer);
+                this.pollTimer = null;
+            },
+
+            handleVisibility() {
+                if (document.hidden) {
+                    this.stopPolling();
+                    return;
+                }
+                if (this.hasPendingPulls) {
+                    this.refreshPulls().then((ok) => {
+                        if (ok) this.ensurePolling();
+                    });
+                }
+            },
+
+            isPending(pull) {
+                return isPullPending(pull && pull.status);
+            },
+
+            pullStatusClass(status) {
+                return pullStatusClass(status);
+            },
+
+            progressPercent(pull) {
+                if (!pull) return 0;
+                if (typeof pull.progress_percent === "number") return pull.progress_percent;
+                const total = Number(pull.total_bytes);
+                const done = Number(pull.completed_bytes);
+                if (Number.isFinite(total) && total > 0 && Number.isFinite(done)) {
+                    return Math.min(100, Math.round((done / total) * 100));
+                }
+                return 0;
+            },
+
+            bytesLabel(pull) {
+                if (!pull) return "";
+                const done = formatBytes(pull.completed_bytes);
+                const total = formatBytes(pull.total_bytes);
+                if (done === "—" && total === "—") return "";
+                if (total === "—") return done;
+                return `${done} / ${total}`;
+            },
+
+            /** "llama · 30B · Q4_K_M" style summary for a model row. */
+            modelMeta(model) {
+                if (!model) return "—";
+                const parts = [model.family, model.parameter_size, model.quantization].filter(Boolean);
+                return parts.length ? parts.join(" · ") : "—";
+            },
+
+            dismiss(pull) {
+                this.pulls = this.pulls.filter((item) => item.id !== pull.id);
+            },
+
+            // ---------------------------------------------------------------
+            // Actions
+            // ---------------------------------------------------------------
+            async pull() {
+                const name = this.pullName.trim();
+                if (!name || this.pulling) return;
+                this.pulling = true;
+                this.pullError = "";
+                this.notice = "";
+                try {
+                    const created = await api.pullOllamaModel(name);
+                    this.pullName = "";
+                    if (created && created.id) {
+                        this.pulls = [created].concat(this.pulls.filter((item) => item.id !== created.id));
+                    }
+                    this.notice = `Letöltés elindítva: ${name}`;
+                    await this.refreshPulls();
+                    this.ensurePolling();
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.pullError = error.message || String(error);
+                } finally {
+                    this.pulling = false;
+                }
+            },
+
+            async useModel(model) {
+                if (!model || !model.name || this.busyModel) return;
+                this.busyModel = model.name;
+                this.error = "";
+                this.notice = "";
+                try {
+                    await api.useOllamaModel(model.name);
+                    this.activeModel = model.name;
+                    this.notice = `Aktív modell: ${model.name}`;
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.error = error.message || String(error);
+                } finally {
+                    this.busyModel = "";
+                }
+            },
+
+            async deleteModel(model) {
+                if (!model || !model.name || this.busyModel) return;
+                this.confirmDelete = "";
+                this.busyModel = model.name;
+                this.error = "";
+                this.notice = "";
+                try {
+                    await api.deleteOllamaModel(model.name);
+                    if (this.activeModel === model.name) this.activeModel = "";
+                    this.notice = `Törölve: ${model.name}`;
+                    await this.loadModels();
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.error = error.message || String(error);
+                } finally {
+                    this.busyModel = "";
+                }
+            },
+        };
+    }
+
+    /**
      * Alpine directive that keeps the imperative Three.js viewer in sync with
      * reactive state:  x-stl-viewer="{ stlUrl: stlUrl, token: viewerToken }"
      */
@@ -872,6 +1167,7 @@
         Alpine.data("notificationsBell", notificationsBellComponent);
         Alpine.data("printHistory", printHistoryComponent);
         Alpine.data("settingsPage", settingsPageComponent);
+        Alpine.data("ollamaModels", ollamaModelsComponent);
         registerStlViewerDirective(Alpine);
     });
 

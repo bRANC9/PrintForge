@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Ollama modellek – PrintForge{% endblock %}
+{% block content %}
+    <div data-ollama-models x-data="ollamaModels">
+        <header class="page-head">
+            <div>
+                <h1>Ollama modellek</h1>
+                <p class="muted">
+                    <span x-show="baseUrl" x-text="baseUrl"></span>
+                    <span x-show="version" x-text="'· verzió ' + version"></span>
+                    <span x-show="!baseUrl && !version">Ollama kapcsolat</span>
+                </p>
+            </div>
+            <div class="page-head-actions">
+                <a class="btn" href="{% url 'configuration:settings' %}">Beállítások</a>
+                <button type="button" class="btn" @click="loadAll()" :disabled="loading">Frissítés</button>
+            </div>
+        </header>
+        <p class="error-box"
+           x-show="forbidden"
+           x-cloak>Nincs jogosultságod az Ollama kezeléséhez (csak adminisztrátoroknak).</p>
+        <p class="warning-box"
+           x-show="serverError"
+           x-cloak>Az Ollama nem érhető el: <span x-text="serverError"></span></p>
+        <p class="error-box" x-show="error && !forbidden" x-cloak x-text="error"></p>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <div class="ollama-layout" x-show="!loading && !forbidden" x-cloak>
+            <section class="panel">
+                <h2>Modell letöltése</h2>
+                <form class="stack-form" @submit.prevent="pull()">
+                    <label for="ollama-pull-name">Modell neve</label>
+                    <input id="ollama-pull-name"
+                           class="input"
+                           type="text"
+                           placeholder="pl. qwen3-coder:30b"
+                           x-model="pullName"
+                           :disabled="pulling">
+                    <p class="error-box" x-show="pullError" x-cloak x-text="pullError"></p>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="pulling || !pullName.trim()"
+                                x-text="pulling ? 'Indítás…' : 'Letöltés'"></button>
+                    </div>
+                </form>
+            </section>
+            <section class="panel">
+                <h2>
+                    Telepített modellek <span class="badge" x-text="models.length"></span>
+                </h2>
+                <p class="muted" x-show="!models.length">Nincs telepített modell.</p>
+                <div class="table-wrap" x-show="models.length">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Név</th>
+                                <th>Méret</th>
+                                <th>Módosítva</th>
+                                <th>Paraméterek</th>
+                                <th>Műveletek</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="model in models" :key="model.name">
+                                <tr :class="{ 'is-active-row': model.name === activeModel }">
+                                    <td>
+                                        <span x-text="model.name"></span>
+                                        <span class="badge is-ok" x-show="model.name === activeModel">aktív</span>
+                                    </td>
+                                    <td x-text="model.size_human || formatBytes(model.size)"></td>
+                                    <td class="muted" x-text="formatDate(model.modified_at)"></td>
+                                    <td class="muted" x-text="modelMeta(model)"></td>
+                                    <td class="row-actions">
+                                        <button type="button"
+                                                class="btn btn-small"
+                                                @click="useModel(model)"
+                                                :disabled="busyModel === model.name || model.name === activeModel"
+                                                x-text="model.name === activeModel ? 'Aktív' : 'Használat'"></button>
+                                        <template x-if="confirmDelete === model.name">
+                                            <span class="confirm-inline">
+                                                <button type="button"
+                                                        class="btn btn-small btn-danger"
+                                                        @click="deleteModel(model)"
+                                                        :disabled="busyModel === model.name">Igen, törlés</button>
+                                                <button type="button"
+                                                        class="btn btn-small"
+                                                        @click="confirmDelete = ''">Mégse</button>
+                                            </span>
+                                        </template>
+                                        <template x-if="confirmDelete !== model.name">
+                                            <button type="button"
+                                                    class="btn btn-small"
+                                                    @click="confirmDelete = model.name">Törlés</button>
+                                        </template>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            <section class="panel">
+                <h2>
+                    Letöltések <span class="badge" x-text="pulls.length"></span>
+                    <span class="badge is-active" x-show="hasPendingPulls">folyamatban</span>
+                </h2>
+                <p class="muted" x-show="!pulls.length">Nincs letöltés.</p>
+                <ul class="pull-list" x-show="pulls.length">
+                    <template x-for="item in pulls" :key="item.id">
+                        <li class="pull-item">
+                            <div class="pull-head">
+                                <strong x-text="item.name"></strong>
+                                <span class="status-badge"
+                                      :class="pullStatusClass(item.status)"
+                                      x-text="item.status"></span>
+                                <button type="button"
+                                        class="link-btn"
+                                        x-show="!isPending(item)"
+                                        @click="dismiss(item)">Elrejtés</button>
+                            </div>
+                            <div class="progress"
+                                 x-show="isPending(item) || progressPercent(item) > 0">
+                                <div class="progress-bar" :style="'width: ' + progressPercent(item) + '%'"></div>
+                            </div>
+                            <p class="muted pull-meta">
+                                <span x-text="progressPercent(item) + '%'"></span>
+                                <span x-show="bytesLabel(item)" x-text="bytesLabel(item)"></span>
+                                <span x-show="item.detail" x-text="item.detail"></span>
+                            </p>
+                            <p class="error-box" x-show="item.error" x-text="item.error"></p>
+                        </li>
+                    </template>
+                </ul>
+            </section>
+        </div>
+    </div>
+{% endblock %}

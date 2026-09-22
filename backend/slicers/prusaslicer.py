@@ -48,6 +48,14 @@ Every other key is written to ``<profile>.ini`` and passed with ``--load``.
 PrusaSlicer loads printer, then filament, then process, so later profiles win.
 The ``ProcessProfile.layer_height`` field is injected as ``layer_height`` when
 no explicit value is present.
+
+Build plates
+------------
+``slice_plate`` passes a **3MF project** (see :mod:`slicers.threemf`) carrying
+every item's position/rotation/scale, then runs the same headless CLI with
+``--dont-arrange`` so PrusaSlicer keeps those coordinates instead of centring
+the plate. A one-item identity plate falls back to the classic single-STL
+:meth:`PrusaSlicerBackend.slice` path, so the existing behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -67,6 +75,7 @@ from django.conf import settings
 from .base import (
     FilamentSettings,
     ModelInput,
+    PlateMesh,
     PrinterSettings,
     ProcessSettings,
     SlicedResult,
@@ -75,6 +84,7 @@ from .base import (
     SlicerTimeout,
     resolve_model,
 )
+from .threemf import build_plate_3mf
 
 try:  # api-dev implements this contract in parallel; degrade gracefully without it
     from configuration.services import get_setting
@@ -453,37 +463,105 @@ class PrusaSlicerBackend(SlicerBackend):
                 model_name=model_name,
                 config=config,
             )
-            try:
-                completed = subprocess.run(  # noqa: S603 - list args, shell=False
-                    args,
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=config.timeout_sec,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise SlicerTimeout(f"PrusaSlicer timed out after {config.timeout_sec}s") from exc
+            self._run_cli(args, config)
+            data = self._read_gcode(output_dir)
 
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "").strip()
-                raise SlicerError(
-                    f"PrusaSlicer exited with code {completed.returncode}: {detail[:500]}"
-                )
+        return self._result_from_gcode(data)
 
-            output_path = output_dir / "model.gcode"
-            if not output_path.exists():
-                raise SlicerError("PrusaSlicer reported success but produced no G-code")
-            data = output_path.read_bytes()
+    def slice_plate(
+        self,
+        items: Sequence[PlateMesh],
+        printer: PrinterSettings,
+        filament: FilamentSettings,
+        process: ProcessSettings,
+    ) -> SlicedResult:
+        """Slice a multi-object build plate as a 3MF project (terv.md 28.2).
 
+        Every item is embedded in a 3MF with its position/rotation/scale as the
+        build-item transform, and ``--dont-arrange`` tells PrusaSlicer to keep
+        those coordinates instead of re-centring the plate. A one-item identity
+        plate reuses :meth:`slice` so the classic single-STL path is unchanged.
+
+        Limitation: PrusaSlicer's CLI applies its own ``--rotate``/``--scale``
+        flags to *all* models, so per-item transforms are only expressible
+        through this 3MF. Collision/bed-fit validation is left to PrusaSlicer
+        (terv.md 23., 28.3.) and per-item filament overrides are not supported yet.
+        """
+        if not items:
+            raise SlicerError("Cannot slice an empty build plate")
+        if len(items) == 1 and items[0].is_identity:
+            return self.slice(items[0].model, printer, filament, process)
+
+        plate_bytes = build_plate_3mf(items)
+        model_name = "plate.3mf"
+        config = self.resolve_config()
+
+        with tempfile.TemporaryDirectory(prefix="printforge-slice-") as tmp:
+            input_dir = Path(tmp) / "in"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            (input_dir / model_name).write_bytes(plate_bytes)
+
+            config_files, overrides = prepare_profiles(input_dir, printer, filament, process)
+            args = self.build_args(
+                input_dir,
+                output_dir,
+                config_files,
+                overrides,
+                model_name=model_name,
+                config=config,
+                dont_arrange=True,
+            )
+            self._run_cli(args, config)
+            data = self._read_gcode(output_dir)
+
+        return self._result_from_gcode(
+            data,
+            extra_metadata={"plate": {"item_count": len(items), "format": "3mf"}},
+        )
+
+    def _run_cli(self, args: Sequence[str], config: PrusaSlicerConfig) -> None:
+        """Run the PrusaSlicer command with a hard timeout (list, ``shell=False``)."""
+        try:
+            completed = subprocess.run(  # noqa: S603 - list args, shell=False
+                list(args),
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=config.timeout_sec,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SlicerTimeout(f"PrusaSlicer timed out after {config.timeout_sec}s") from exc
+
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise SlicerError(
+                f"PrusaSlicer exited with code {completed.returncode}: {detail[:500]}"
+            )
+
+    @staticmethod
+    def _read_gcode(output_dir: Path) -> bytes:
+        output_path = output_dir / "model.gcode"
+        if not output_path.exists():
+            raise SlicerError("PrusaSlicer reported success but produced no G-code")
+        return output_path.read_bytes()
+
+    def _result_from_gcode(
+        self, data: bytes, *, extra_metadata: Mapping[str, Any] | None = None
+    ) -> SlicedResult:
         estimates = parse_gcode_estimates(data.decode("utf-8", errors="replace"))
+        metadata: dict[str, Any] = {"slicer": self.name, **estimates}
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return SlicedResult(
             data=data,
             format="gcode",
             estimated_time_sec=estimates.get("estimated_time_sec"),
             estimated_filament_g=estimates.get("filament_g"),
             estimated_filament_mm=estimates.get("filament_mm"),
-            metadata={"slicer": self.name, **estimates},
+            metadata=metadata,
         )
 
     def estimate(self, result: SlicedResult) -> dict[str, Any]:
@@ -524,14 +602,19 @@ class PrusaSlicerBackend(SlicerBackend):
         model_name: str = "model.stl",
         output_name: str = "model.gcode",
         config: PrusaSlicerConfig | None = None,
+        dont_arrange: bool = False,
     ) -> list[str]:
         """Build the PrusaSlicer command as a list (never a shell string).
 
         When ``config`` is omitted the effective runtime settings are resolved
         on the spot, so a mode change applies without reconstructing the backend.
+
+        ``dont_arrange`` adds ``--dont-arrange`` so a 3MF plate keeps the
+        per-item coordinates instead of being re-centred on the bed.
         """
         config = config or self.resolve_config()
         action = ["--export-gcode", "--output"]
+        arrange = ["--dont-arrange"] if dont_arrange else []
         if config.mode == "docker":
             load_args: list[str] = []
             for path in config_files:
@@ -552,6 +635,7 @@ class PrusaSlicerBackend(SlicerBackend):
                 config.image,
                 *action,
                 f"/out/{output_name}",
+                *arrange,
                 *load_args,
                 *overrides,
                 f"/work/{model_name}",
@@ -564,6 +648,7 @@ class PrusaSlicerBackend(SlicerBackend):
             config.binary,
             *action,
             str(output_dir / output_name),
+            *arrange,
             *load_args,
             *overrides,
             str(input_dir / model_name),

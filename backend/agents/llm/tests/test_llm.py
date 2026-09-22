@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import sys
@@ -18,6 +19,7 @@ from agents.llm import (
     OllamaProvider,
     OpenAICompatibleProvider,
     get_provider,
+    normalise_images,
 )
 from agents.llm.ollama import _service_setting
 from agents.spec import ModelSpecification
@@ -304,3 +306,129 @@ def test_http_error_is_wrapped(monkeypatch):
     provider = OllamaProvider(base_url="http://test:11434", model="test-model")
     with pytest.raises(LLMError, match="HTTP 500"):
         provider.generate("hi")
+
+
+# ---------------------------------------------------------------------------
+# Vision support (terv.md 27. fejezet)
+# ---------------------------------------------------------------------------
+
+VISION_IMAGE = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+
+
+def test_base_supports_vision_defaults_to_false():
+    assert FakeProvider().supports_vision() is False
+
+
+def test_normalise_images_accepts_buffers_and_iterables():
+    assert normalise_images(None) == []
+    assert normalise_images(b"x") == [b"x"]
+    assert normalise_images(bytearray(b"xy")) == [b"xy"]
+    assert normalise_images(memoryview(b"abc")) == [b"abc"]
+    assert normalise_images([b"a", bytearray(b"b"), memoryview(b"c")]) == [b"a", b"b", b"c"]
+
+
+@pytest.mark.parametrize("bad", ["str", 3, [b"ok", "nope"], ["nope"]])
+def test_normalise_images_rejects_unsupported_types(bad):
+    with pytest.raises(TypeError):
+        normalise_images(bad)
+
+
+def test_normalise_images_rejects_empty_bytes():
+    with pytest.raises(ValueError):
+        normalise_images(b"")
+
+
+def _vision_provider(
+    monkeypatch, *, capabilities: list[str], unique: str
+) -> tuple[OllamaProvider, list[tuple[str, dict[str, Any]]]]:
+    """Provider whose stubbed ``_post`` serves ``/api/show`` and generation."""
+    provider = OllamaProvider(base_url=f"http://vision-{unique}:11434", model=f"m-{unique}")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((path, payload))
+        if path == "/api/show":
+            return {"capabilities": capabilities}
+        return {"response": "seen", "message": {"content": json.dumps(VALID_SPEC)}}
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    return provider, calls
+
+
+def test_ollama_supports_vision_reads_capabilities(monkeypatch):
+    provider, calls = _vision_provider(
+        monkeypatch, capabilities=["completion", "vision"], unique="a"
+    )
+    assert provider.supports_vision() is True
+    assert calls[0] == ("/api/show", {"model": "m-a"})
+
+
+def test_ollama_supports_vision_ignores_unrelated_capabilities(monkeypatch):
+    provider, _ = _vision_provider(monkeypatch, capabilities=["completion"], unique="b")
+    assert provider.supports_vision() is False
+
+
+def test_ollama_supports_vision_missing_capabilities_is_false(monkeypatch):
+    provider = OllamaProvider(base_url="http://vision-c:11434", model="m-c")
+    monkeypatch.setattr(provider, "_post", lambda path, payload: {"model": "m-c"})
+    assert provider.supports_vision() is False
+
+
+def test_ollama_supports_vision_failure_is_false_and_not_cached(monkeypatch):
+    provider = OllamaProvider(base_url="http://vision-d:11434", model="m-d")
+    seen: list[str] = []
+
+    def flaky(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        seen.append(path)
+        if len(seen) == 1:
+            raise LLMError("show unavailable")
+        return {"capabilities": ["vision"]}
+
+    monkeypatch.setattr(provider, "_post", flaky)
+    assert provider.supports_vision() is False
+    assert provider.supports_vision() is True  # failure was not cached
+    assert seen.count("/api/show") == 2
+
+
+def test_ollama_supports_vision_is_cached(monkeypatch):
+    provider, calls = _vision_provider(monkeypatch, capabilities=["vision"], unique="e")
+    assert provider.supports_vision() is True
+    assert provider.supports_vision() is True
+    assert [path for path, _ in calls] == ["/api/show"]
+
+
+def test_ollama_generate_sends_base64_images(monkeypatch):
+    provider, calls = _vision_provider(monkeypatch, capabilities=["vision"], unique="f")
+    assert provider.generate("what is this", images=[VISION_IMAGE]) == "seen"
+    assert calls[-1][1]["images"] == [base64.b64encode(VISION_IMAGE).decode("ascii")]
+
+
+def test_ollama_generate_rejects_images_without_vision(monkeypatch):
+    provider, calls = _vision_provider(monkeypatch, capabilities=["completion"], unique="g")
+    with pytest.raises(LLMError, match="does not support vision"):
+        provider.generate("hi", images=[VISION_IMAGE])
+    assert [path for path, _ in calls] == ["/api/show"]
+
+
+def test_ollama_structured_sends_images_on_user_message(monkeypatch):
+    provider, calls = _vision_provider(monkeypatch, capabilities=["vision"], unique="h")
+    provider.structured("make it", ModelSpecification, images=[VISION_IMAGE])
+    user_message = calls[-1][1]["messages"][1]
+    assert user_message["images"] == [base64.b64encode(VISION_IMAGE).decode("ascii")]
+
+
+def test_ollama_structured_rejects_images_without_vision(monkeypatch):
+    provider, _ = _vision_provider(monkeypatch, capabilities=["completion"], unique="i")
+    with pytest.raises(LLMError, match="does not support vision"):
+        provider.structured("hi", ModelSpecification, images=[VISION_IMAGE])
+
+
+def test_ollama_without_images_does_not_query_show(monkeypatch):
+    provider, calls = _vision_provider(monkeypatch, capabilities=["vision"], unique="j")
+    assert provider.generate("hi") == "seen"
+    assert [path for path, _ in calls] == ["/api/generate"]
+
+
+def test_openai_supports_vision_is_config_driven():
+    assert OpenAICompatibleProvider().supports_vision() is False
+    assert OpenAICompatibleProvider(vision=True).supports_vision() is True

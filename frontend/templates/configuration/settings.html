@@ -8,6 +8,7 @@
                 <p class="muted">Runtime beállítások. A mentett értékek felülírják a környezeti változókat, üresen hagyva visszaáll a környezeti érték.</p>
             </div>
             <div class="page-head-actions">
+                <a class="btn" href="{% url 'configuration:ollama' %}">Ollama modellek</a>
                 <button type="button"
                         class="btn"
                         @click="testOllama()"

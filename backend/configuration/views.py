@@ -14,3 +14,13 @@ class SettingsView(LoginRequiredMixin, UserPassesTestMixin, TemplateView):
     def test_func(self) -> bool:
         user = self.request.user
         return bool(user.is_authenticated and user.is_staff)
+
+
+class OllamaView(LoginRequiredMixin, UserPassesTestMixin, TemplateView):
+    """Ollama model management page (list / pull / delete / use). Staff only."""
+
+    template_name = "configuration/ollama.html"
+
+    def test_func(self) -> bool:
+        user = self.request.user
+        return bool(user.is_authenticated and user.is_staff)

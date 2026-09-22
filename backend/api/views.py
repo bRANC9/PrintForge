@@ -9,10 +9,12 @@ and every queryset is scoped to the workspaces the caller is a member of.
 Object-level roles are enforced by :class:`api.permissions.WorkspaceScopePermission`.
 """
 
+import hashlib
 from http import HTTPStatus
 
 from django.conf import settings
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -21,9 +23,18 @@ from rest_framework.views import APIView
 
 from agents.models import AgentRun
 from agents.services import runs_accessible_to
+from configuration.models import OllamaPull
 from configuration.services import (
+    OllamaError,
+    delete_ollama_model,
     effective_settings,
+    get_setting,
     get_settings,
+    list_ollama_models,
+    list_pulls,
+    ollama_version,
+    pull_ollama_model,
+    pull_status,
     test_ollama,
     update_settings,
 )
@@ -54,21 +65,47 @@ from printers.services import (
     start_job,
 )
 from printers.services import transition as transition_print_job
-from projects.models import Project
-from projects.services import create_project
+from projects.models import Project, Tag
+from projects.services import (
+    add_plate_item,
+    build_plates_for_user,
+    create_build_plate,
+    create_project,
+    create_share,
+    generate_project_description,
+    project_download_url,
+    project_rating_summary,
+    publish_project,
+    rate_project,
+    record_download,
+    remove_plate_item,
+    search_public_projects,
+    set_project_tags,
+    unpublish_project,
+    unrate_project,
+)
+from projects.services import revoke_share as revoke_project_share
 from workspaces.models import Workspace, WorkspaceRole
 from workspaces.services import create_workspace, workspaces_for_user
 
 from .permissions import IsStaff, WorkspaceScopePermission
 from .serializers import (
     AgentRunSerializer,
+    BuildPlateSerializer,
+    CommunityProjectSerializer,
     ModelVersionSerializer,
     NotificationSerializer,
+    OllamaModelNameSerializer,
+    PlateItemSerializer,
     PrintJobCreateSerializer,
     PrintJobSerializer,
     PrintJobTransitionSerializer,
     ProjectSerializer,
+    ProjectShareCreateSerializer,
+    ProjectShareSerializer,
+    RatingWriteSerializer,
     SettingsUpdateSerializer,
+    TagSerializer,
     VersionCreateSerializer,
     WorkspaceSerializer,
 )
@@ -79,6 +116,18 @@ from .serializers import (
 def health(request):
     """Liveness probe used by Docker healthchecks (the only public endpoint)."""
     return Response({"status": "ok"})
+
+
+def _hash_client_ip(request) -> str:
+    """Return a salted-less SHA-256 of the client IP (never the raw address).
+
+    The ``ip_hash`` is used only for coarse download de-duplication, so hashing
+    at the request boundary keeps the service layer free of HTTP concerns.
+    """
+    ip = (request.META.get("REMOTE_ADDR") or "").strip()
+    if not ip:
+        return ""
+    return hashlib.sha256(ip.encode("utf-8")).hexdigest()
 
 
 class WorkspaceViewSet(viewsets.ModelViewSet):
@@ -114,16 +163,32 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return (
             Project.objects.filter(workspace__members__user=user)
             .select_related("workspace", "created_by")
+            .prefetch_related("tags")
             .distinct()
         )
 
     def perform_create(self, serializer):
-        serializer.instance = create_project(
-            workspace=serializer.validated_data["workspace"],
-            name=serializer.validated_data["name"],
-            description=serializer.validated_data.get("description", ""),
+        data = serializer.validated_data
+        project = create_project(
+            workspace=data["workspace"],
+            name=data["name"],
+            description=data.get("description", ""),
             created_by=self.request.user,
         )
+        if data.get("license"):
+            project.license = data["license"]
+            project.save(update_fields=["license", "updated_at"])
+        if "tags" in data:
+            set_project_tags(project, data["tags"])
+        serializer.instance = project
+
+    def perform_update(self, serializer):
+        # Tags are M2M names, applied through the service (never by DRF's
+        # default ``tags.set()``, which would expect primary keys).
+        tags = serializer.validated_data.pop("tags", None)
+        instance = serializer.save()
+        if tags is not None:
+            set_project_tags(instance, tags)
 
     @action(detail=True, methods=["get", "post"], url_path="versions")
     def versions(self, request, pk=None):
@@ -141,6 +206,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
             prompt=payload.validated_data.get("prompt", ""),
             specification=payload.validated_data.get("specification_json"),
             created_by=request.user,
+            reference_note=payload.validated_data.get("reference_note", ""),
+            reference_image=payload.validated_data.get("reference_image"),
         )
         try:
             start_render(version)
@@ -151,6 +218,187 @@ class ProjectViewSet(viewsets.ModelViewSet):
             ModelVersionSerializer(version).data,
             status=HTTPStatus.CREATED,
         )
+
+    @action(detail=True, methods=["post"], url_path="publish")
+    def publish(self, request, pk=None):
+        """Make the project public in the community library (MEMBER+)."""
+        project = self.get_object()
+        return Response(ProjectSerializer(publish_project(project)).data)
+
+    @action(detail=True, methods=["post"], url_path="unpublish")
+    def unpublish(self, request, pk=None):
+        """Hide the project from the community library (MEMBER+)."""
+        project = self.get_object()
+        return Response(ProjectSerializer(unpublish_project(project)).data)
+
+    @action(detail=True, methods=["get", "post"], url_path="download")
+    def download(self, request, pk=None):
+        """Return the STL URL and record the download (VIEWER+ for GET)."""
+        project = self.get_object()
+        version_id = None
+        if request.method == "POST":
+            version_id = request.data.get("model_version")
+        version_id = version_id or request.query_params.get("model_version")
+        model_version = None
+        if version_id:
+            model_version = get_object_or_404(versions_for_project(project), pk=version_id)
+        url = project_download_url(project, model_version)
+        if url is None:
+            return Response(
+                {"detail": "No STL artifact is available for this project."},
+                status=HTTPStatus.NOT_FOUND,
+            )
+        download = record_download(
+            project=project,
+            model_version=model_version,
+            user=request.user if request.user.is_authenticated else None,
+            ip_hash=_hash_client_ip(request),
+        )
+        return Response(
+            {
+                "url": url,
+                "download_id": download.pk,
+                "download_count": project.download_count,
+            }
+        )
+
+    @action(detail=True, methods=["post", "delete"], url_path="rate")
+    def rate(self, request, pk=None):
+        """Upsert (POST) or delete (DELETE) the caller's rating (MEMBER+)."""
+        project = self.get_object()
+        if request.method == "DELETE":
+            unrate_project(project, request.user)
+        else:
+            payload = RatingWriteSerializer(data=request.data)
+            payload.is_valid(raise_exception=True)
+            try:
+                rate_project(project, request.user, payload.validated_data["score"])
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        mine = project.ratings.filter(user=request.user).values_list("score", flat=True).first()
+        return Response({"summary": project_rating_summary(project), "mine": mine})
+
+    @action(detail=True, methods=["get", "post"], url_path="share")
+    def share(self, request, pk=None):
+        """List shares or create a user/token share (VIEWER+ read, MEMBER+ write)."""
+        project = self.get_object()
+        if request.method == "GET":
+            shares = project.shares.select_related("shared_with", "created_by")
+            return Response(ProjectShareSerializer(shares, many=True).data)
+        payload = ProjectShareCreateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            share = create_share(
+                project,
+                user=payload.validated_data.get("user"),
+                create_link=payload.validated_data.get("create_link", False),
+                created_by=request.user,
+                expires_at=payload.validated_data.get("expires_at"),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        return Response(ProjectShareSerializer(share).data, status=HTTPStatus.CREATED)
+
+    @action(detail=True, methods=["delete"], url_path=r"shares/(?P<share_id>\d+)")
+    def revoke_share(self, request, pk=None, share_id=None):
+        """Delete one share of the project (MEMBER+)."""
+        project = self.get_object()
+        share = get_object_or_404(project.shares, pk=share_id)
+        revoke_project_share(share)
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @action(detail=True, methods=["post"], url_path="description-ai")
+    def description_ai(self, request, pk=None):
+        """Ask the LLM to fill the empty description/tags (terv.md 29.)."""
+        project = self.get_object()
+        force = bool(request.data.get("force", False))
+        result = generate_project_description(project, force=force)
+        return Response({**result, "project": ProjectSerializer(project).data})
+
+
+class TagViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only tag catalogue for the community search UI (public)."""
+
+    serializer_class = TagSerializer
+    permission_classes = [AllowAny]
+    queryset = Tag.objects.all()
+
+
+class CommunityProjectViewSet(viewsets.ReadOnlyModelViewSet):
+    """Public community library: list/retrieve only, readable anonymously.
+
+    The queryset is hard-filtered to ``is_public=True``; there is deliberately
+    no workspace scoping here (that is what makes it the community view).
+    """
+
+    serializer_class = CommunityProjectSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        params = self.request.query_params
+        return search_public_projects(
+            q=params.get("q", ""),
+            tag_slug=params.get("tag", ""),
+            license=params.get("license", ""),
+            ordering=params.get("ordering", "newest"),
+        )
+
+
+class BuildPlateViewSet(viewsets.ModelViewSet):
+    """Build-plate layouts, scoped to the caller's workspaces via ``project``."""
+
+    serializer_class = BuildPlateSerializer
+    permission_classes = [WorkspaceScopePermission]
+
+    def get_queryset(self):
+        return build_plates_for_user(self.request.user)
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        serializer.instance = create_build_plate(
+            project=data["project"],
+            name=data["name"],
+            created_by=self.request.user,
+            printer_profile=data.get("printer_profile"),
+            settings_json=data.get("settings_json"),
+        )
+
+    @action(detail=True, methods=["get", "post", "delete"], url_path="items")
+    def items(self, request, pk=None):
+        """List (GET), add (POST) or remove (DELETE) items on the plate."""
+        plate = self.get_object()
+
+        if request.method == "GET":
+            items = plate.items.select_related("model_version")
+            return Response(PlateItemSerializer(items, many=True).data)
+
+        if request.method == "DELETE":
+            item_id = request.data.get("item_id") or request.query_params.get("item_id")
+            if not item_id:
+                return Response(
+                    {"detail": "item_id is required."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            if not remove_plate_item(plate, item_id):
+                return Response({"detail": "Not found."}, status=HTTPStatus.NOT_FOUND)
+            return Response(status=HTTPStatus.NO_CONTENT)
+
+        payload = PlateItemSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            item = add_plate_item(
+                plate,
+                model_version=payload.validated_data["model_version"],
+                position_x=payload.validated_data.get("position_x", 0.0),
+                position_y=payload.validated_data.get("position_y", 0.0),
+                position_z=payload.validated_data.get("position_z", 0.0),
+                rotation_z=payload.validated_data.get("rotation_z", 0.0),
+                scale=payload.validated_data.get("scale", 1.0),
+                settings_json=payload.validated_data.get("settings_json"),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        return Response(PlateItemSerializer(item).data, status=HTTPStatus.CREATED)
 
 
 class ModelVersionViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -234,7 +482,8 @@ class PrintJobViewSet(
         try:
             job = enqueue_job(
                 project=data["project"],
-                model_version=data["model_version"],
+                model_version=data.get("model_version"),
+                build_plate=data.get("build_plate"),
                 printer=data["printer"],
                 created_by=request.user,
                 priority=data.get("priority", 0),
@@ -363,3 +612,88 @@ class TestOllamaView(APIView):
 
     def post(self, request):
         return Response(test_ollama())
+
+
+class OllamaModelsView(APIView):
+    """List / delete locally available Ollama models (staff only)."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        # Always 200: a connection error is reported in ``error`` so the UI can
+        # render it gracefully (never 500).
+        try:
+            base_url = str(get_setting("ollama_base_url") or "")
+        except Exception:  # noqa: BLE001 - settings lookup must not 500 the UI
+            base_url = ""
+        version_info = ollama_version()
+        version = version_info.get("version")
+        error = version_info.get("error")
+        models: list[dict] = []
+        if error is None:
+            try:
+                models = list_ollama_models()
+            except Exception as exc:  # noqa: BLE001 - degrade gracefully
+                error = f"{type(exc).__name__}: {exc}"
+        return Response(
+            {"base_url": base_url, "version": version, "models": models, "error": error}
+        )
+
+    def delete(self, request):
+        # Model tags contain ':' and '/', so the name travels as a query param.
+        serializer = OllamaModelNameSerializer(data={"name": request.query_params.get("name", "")})
+        serializer.is_valid(raise_exception=True)
+        try:
+            delete_ollama_model(name=serializer.validated_data["name"])
+        except OllamaError as exc:
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+
+class OllamaModelPullView(APIView):
+    """Enqueue an Ollama model pull (staff only)."""
+
+    permission_classes = [IsStaff]
+
+    def post(self, request):
+        serializer = OllamaModelNameSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pull = pull_ollama_model(name=serializer.validated_data["name"], user=request.user)
+        return Response(pull_status(pull), status=HTTPStatus.ACCEPTED)
+
+
+class OllamaModelUseView(APIView):
+    """Set a pulled model as the runtime ``ollama_model`` (staff only)."""
+
+    permission_classes = [IsStaff]
+
+    def post(self, request):
+        serializer = OllamaModelNameSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        name = serializer.validated_data["name"]
+        try:
+            update_settings(user=request.user, ollama_model=name)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        return Response({"ok": True, "ollama_model": name})
+
+
+class OllamaPullsView(APIView):
+    """List the 20 most recent Ollama pulls, newest first (staff only)."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request):
+        return Response([pull_status(pull) for pull in list_pulls(limit=20)])
+
+
+class OllamaPullDetailView(APIView):
+    """One Ollama pull's progress (staff only)."""
+
+    permission_classes = [IsStaff]
+
+    def get(self, request, pk: int):
+        pull = OllamaPull.objects.filter(pk=pk).first()
+        if pull is None:
+            return Response({"detail": "Not found."}, status=HTTPStatus.NOT_FOUND)
+        return Response(pull_status(pull))

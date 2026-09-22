@@ -16,6 +16,8 @@ Estimates/metadata are stored in ``PrintJob.slicing_json``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from django.utils import timezone
@@ -26,8 +28,10 @@ from printers.services import set_slicing_metadata
 
 from .base import (
     FilamentSettings,
+    PlateMesh,
     PrinterSettings,
     ProcessSettings,
+    SliceModel,
     SlicerBackend,
     SlicerError,
 )
@@ -48,6 +52,7 @@ __all__ = [
     "notify_slice_ready",
     "printer_settings",
     "process_settings",
+    "read_plate_items",
     "resolve_printer_profile",
     "slice_job",
 ]
@@ -212,6 +217,78 @@ def _read_model(job: PrintJob, storage: Any) -> bytes:
     return storage.read_bytes(name)
 
 
+def read_plate_items(plate: Any, storage: Any) -> list[PlateMesh]:
+    """Resolve a ``BuildPlate`` into backend-ready :class:`PlateMesh` items.
+
+    Every item's ``model_version.stl_file`` is read through ``storage``. Raises
+    :class:`SlicerError` when the plate has no items, an item has no STL
+    artifact, or the artifact is missing from storage -- the caller persists the
+    message into ``PrintJob.slicing_json``.
+    """
+    if plate is None:
+        raise SlicerError("The print job has no build plate to slice")
+
+    items = list(plate.items.select_related("model_version").order_by("id"))
+    if not items:
+        raise SlicerError(f"Build plate {getattr(plate, 'name', plate)!r} has no items to slice")
+
+    meshes: list[PlateMesh] = []
+    for item in items:
+        version = item.model_version
+        version_pk = getattr(version, "pk", None)
+        artifact = getattr(getattr(version, "stl_file", None), "name", "") if version else ""
+        if not artifact:
+            raise SlicerError(
+                f"Plate item #{item.pk} (model version #{version_pk}) has no STL artifact to slice"
+            )
+        if Path(artifact).suffix.lower() != ".stl":
+            raise SlicerError(f"Plate item #{item.pk} artifact is not an STL file: {artifact}")
+        if not storage.exists(artifact):
+            raise SlicerError(f"Plate item #{item.pk} artifact is missing from storage: {artifact}")
+        meshes.append(
+            PlateMesh(
+                model=SliceModel(
+                    data=storage.read_bytes(artifact),
+                    filename=Path(artifact).name,
+                    format="stl",
+                ),
+                x=item.position_x,
+                y=item.position_y,
+                z=item.position_z,
+                rotation_z=item.rotation_z,
+                scale=item.scale,
+                name=Path(artifact).stem,
+                key=str(version_pk) if version_pk is not None else None,
+            )
+        )
+    return meshes
+
+
+def _plate_metadata(plate: Any, items: Sequence[PlateMesh]) -> dict[str, Any]:
+    """Plate-level slicing metadata (item count + per-item breakdown)."""
+    return {
+        "build_plate": getattr(plate, "pk", None),
+        "item_count": len(items),
+        "plate": {
+            "id": getattr(plate, "pk", None),
+            "name": getattr(plate, "name", ""),
+            "item_count": len(items),
+            "items": [
+                {
+                    "name": item.name,
+                    "model_version_id": int(item.key) if item.key and item.key.isdigit() else None,
+                    "x": item.x,
+                    "y": item.y,
+                    "z": item.z,
+                    "rotation_z": item.rotation_z,
+                    "scale": item.scale,
+                }
+                for item in items
+            ],
+        },
+    }
+
+
 def slice_job(
     job: PrintJob,
     *,
@@ -219,13 +296,18 @@ def slice_job(
     storage: Any | None = None,
     model_bytes: bytes | None = None,
 ) -> dict[str, Any]:
-    """Slice ``job.model_version`` and persist the G-code + estimate.
+    """Slice ``job`` and persist the G-code + estimate.
+
+    A job with a ``build_plate`` gathers its ``PlateItem`` meshes and calls
+    :meth:`SlicerBackend.slice_plate`; otherwise the single ``model_version``
+    path is used, so existing jobs are unaffected. ``model_bytes`` only applies
+    to that single-model path.
 
     ``PrintJob.status`` goes ``PREPARING -> SLICING -> READY`` on success. On
     any failure the status is persisted as ``FAILED`` and the exception is
     re-raised so Celery records the failure and can retry. Estimates/metadata
-    go into ``PrintJob.slicing_json`` and the resolved slicer printer profile is
-    stored on ``PrintJob.printer_profile``.
+    go into ``PrintJob.slicing_json`` (with plate item breakdown for plates) and
+    the resolved slicer printer profile is stored on ``PrintJob.printer_profile``.
     """
     backend = backend or get_backend()
     storage = storage or get_storage()
@@ -237,33 +319,39 @@ def slice_job(
     job.save(update_fields=["status", "printer_profile"])
 
     try:
-        data = model_bytes if model_bytes is not None else _read_model(job, storage)
+        plate_items: list[PlateMesh] | None = None
+        model_data: bytes | None = None
+        if job.build_plate_id:
+            plate_items = read_plate_items(job.build_plate, storage)
+        else:
+            model_data = model_bytes if model_bytes is not None else _read_model(job, storage)
 
         _set_status(job, PrintJobStatus.SLICING)
-        result = backend.slice(
-            data,
-            printer_settings(job.printer, profile),
-            filament_settings(job.filament),
-            process_settings(job.slicer_profile),
-        )
+        printer = printer_settings(job.printer, profile)
+        filament = filament_settings(job.filament)
+        process = process_settings(job.slicer_profile)
+        if plate_items is not None:
+            result = backend.slice_plate(plate_items, printer, filament, process)
+        else:
+            result = backend.slice(model_data, printer, filament, process)
         if result.data is None:
             raise SlicerError("The slicer backend produced no G-code")
 
         estimate = backend.estimate(result)
         relative = gcode_path(job.project_id, job.pk)
         storage.write_bytes(relative, result.data)
-        _persist_slicing_metadata(
-            job,
-            {
-                "status": PrintJobStatus.READY.value,
-                "format": result.format,
-                "gcode": relative,
-                "gcode_bytes": len(result.data),
-                "slicer": estimate.get("slicer"),
-                "estimate": estimate,
-                "computed_at": timezone.now().isoformat(),
-            },
-        )
+        metadata: dict[str, Any] = {
+            "status": PrintJobStatus.READY.value,
+            "format": result.format,
+            "gcode": relative,
+            "gcode_bytes": len(result.data),
+            "slicer": estimate.get("slicer"),
+            "estimate": estimate,
+            "computed_at": timezone.now().isoformat(),
+        }
+        if plate_items is not None:
+            metadata.update(_plate_metadata(job.build_plate, plate_items))
+        _persist_slicing_metadata(job, metadata)
 
         job.gcode.name = relative
         job.status = PrintJobStatus.READY
@@ -282,9 +370,12 @@ def slice_job(
         job.save(update_fields=["status", "slicing_json"])
         raise
 
-    return {
+    response: dict[str, Any] = {
         "job_id": job.pk,
         "status": PrintJobStatus.READY.value,
         "gcode": relative,
         "estimate": estimate,
     }
+    if plate_items is not None:
+        response["item_count"] = len(plate_items)
+    return response

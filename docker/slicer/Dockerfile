@@ -11,6 +11,10 @@
 #     --load /work/printer.ini --load /work/filament.ini --load /work/process.ini \
 #     /work/model.stl
 #
+# Multi-object build plates swap the trailing model for a generated
+# /work/plate.3mf (carrying the per-item transforms) and add --dont-arrange so
+# PrusaSlicer keeps those coordinates (terv.md 28. fejezet).
+#
 # See README.md in this directory for the full contract.
 #
 # Never expose this image with network access or a writable root filesystem.

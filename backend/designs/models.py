@@ -27,6 +27,9 @@ class ModelVersion(models.Model):
     stl_file = models.FileField(upload_to=model_artifact_path, blank=True)
     glb_file = models.FileField(upload_to=model_artifact_path, blank=True)
     preview_image = models.ImageField(upload_to=model_artifact_path, blank=True)
+    # Opcionális referencia fotó a prompt mellett (terv.md 27. fejezet).
+    reference_image = models.ImageField(upload_to=model_artifact_path, blank=True)
+    reference_note = models.TextField(blank=True, default="")
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

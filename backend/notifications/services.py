@@ -71,6 +71,8 @@ class NotificationKind(models.TextChoices):
     PRINT_FAILED = "print_failed", "Print failed"
     AGENT_DONE = "agent_done", "Agent run done"
     AGENT_FAILED = "agent_failed", "Agent run failed"
+    OLLAMA_PULL_DONE = "ollama_pull_done", "Ollama pull done"
+    OLLAMA_PULL_FAILED = "ollama_pull_failed", "Ollama pull failed"
 
 
 # ---------------------------------------------------------------------------

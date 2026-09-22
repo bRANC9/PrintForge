@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AppSettings
+from .models import AppSettings, OllamaPull
 
 
 @admin.register(AppSettings)
@@ -16,3 +16,11 @@ class AppSettingsAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(OllamaPull)
+class OllamaPullAdmin(admin.ModelAdmin):
+    list_display = ("name", "status", "progress_percent", "created_at")
+    list_filter = ("status",)
+    search_fields = ("name",)
+    readonly_fields = ("created_at", "started_at", "completed_at")

@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import FilamentProfile, PrinterProfile, ProcessProfile
+from .models import (
+    BuildPlate,
+    FilamentProfile,
+    PlateItem,
+    PrinterProfile,
+    ProcessProfile,
+)
 
 
 @admin.register(PrinterProfile)
@@ -23,4 +29,28 @@ class FilamentProfileAdmin(admin.ModelAdmin):
 class ProcessProfileAdmin(admin.ModelAdmin):
     list_display = ("name", "layer_height", "created_at")
     search_fields = ("name",)
+    readonly_fields = ("created_at",)
+
+
+@admin.register(BuildPlate)
+class BuildPlateAdmin(admin.ModelAdmin):
+    list_display = ("name", "project", "printer_profile", "created_by", "updated_at")
+    list_filter = ("printer_profile",)
+    search_fields = ("name", "project__name")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(PlateItem)
+class PlateItemAdmin(admin.ModelAdmin):
+    list_display = (
+        "build_plate",
+        "model_version",
+        "position_x",
+        "position_y",
+        "position_z",
+        "rotation_z",
+        "scale",
+    )
+    list_filter = ("build_plate",)
+    search_fields = ("build_plate__name", "model_version__project__name")
     readonly_fields = ("created_at",)

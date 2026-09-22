@@ -57,6 +57,15 @@ class PrintJob(models.Model):
     model_version = models.ForeignKey(
         "designs.ModelVersion",
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="print_jobs",
+    )
+    build_plate = models.ForeignKey(
+        "slicers.BuildPlate",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="print_jobs",
     )
     printer = models.ForeignKey(
@@ -104,6 +113,14 @@ class PrintJob(models.Model):
 
     class Meta:
         ordering = ["-priority", "created_at"]
+        constraints = [
+            # Egy job vagy egy ModelVersion-re, vagy egy BuildPlate-re mutat.
+            models.CheckConstraint(
+                condition=models.Q(model_version__isnull=False)
+                | models.Q(build_plate__isnull=False),
+                name="print_job_has_target",
+            )
+        ]
 
     def __str__(self) -> str:
         return f"PrintJob #{self.pk} ({self.status})"

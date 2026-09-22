@@ -1098,6 +1098,8 @@ OWNER
 - [ ] Retry loop
 - [ ] AgentRun persistence
 - [ ] Laya döntési modell kiértékelése (Planner/guardrail/triage)
+- [ ] Vision input: kép feltöltés és referencia-ként használat, ha a
+      modell vision-képes (lásd 27. fejezet)
 
 ## Phase 5 – Slicing
 
@@ -1107,6 +1109,7 @@ OWNER
 - [ ] process profiles
 - [ ] slicing preview
 - [ ] time/filament estimation
+- [ ] Build plate / multi-object slicing (később, lásd 28. fejezet)
 
 ## Phase 6 – Printer
 
@@ -1136,6 +1139,8 @@ OWNER
 - [ ] ratings
 - [ ] downloads
 - [ ] model licenses
+- [ ] AI leírás/tag kitöltés („Description by AI" gomb, üres mezők,
+      no-overwrite – lásd 29. fejezet)
 
 ---
 
@@ -1335,4 +1340,166 @@ GitHub Actions (a repo GitHubon van):
 
 Az OpenSCAD-worker hívás tesztben stub/mock, hogy CI-ban ne kelljen
 valódi OpenSCAD futás.
+
+---
+
+# 27. Vision / kép alapú prompt (később)
+
+Cél: a felhasználó feltölthessen **fényképet** (létező tárgyról, hibás
+alkatrészről, kézzel rajzolt vázlatról), és az AI azt is használja
+referenciaként a modell megtervezéséhez – ha a kiválasztott LLM
+**vision-képes**.
+
+## 27.1 Provider képesség
+
+A vision-támogatást nem hardcode-oljuk, hanem a `LLMProvider`
+interfészén keresztül kérdezzük le:
+
+```text
+LLMProvider
+├── supports_vision() -> bool
+└── complete(messages, images=[...])
+```
+
+- Ollama: `llava`, `qwen2.5-vl`, `llama3.2-vision` stb. – a modell
+  capability metaadatai döntik el, nem a név.
+- OpenAICompatible / Anthropic: az API támogatja, de a választott
+  modelltől függ.
+
+Fallback: ha a modell nem vision-képes, a kép **nem** kerül elküldésre,
+a felhasználó figyelmeztetést kap, és a generálás a szöveges prompt
+alapján fut tovább (nem hibázik el).
+
+## 27.2 Használat referenciaként
+
+- A kép a structured specification része (`reference_image` mező + a
+  feltöltött fájl azonosítója).
+- A Planner/Research agent referenciaként kapja: forma, arány,
+  funkció, a fotón olvasható szöveg/felirat.
+- Abszolút méretet a kép önmagában nem ad, ezért a felhasználótól
+  kérhető skála/mérték (pl. „mekkora ez valójában?”) vagy egy ismert
+  referencia a fotón.
+- A feltöltött kép a projektverzióhoz kapcsolódik (reprodukálhatóság),
+  és a storage backendben tárolódik.
+
+## 27.3 Nem cél
+
+- Fotogrammetria / kép → mesh rekonstrukció nem cél.
+- A kép nem helyettesíti a geometriai validációt; a kimenet továbbra
+  is parametrikus OpenSCAD.
+
+---
+
+# 28. Build plate / multi-object slicing (később)
+
+Cél: a felhasználó **több modellt tegyen ugyanarra a tálcára**, és egy
+szeleteléssel (egy G-code-dal) nyomtassa ki őket – a szokásos
+slicer-élményhez hasonlóan.
+
+Az MVP-ben a `PrintJob` egyetlen `ModelVersion`-t szeletel
+(`_read_model` egy STL-t olvas, a `SlicerBackend.slice()` egy mesh-t
+kap). Ez a fejezet azt a bővítést írja le, amivel ez több objektumra
+nyílik.
+
+## 28.1 Domain
+
+Új fogalom: **BuildPlate** (tálca) és **PlateItem** (egy objet a
+tálcán).
+
+```text
+Project
+└── BuildPlate            # egy tálca-elrendezés
+    ├── PlateItem         # model_version + pozíció/rotáció/skála
+    ├── PlateItem
+    └── PlateItem
+```
+
+- `BuildPlate` a projekthez tartozik, és opcionálisan egy
+  printer-profilt köt.
+- `PlateItem`: `model_version` FK + `x`, `y`, `z` pozíció, `rotation`,
+  `scale` (illetve `settings_json` a későbbi per-item override-okhoz).
+- A `PrintJob` vagy egy `BuildPlate`-re mutat, vagy megmarad egy-objektumosnak,
+  és a tálca a job előkészítő lépése.
+
+## 28.2 Szeletelés
+
+- A `SlicerBackend.slice()` kapjon **mesh-listát** (tálca), ne egyetlen
+  `ModelInput`-ot. A visszafelé kompatibilitás érdekében az egy-mesh
+  hívás maradhat egy egyelemű lista.
+- Konkrét implementáció: a modelleket `--merge`-dzsel egy tálcává
+  fűzni, vagy 3MF projectként átadni a PrusaSlicernek (ez utóbbi viszi
+  a pozíciót/rotációt is, ezért ez a preferált út).
+- `estimate`/metadata maradjon **tálca-szintű összesítés** (idő,
+  filament), opcionálisan itemenkénti bontással.
+
+## 28.3 Nyitott kérdések / kockázatok
+
+- **Ütközés- és beférős-ellenőrzés**: a tálca méretét és az
+  objektumok elhelyezését validálni kell (auto-arrange vagy legalább
+  „nem lóg le / nem fedi egymást").
+- **Per-item profilok**: eltérő filament/szín egy tálcán – csak akkor,
+  ha a nyomtató (pl. CFS) támogatja.
+- **Preview**: a viewernek a tálcát és az egyes itemek pozícióját is
+  mutatnia kell.
+- Az ellenőrzés továbbra is a slicer oldalán történik, saját geometriai
+  motort nem építünk (lásd 23. fejezet).
+
+---
+
+# 29. AI leírás és tag kitöltés (később)
+
+Cél: a modell leírása és tagjei ne maradjanak üresen. Ha üresek, az LLM
+**javasoljon** tartalmat, és legyen egy **„Description by AI"** gomb,
+amivel a felhasználó egy kattintással ki tudja tölteni a mezőket.
+
+Alapszabály: **amit a felhasználó beírt, azt soha nem írjuk felül.**
+
+## 29.1 Kitöltési szabályok
+
+- Az automatikus kitöltés **csak üres mezőt** tölt (leírás és/vagy tag).
+  Nem üres mezőt az automata kihagy.
+- A gomb („Description by AI") is a fenti szabályt követi: kézzel írt
+  tartalmat nem ír felül. Ha mégis felülírás kellene, ahhoz külön,
+  explicit megerősítés szükséges.
+- A kézzel írt érték **mindig erősebb** a generáltnál.
+- A generált szöveg **javaslat**: a felhasználó szerkesztheti.
+
+## 29.2 Provenance (miért fontos)
+
+Ahhoz, hogy a „ne írjuk felül" szabálybetarthó legyen, nyilván kell
+tartani, honnan jött az érték:
+
+```text
+description_source:  manual | ai | empty
+tags_source:         manual | ai | empty
+```
+
+- Ha `manual` → az AI semmilyen esetben nem nyúl hozzá.
+- Ha `ai` vagy `empty` → az AI/gomb feltöltheti.
+- A gomb által írt érték `ai`-re vált, a user szerkesztése `manual`-ra.
+
+## 29.3 Bemenet és generálás
+
+- Bemenet: a project neve + verzió `prompt` + `specification_json` +
+  `validation_json` (a tényleges geometriából). Vizuális jelzés (preview
+  kép / vision, lásd 27. fejezet) opcionális plusz.
+- Kimenet: rövid, tárgyilagos leírás + **strukturált tag-lista**
+  (Pydantic séma, mint a structured specification).
+- Ugyanazt a `LLMProvider`-t használja, mint a generálás; ha nincs
+  elérhető modell, a funkció csendben kimarad (nem blokkol).
+
+## 29.4 Hol jelenik meg
+
+- **Automatika**: project létrehozásakor, és/vagy amikor egy verzió
+  elkészül – ha a mező üres.
+- **Gomb**: a project/verzió oldalon „Description by AI" – a felhasználó
+  bármikor kérhet javaslatot.
+- A tag mező a Phase 8 (Community) tag-funkciójára épül; addig csak a
+  leírás él.
+
+## 29.5 Nem cél
+
+- Nem írunk felül meglévő, felhasználói tartalmat.
+- Nem generálunk hosszú marketing-szöveget; rövid, technikai leírás a
+  cél.
 

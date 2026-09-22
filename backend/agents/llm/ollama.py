@@ -12,11 +12,17 @@ never cached at import time — and can be refreshed with :meth:`reload`, so an
 admin setting change takes effect on the next provider instance without a
 process restart. Explicit constructor arguments always win; a ``get_setting``
 seam can be injected for tests without touching the database.
+
+Vision (terv.md 27. fejezet) is detected from the model's own capability
+metadata via ``POST /api/show`` (field ``capabilities``) and cached in-process
+per ``(base_url, model)``, so ``/api/show`` is not called on every request.
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -24,7 +30,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from .base import LLMError, LLMProvider
+from .base import LLMError, LLMProvider, normalise_images
 
 DEFAULT_TIMEOUT_SEC = 120.0
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -37,6 +43,12 @@ STRUCTURED_SYSTEM_PROMPT = (
     "You are a CAD specification assistant. Answer with a single JSON object "
     "and nothing else. Do not add explanations, markdown fences or comments."
 )
+
+#: In-process vision capability cache, keyed by ``(base_url, model)``. Only
+#: *successful* ``/api/show`` lookups are stored, so a transient failure is not
+#: remembered (the next call may retry) while a real answer is reused.
+_VISION_CACHE: dict[tuple[str, str], bool] = {}
+_VISION_CACHE_LOCK = threading.Lock()
 
 
 class OllamaProvider(LLMProvider):
@@ -75,15 +87,49 @@ class OllamaProvider(LLMProvider):
 
     # -- public API ---------------------------------------------------------
 
-    def generate(self, prompt: str, **kwargs: Any) -> str:
+    def supports_vision(self) -> bool:
+        """Return whether ``self.model`` advertises the ``vision`` capability.
+
+        Queries ``POST {base}/api/show`` once per ``(base_url, model)`` and
+        caches the answer in-process. Any failure (transport error, HTTP error,
+        malformed payload) is swallowed and reported as ``False`` so a missing
+        ``/api/show`` endpoint never breaks a caller (terv.md 27.1).
+        """
+        key = (self.base_url, self.model)
+        with _VISION_CACHE_LOCK:
+            cached = _VISION_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        capabilities = self._fetch_capabilities()
+        if capabilities is None:
+            # Defensive: a failed lookup is not cached, so it can recover.
+            return False
+
+        supported = "vision" in capabilities
+        with _VISION_CACHE_LOCK:
+            _VISION_CACHE[key] = supported
+        return supported
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        images: list[bytes] | None = None,
+        **kwargs: Any,
+    ) -> str:
         if not isinstance(prompt, str) or not prompt.strip():
             raise LLMError("generate() requires a non-empty prompt")
+        image_bytes = normalise_images(images)
+        self._ensure_vision(image_bytes)
 
         payload: dict[str, Any] = {
             "model": kwargs.pop("model", self.model),
             "prompt": prompt,
             "stream": False,
         }
+        if image_bytes:
+            payload["images"] = self._encode_images(image_bytes)
         system = kwargs.pop("system", None)
         if system:
             payload["system"] = system
@@ -104,10 +150,18 @@ class OllamaProvider(LLMProvider):
         self,
         prompt: str,
         schema: type[BaseModel] | dict[str, Any],
+        *,
+        images: list[bytes] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         if not isinstance(prompt, str) or not prompt.strip():
             raise LLMError("structured() requires a non-empty prompt")
+        image_bytes = normalise_images(images)
+        self._ensure_vision(image_bytes)
+        # /api/chat expects images on the user message, not at the top level.
+        user_message: dict[str, Any] = {"role": "user", "content": prompt}
+        if image_bytes:
+            user_message["images"] = self._encode_images(image_bytes)
 
         json_schema = self.schema_to_json_schema(schema)
         system = kwargs.pop("system", self.system_prompt)
@@ -121,7 +175,7 @@ class OllamaProvider(LLMProvider):
                         f"{json.dumps(json_schema, ensure_ascii=False)}"
                     ),
                 },
-                {"role": "user", "content": prompt},
+                user_message,
             ],
             "stream": False,
             "format": json_schema,
@@ -151,6 +205,45 @@ class OllamaProvider(LLMProvider):
             except ValidationError as exc:
                 raise LLMError(f"Ollama response does not match {schema.__name__}: {exc}") from exc
         return parsed
+
+    # -- vision -------------------------------------------------------------
+
+    def _ensure_vision(self, image_bytes: list[bytes]) -> None:
+        """Fail fast when images are passed to a non-vision model.
+
+        terv.md 27.1 describes a graceful fallback; raising :class:`LLMError`
+        keeps that decision on the caller (catch, warn, retry with
+        ``images=None``) instead of silently discarding the user's image.
+        """
+        if image_bytes and not self.supports_vision():
+            raise LLMError(
+                f"Ollama model {self.model!r} does not support vision; "
+                "omit images or configure a vision-capable model "
+                "(e.g. llava, qwen2.5-vl, llama3.2-vision)"
+            )
+
+    def _fetch_capabilities(self) -> list[str] | None:
+        """Return ``POST /api/show``'s ``capabilities`` list, or ``None``.
+
+        ``None`` means the lookup itself failed (transport/HTTP/JSON); an
+        absent ``capabilities`` key on an older Ollama is treated as "no
+        capabilities" (``[]``) because it is a valid response.
+        """
+        try:
+            result = self._post("/api/show", {"model": self.model})
+        except LLMError:
+            return None
+        capabilities = result.get("capabilities")
+        if capabilities is None:
+            return []
+        if not isinstance(capabilities, list):
+            return None
+        return [str(capability) for capability in capabilities]
+
+    @staticmethod
+    def _encode_images(image_bytes: list[bytes]) -> list[str]:
+        """Base64-encode images for Ollama's ``images`` payload field."""
+        return [base64.b64encode(image).decode("ascii") for image in image_bytes]
 
     # -- transport ----------------------------------------------------------
 

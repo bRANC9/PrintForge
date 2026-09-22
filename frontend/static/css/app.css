@@ -721,3 +721,121 @@ ul.error-box {
 .status-line.is-danger {
     color: var(--danger);
 }
+
+/* Ollama model management ------------------------------------------------- */
+
+.warning-box {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid #d9a441;
+    border-radius: 8px;
+    background: rgba(217, 164, 65, 0.08);
+    color: #d9a441;
+    font-size: 0.9rem;
+}
+
+.ollama-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.ollama-layout .panel h2 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.85rem;
+    font-size: 1.05rem;
+}
+
+.data-table tr.is-active-row {
+    background: rgba(76, 217, 123, 0.06);
+}
+
+.row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.confirm-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.btn-small {
+    padding: 0.2rem 0.55rem;
+    font-size: 0.8rem;
+}
+
+.btn-danger {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.badge.is-ok {
+    border-color: var(--ok);
+    color: var(--ok);
+}
+
+.badge.is-active {
+    border-color: var(--accent);
+    color: var(--accent-2);
+}
+
+/* Pull progress ----------------------------------------------------------- */
+
+.pull-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.pull-item {
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+}
+
+.pull-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.4rem;
+}
+
+.pull-head strong {
+    margin-right: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pull-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin: 0.4rem 0 0;
+    font-size: 0.8rem;
+}
+
+.progress {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background: var(--accent);
+    transition: width 200ms ease;
+}

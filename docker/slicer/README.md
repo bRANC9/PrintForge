@@ -52,6 +52,12 @@ files) and `/out` read-write (only the produced G-code). A hard
 `timeout=SLICER_TIMEOUT_SEC` is applied by Python around the `docker run` call
 so a hanging slicer cannot pin the worker.
 
+For a multi-object **build plate** the worker writes the meshes and their
+per-item transforms into a single `/work/plate.3mf` project and adds
+`--dont-arrange`, so the 3MF build-item coordinates define the layout instead of
+PrusaSlicer re-centring it (terv.md 28. fejezet). Everything else in the command
+is identical.
+
 ## Profile → CLI mapping
 
 Profiles are **data**, not code: each `settings_json` is a flat mapping of

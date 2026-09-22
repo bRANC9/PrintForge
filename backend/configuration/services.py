@@ -17,8 +17,10 @@ through this module so a runtime override takes effect without a restart.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -26,17 +28,27 @@ from django.conf import settings as django_settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
+from django.utils import timezone
 
-from .models import AppSettings
+from .models import AppSettings, OllamaPull, OllamaPullStatus
+from .tasks import pull_ollama_model_task
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "SETTING_NAMES",
+    "OllamaError",
+    "delete_ollama_model",
     "effective_settings",
     "get_setting",
     "get_settings",
     "invalidate_settings_cache",
+    "list_ollama_models",
+    "list_pulls",
+    "ollama_version",
+    "pull_ollama_model",
+    "pull_status",
+    "show_ollama_model",
     "test_ollama",
     "update_settings",
 ]
@@ -253,3 +265,180 @@ def test_ollama() -> dict:
     if status == 200:
         return {"ok": True, "detail": f"Ollama is reachable at {base_url}."}
     return {"ok": False, "detail": f"Ollama returned HTTP {status}."}
+
+
+# ---------------------------------------------------------------------------
+# Ollama model management (list / show / pull / delete)
+# ---------------------------------------------------------------------------
+
+#: Timeout for short Ollama management calls (list/show/delete).
+_OLLAMA_API_TIMEOUT = 10
+
+
+class OllamaError(RuntimeError):
+    """Ollama could not fulfil a model-management request."""
+
+
+def _ollama_base_url() -> str:
+    """Return the configured Ollama base URL without a trailing slash."""
+    return str(get_setting("ollama_base_url") or "").rstrip("/")
+
+
+def _ollama_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: dict | None = None,
+    timeout: int = _OLLAMA_API_TIMEOUT,
+) -> dict:
+    """Call ``url`` and decode the JSON response, raising :class:`OllamaError`."""
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise OllamaError(f"Ollama returned HTTP {exc.code}: {body[:200]}") from exc
+    except Exception as exc:  # noqa: BLE001 - normalise transport errors
+        raise OllamaError(f"{type(exc).__name__}: {exc}") from exc
+
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise OllamaError("Ollama returned an invalid JSON response.") from exc
+    return decoded if isinstance(decoded, dict) else {"data": decoded}
+
+
+def _human_size(num_bytes: Any) -> str | None:
+    """Format a byte count as e.g. ``"4.7 GB"`` (``None`` when unknown)."""
+    if num_bytes is None:
+        return None
+    try:
+        size = float(num_bytes)
+    except (TypeError, ValueError):
+        return None
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def ollama_version() -> dict:
+    """Return ``{"version": "..."}`` or ``{"error": "..."}``; never raises."""
+    try:
+        base_url = _ollama_base_url()
+    except Exception as exc:  # noqa: BLE001 - never raise to the caller
+        logger.exception("ollama_version could not resolve the base URL")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    if not base_url:
+        return {"error": "No Ollama base URL configured."}
+    try:
+        data = _ollama_json(f"{base_url}/api/version")
+    except OllamaError as exc:
+        return {"error": str(exc)}
+    version = data.get("version")
+    if version is None:
+        return {"error": "Unexpected response from Ollama /api/version."}
+    return {"version": str(version)}
+
+
+def list_ollama_models() -> list[dict]:
+    """Return the locally available Ollama models (raises :class:`OllamaError`)."""
+    base_url = _ollama_base_url()
+    if not base_url:
+        raise OllamaError("No Ollama base URL configured.")
+    data = _ollama_json(f"{base_url}/api/tags")
+    models = data.get("models") or []
+    result: list[dict] = []
+    for item in models:
+        details = item.get("details") or {}
+        size = item.get("size")
+        result.append(
+            {
+                "name": item.get("name") or item.get("model") or "",
+                "size": size,
+                "size_human": _human_size(size),
+                "modified_at": item.get("modified_at"),
+                "digest": item.get("digest"),
+                "family": details.get("family"),
+                "parameter_size": details.get("parameter_size"),
+                "quantization": details.get("quantization_level"),
+            }
+        )
+    return result
+
+
+def show_ollama_model(name: str) -> dict:
+    """Return Ollama's ``/api/show`` payload for ``name``."""
+    base_url = _ollama_base_url()
+    if not base_url:
+        raise OllamaError("No Ollama base URL configured.")
+    if not (name or "").strip():
+        raise OllamaError("A model name is required.")
+    return _ollama_json(f"{base_url}/api/show", method="POST", payload={"name": name})
+
+
+def delete_ollama_model(*, name: str) -> None:
+    """Delete ``name`` from Ollama; raise :class:`OllamaError` on failure."""
+    base_url = _ollama_base_url()
+    if not base_url:
+        raise OllamaError("No Ollama base URL configured.")
+    if not (name or "").strip():
+        raise OllamaError("A model name is required.")
+    _ollama_json(f"{base_url}/api/delete", method="DELETE", payload={"name": name})
+
+
+def pull_ollama_model(*, name: str, user=None) -> OllamaPull:
+    """Create a ``PENDING`` :class:`OllamaPull` and enqueue the Celery task.
+
+    If the broker is unavailable the row is marked ``FAILED`` (with the error)
+    and returned, so the UI can render the failure instead of a 500.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        raise ValueError("A model name is required.")
+
+    pull = OllamaPull.objects.create(
+        name=cleaned,
+        status=OllamaPullStatus.PENDING,
+        created_by=user,
+    )
+    try:
+        pull_ollama_model_task.delay(pull.pk)
+    except Exception as exc:  # noqa: BLE001 - broker can fail in many ways
+        pull.status = OllamaPullStatus.FAILED
+        pull.error = f"Could not enqueue the pull: {type(exc).__name__}: {exc}"
+        pull.completed_at = timezone.now()
+        pull.save(update_fields=["status", "error", "completed_at"])
+    return pull
+
+
+def list_pulls(limit: int = 20):
+    """Return the most recent pulls, newest first."""
+    return OllamaPull.objects.select_related("created_by").order_by("-created_at")[:limit]
+
+
+def pull_status(pull: OllamaPull) -> dict:
+    """Serialise an :class:`OllamaPull` for the API/UI."""
+    return {
+        "id": pull.pk,
+        "name": pull.name,
+        "status": pull.status,
+        "progress_percent": pull.progress_percent,
+        "detail": pull.detail,
+        "completed_bytes": pull.completed_bytes,
+        "total_bytes": pull.total_bytes,
+        "error": pull.error,
+        "created_at": pull.created_at.isoformat() if pull.created_at else None,
+        "started_at": pull.started_at.isoformat() if pull.started_at else None,
+        "completed_at": pull.completed_at.isoformat() if pull.completed_at else None,
+    }

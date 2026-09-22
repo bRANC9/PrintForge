@@ -383,17 +383,8 @@ def test_settings_api_rejects_bad_type():
     assert response.status_code == 400
 
 
-@pytest.mark.xfail(
-    reason=(
-        "PRODUCTION BUG (api-dev): SettingsUpdateSerializer does not validate "
-        "the choices declared on the AppSettings fields, so PATCH "
-        "{'openscad_mode': 'bogus'} is accepted (200) and persisted. The next "
-        "OpenSCADBackend() then raises CADError('Unknown openscad_mode'). "
-        "Reported; expected to xpass once the API validates enum choices."
-    ),
-    strict=False,
-)
 def test_settings_api_rejects_an_invalid_mode_choice():
+    """Regression: the API validates the model's declared enum choices."""
     response = auth(UserFactory(is_staff=True)).patch(
         "/api/v1/settings/", {"openscad_mode": "bogus"}, format="json"
     )

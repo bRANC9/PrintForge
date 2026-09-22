@@ -1,8 +1,9 @@
 # Slicing worker
 
-The slicing worker turns a stored `designs.ModelVersion` STL/3MF into G-code
-using PrusaSlicer. It runs **out of process**, behind Celery/Redis, so a long or
-hostile profile can never block the web worker (terv.md 12., 20. fejezet).
+The slicing worker turns a stored `designs.ModelVersion` STL/3MF — or a whole
+`slicers.BuildPlate` of them — into G-code using PrusaSlicer. It runs **out of
+process**, behind Celery/Redis, so a long or hostile profile can never block the
+web worker (terv.md 12., 20., 28. fejezet).
 
 ## Contract
 
@@ -12,8 +13,9 @@ hostile profile can never block the web worker (terv.md 12., 20. fejezet).
 | Celery task name | `slicers.slice_print_job` |
 | Implementation | `backend/slicers/tasks.py` |
 | Backend code | `backend/slicers/prusaslicer.py` |
+| 3MF plate writer | `backend/slicers/threemf.py` |
 | Broker / result | `REDIS_URL` (`CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND`) |
-| Input | `printers.PrintJob` (model version + printer/filament/process profiles) |
+| Input | `printers.PrintJob` (model version **or** build plate + printer/filament/process profiles) |
 | Output | `PrintJob.gcode` (stored via `files.services.get_storage()`) |
 | Estimate | `PrintJob.slicing_json` |
 | Printer match | `PrintJob.printer_profile` |
@@ -24,6 +26,11 @@ hostile profile can never block the web worker (terv.md 12., 20. fejezet).
 `job_id: int` — the primary key of a `printers.PrintJob`. The worker reads
 `PrintJob.model_version.stl_file`, the physical `PrintJob.printer`, and the
 optional `filament` / `slicer_profile` (a `ProcessProfile`).
+
+A job that points at a `BuildPlate` instead (`PrintJob.build_plate_id` is set)
+takes the multi-object path: `slicers.services.read_plate_items` reads every
+`PlateItem.model_version.stl_file` and calls `SlicerBackend.slice_plate`. See
+[Build plates](#build-plates).
 
 The slicer printer profile is resolved by name, then `backend`, then
 `is_default`, falling back to the physical printer's own name/backend
@@ -60,6 +67,37 @@ PrusaSlicer writes into the G-code:
 `SlicerBackend.estimate(result)` normalises them to
 `{"estimated_time_sec", "estimated_time", "filament_g", "filament_mm", "format",
 "slicer"}`.
+
+### Build plates
+
+A `PrintJob` selects the slicing path from its target (terv.md 28. fejezet):
+
+| `PrintJob` target | Backend call | Mesh transport |
+| --- | --- | --- |
+| `model_version` only | `SlicerBackend.slice(model, ...)` | one STL/3MF |
+| `build_plate` set | `SlicerBackend.slice_plate(items, ...)` | a generated 3MF project |
+
+`slicers.services.read_plate_items` turns the plate's `PlateItem` rows into
+`PlateMesh` values (mesh bytes + `x`/`y`/`z`, `rotation_z`, `scale`) and raises a
+clear `SlicerError` if a plate is empty, an item has no STL artifact, or the
+artifact is missing from storage.
+
+`PrusaSlicerBackend.slice_plate` writes the meshes and their transforms into a
+3MF project (`slicers/threemf.py`) and runs the CLI with `--dont-arrange`, so
+PrusaSlicer honours the per-item coordinates instead of re-centring the plate.
+The backend's default `slice_plate` is a one-mesh fallback to `slice`; a
+multi-item plate raises `NotImplementedError` for backends that cannot express
+transforms. A one-item, untransformed plate also takes the plain `slice` path,
+so the classic single-model behaviour is unchanged.
+
+Plate jobs additionally persist plate-level metadata into `PrintJob.slicing_json`
+(`build_plate`, `item_count`, and a `plate.items` breakdown). Estimates stay
+plate-level aggregates (time / filament used).
+
+> Limitation: PrusaSlicer's `--rotate`/`--scale` flags apply to *all* input
+> models, so per-item transforms can only travel in the 3MF. Bed-fit/collision
+> validation is delegated to PrusaSlicer and per-item filament overrides are not
+> supported yet (terv.md 28.3.).
 
 ## Running
 

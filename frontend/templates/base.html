@@ -18,6 +18,7 @@
                 <a href="{% url 'printers:history' %}">Nyomtatási előzmények</a>
                 {% if user.is_staff %}
                     <a href="{% url 'configuration:settings' %}">Beállítások</a>
+                    <a href="{% url 'configuration:ollama' %}">Ollama modellek</a>
                 {% endif %}
                 {% if user.is_authenticated %}
                     <div class="notif" x-data="notificationsBell" @click.outside="close()">

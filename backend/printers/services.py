@@ -12,6 +12,17 @@ ordering, mirrored here explicitly so the contract is obvious):
 
     PrintJob.objects.filter(printer=..., status=QUEUED).order_by("-priority", "created_at")
 
+Targets
+-------
+
+A ``PrintJob`` is sliced from exactly one *effective* target: a ``build_plate``
+(a multi-model plate) when set, otherwise a single ``model_version``. At least
+one of the two must be present (the ``print_job_has_target`` DB check);
+:func:`enqueue_job` accepts either and :func:`job_target` /
+:func:`job_target_kind` expose the resolved target so the rest of the queue
+does not have to know which one was used. The upload/start path is unchanged:
+slicing produces ``PrintJob.gcode`` the same way for both.
+
 State machine
 -------------
 
@@ -71,6 +82,8 @@ __all__ = [
     "cancel_job",
     "enqueue_job",
     "job_status",
+    "job_target",
+    "job_target_kind",
     "jobs_for_user",
     "next_job",
     "printer_status",
@@ -212,17 +225,22 @@ def _notify_status_change(job: PrintJob, status: str) -> None:
 def enqueue_job(
     *,
     project,
-    model_version,
     printer: Printer,
+    model_version=None,
+    build_plate=None,
     created_by=None,
     priority: int = 0,
     filament=None,
     slicer_profile=None,
     printer_profile=None,
 ) -> PrintJob:
-    """Create a ``QUEUED`` print job.
+    """Create a ``QUEUED`` print job for a single model *or* a build plate.
 
-    ``model_version`` must belong to ``project``; ``priority`` must be >= 0.
+    A job must target **at least one** of ``model_version`` / ``build_plate``
+    (mirroring the ``print_job_has_target`` DB check); omitting both raises
+    :class:`QueueError` instead of an opaque ``IntegrityError``. Whichever is
+    given must belong to ``project``. ``priority`` must be >= 0.
+
     ``filament``/``slicer_profile``/``printer_profile`` are optional slicer
     configuration FKs and are stored as given. The printer is *not* required to
     be active -- a queue may legitimately hold work for a printer that is
@@ -231,13 +249,18 @@ def enqueue_job(
     After the job is persisted the owner gets a ``PRINT_QUEUED`` notification
     (best-effort: a notification failure never fails the enqueue).
     """
-    if model_version.project_id != project.pk:
+    if model_version is None and build_plate is None:
+        raise QueueError("a print job needs a model_version or a build_plate")
+    if model_version is not None and model_version.project_id != project.pk:
         raise QueueError("model_version does not belong to the given project")
+    if build_plate is not None and build_plate.project_id != project.pk:
+        raise QueueError("build_plate does not belong to the given project")
     if priority < 0:
         raise QueueError("priority must be >= 0")
     job = PrintJob.objects.create(
         project=project,
         model_version=model_version,
+        build_plate=build_plate,
         printer=printer,
         filament=filament,
         slicer_profile=slicer_profile,
@@ -282,6 +305,7 @@ def jobs_for_user(user) -> QuerySet[PrintJob]:
             "slicer_profile",
             "printer_profile",
             "model_version",
+            "build_plate",
             "created_by",
         )
         .order_by("-priority", "created_at")
@@ -299,6 +323,33 @@ def job_status(job: PrintJob) -> dict[str, Any]:
         "slicing": dict(job.slicing_json or {}),
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }
+
+
+def job_target(job: PrintJob):
+    """Return the object ``job`` is sliced from: its build plate or its model.
+
+    A plate job (``build_plate`` set) is sliced from the plate's items and
+    therefore takes precedence when both fields are populated; otherwise the
+    single ``model_version`` is returned. ``None`` is only possible for a job
+    that violates the ``print_job_has_target`` DB check (e.g. an unsaved
+    instance), which persistence already rejects.
+    """
+    if job.build_plate_id:
+        return job.build_plate
+    return job.model_version
+
+
+def job_target_kind(job: PrintJob) -> str:
+    """Return ``"build_plate"``, ``"model_version"`` or ``""`` for ``job``.
+
+    FK ids are inspected so this never triggers a relation query; it is the
+    cheap discriminator :func:`job_target` is built on.
+    """
+    if job.build_plate_id:
+        return "build_plate"
+    if job.model_version_id:
+        return "model_version"
+    return ""
 
 
 def queue_for_printer(printer: Printer):

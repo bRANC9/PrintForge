@@ -57,8 +57,15 @@ def create_next_version(
     prompt: str = "",
     created_by: User | None = None,
     specification: dict | None = None,
+    reference_note: str = "",
+    reference_image=None,
 ) -> ModelVersion:
-    """Create the next version for a project (v1, v2, ...)."""
+    """Create the next version for a project (v1, v2, ...).
+
+    ``reference_note``/``reference_image`` are the optional reference photo and
+    note attached to the prompt (terv.md 27. fejezet); both are stored on the
+    version so the generation stays reproducible.
+    """
     last = project.versions.order_by("-version").first()
     next_version = (last.version + 1) if last else 1
     return ModelVersion.objects.create(
@@ -67,6 +74,8 @@ def create_next_version(
         prompt=prompt,
         specification_json=specification or {},
         created_by=created_by,
+        reference_note=reference_note or "",
+        reference_image=reference_image,
     )
 
 
