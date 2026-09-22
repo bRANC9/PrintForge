@@ -15,6 +15,13 @@ it only enqueues :func:`run_agent_workflow`. The task:
 5. dispatches in-app notifications through ``notifications.services``
    (best-effort: a notification problem never changes the run outcome).
 
+When the caller supplies ``version_id`` (terv.md 27. fejezet), the task loads
+the version's optional ``reference_image`` / ``reference_note`` and seeds the
+graph state with them, so the Planner/Research agents can use the photo as a
+reference. The raw bytes never reach ``AgentRun.state_json``: only the
+``reference_image_used`` flag, the presence flag and the optional warning are
+summarised. Without ``version_id`` the task behaves exactly as before.
+
 The workflow dependencies (LLM provider + CAD backend + RAG ``retrieve``) are
 built by :func:`build_dependencies`, which tests monkeypatch to inject fakes --
 no live Ollama, OpenSCAD or pgvector is ever required.
@@ -24,10 +31,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from celery import shared_task
 from django.conf import settings
+from django.core.files.base import ContentFile
 from django.utils import timezone
 
 from accounts.models import User
@@ -35,14 +44,14 @@ from agents.graph import WorkflowDeps, run_workflow
 from agents.llm import get_provider
 from agents.services import fail_run, finish_run, start_run
 from designs.cad.openscad import OpenSCADBackend
-from designs.models import model_artifact_path
+from designs.models import ModelVersion, model_artifact_path
 from designs.services import create_next_version
 from embeddings.services import retrieve
 from files.services import get_storage
 from notifications.services import NotificationKind, notify_project_members
 from projects.models import Project
 
-__all__ = ["build_dependencies", "run_agent_workflow"]
+__all__ = ["build_dependencies", "load_reference_image", "run_agent_workflow"]
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +78,59 @@ def build_dependencies() -> WorkflowDeps:
         retrieve_fn=retrieve,
         max_attempts=int(getattr(settings, "AGENT_MAX_ATTEMPTS", 3)),
     )
+
+
+def load_reference_image(version: ModelVersion | None) -> bytes | None:
+    """Return the raw bytes of *version*'s optional reference image.
+
+    The image path lives on ``ModelVersion.reference_image`` (terv.md 27.
+    fejezet); the bytes are read through the configured storage backend
+    (:func:`files.services.get_storage`) rather than Django's default storage,
+    matching how the CAD artifacts are written. Missing image, missing version
+    or any storage error all return ``None``: a reference photo must never
+    block a run.
+    """
+    if version is None:
+        return None
+    name = getattr(getattr(version, "reference_image", None), "name", "") or ""
+    if not name:
+        return None
+    try:
+        return get_storage().read_bytes(name)
+    except Exception:  # noqa: BLE001 - a broken reference image must not fail the run
+        logger.warning(
+            "Could not read reference image %r for ModelVersion %s",
+            name,
+            version.pk,
+            exc_info=True,
+        )
+        return None
+
+
+def _autofill_project_metadata(project: Project) -> None:
+    """Best-effort metadata autofill after a version completes (terv.md 29.).
+
+    ``projects.services.maybe_autofill_project_metadata`` is owned by another
+    module and is documented as never raising, but this task still guards both
+    the import and the call so it can never change the run outcome.
+
+    The call is **opt-in** through ``settings.AGENT_AUTOFILL_METADATA`` (default
+    ``False``): the service resolves its own LLM provider, so enabling it by
+    default would introduce a live LLM call into the agent tests (whose
+    ``ProjectFactory`` projects have an empty description). Deployments that
+    want it set the flag; the setting itself is owned by ``config/settings.py``.
+    """
+    if not getattr(settings, "AGENT_AUTOFILL_METADATA", False):
+        return
+    try:
+        from projects.services import maybe_autofill_project_metadata
+    except Exception:  # noqa: BLE001 - an unavailable service is not an error here
+        logger.warning("projects metadata autofill unavailable", exc_info=True)
+        return
+    try:
+        maybe_autofill_project_metadata(project)
+    except Exception:  # noqa: BLE001 - autofill must never block the run
+        logger.warning("Metadata autofill failed for project %s", project.pk, exc_info=True)
 
 
 def _failure_reason(error: str) -> str:
@@ -156,6 +218,12 @@ def _summarise_state(state: dict[str, Any]) -> dict[str, Any]:
         "needs_research": bool(state.get("needs_research", False)),
         "research_used": bool(state.get("research_used", False)),
         "research_sources": list(state.get("research_sources") or []),
+        # Reference image provenance (terv.md 27.): only presence/usage flags,
+        # never the raw bytes.
+        "reference_image_provided": bool(state.get("reference_image")),
+        "reference_image_used": bool(state.get("reference_image_used", False)),
+        "reference_image_note": str(state.get("reference_image_note") or ""),
+        "reference_image_warning": state.get("reference_image_warning"),
         "validation": dict(state.get("validation") or {}),
         "scad_chars": len(scad_source),
         "stl_bytes": len(stl_bytes),
@@ -170,18 +238,30 @@ def _persist_version(
     user: User | None,
     run: Any,
     state: dict[str, Any],
+    reference_image_name: str = "",
 ) -> Any:
     """Create the next ``ModelVersion`` and store the CAD artifacts on it.
 
     The artifacts come from the graph state (OpenSCAD source + exported STL);
     the STL is what the Three.js viewer loads, so this is the "preview" step of
     terv.md 6. fejezet.
+
+    The optional reference image/note (terv.md 27.) is copied onto the new
+    version for reproducibility when the run was seeded from a version.
     """
+    reference_image = state.get("reference_image")
+    reference_note = str(state.get("reference_image_note") or "")
+    reference_file = None
+    if reference_image:
+        file_name = os.path.basename(reference_image_name) or "reference_image"
+        reference_file = ContentFile(reference_image, name=file_name)
     version = create_next_version(
         project=project,
         prompt=prompt,
         created_by=user,
         specification=dict(state.get("specification") or {}),
+        reference_note=reference_note,
+        reference_image=reference_file,
     )
 
     storage = get_storage()
@@ -202,6 +282,8 @@ def _persist_version(
         "agent_run_id": run.pk,
         "research_used": bool(state.get("research_used", False)),
         "research_sources": list(state.get("research_sources") or []),
+        "reference_image_used": bool(state.get("reference_image_used", False)),
+        "reference_image_provided": bool(state.get("reference_image")),
         "scad_file": scad_rel,
         "stl_file": stl_rel,
         "stl_bytes": len(stl_bytes),
@@ -212,22 +294,41 @@ def _persist_version(
 
 
 @shared_task(name="agents.run_agent_workflow")
-def run_agent_workflow(project_id: int, prompt: str, user_id: int | None = None) -> int:
+def run_agent_workflow(
+    project_id: int,
+    prompt: str,
+    user_id: int | None = None,
+    version_id: int | None = None,
+) -> int:
     """Run the full agent workflow for ``project_id`` and return the ``AgentRun`` id.
 
     The run row is created first (``start_run``) and always finished by either
     ``finish_run`` or ``fail_run``; a workflow-level failure never leaves the
     run stuck in ``RUNNING``.
+
+    ``version_id`` is optional (terv.md 27. fejezet): when given, that version's
+    ``reference_image``/``reference_note`` seed the graph state so the agents can
+    use the photo as a reference. It must belong to ``project_id``; a missing or
+    foreign version is simply ignored (text-only run).
     """
     project = Project.objects.get(pk=project_id)
     user = User.objects.filter(pk=user_id).first() if user_id else None
     run = start_run(project=project, user_prompt=prompt)
+
+    version = (
+        ModelVersion.objects.filter(pk=version_id, project=project).first() if version_id else None
+    )
+    reference_image = load_reference_image(version)
+    reference_image_note = str(getattr(version, "reference_note", "") or "")
+    reference_image_name = str(getattr(getattr(version, "reference_image", None), "name", "") or "")
 
     try:
         state = run_workflow(
             prompt,
             deps=build_dependencies(),
             company_id=str(project.workspace_id),
+            reference_image=reference_image,
+            reference_image_note=reference_image_note,
         )
     except Exception as exc:  # noqa: BLE001 - never leave a run RUNNING
         logger.exception("Agent workflow crashed for AgentRun %s", run.pk)
@@ -250,6 +351,7 @@ def run_agent_workflow(project_id: int, prompt: str, user_id: int | None = None)
                 user=user,
                 run=run,
                 state=state,
+                reference_image_name=reference_image_name,
             )
         except Exception as exc:  # noqa: BLE001 - storage/DB failure must fail the run
             logger.exception("Could not persist ModelVersion for AgentRun %s", run.pk)
@@ -269,6 +371,9 @@ def run_agent_workflow(project_id: int, prompt: str, user_id: int | None = None)
         summary["version"] = version.version
         finish_run(run=run, state=summary)
         logger.info("AgentRun %s produced ModelVersion %s", run.pk, version.pk)
+        # Best-effort, opt-in project metadata autofill (terv.md 29.); never
+        # blocks the run and is disabled by default so tests stay offline.
+        _autofill_project_metadata(project)
         # Only after the version + artifacts are stored and the run is DONE.
         _notify_project(
             project=project,

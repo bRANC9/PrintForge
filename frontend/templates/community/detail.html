@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Közösségi modell – PrintForge{% endblock %}
+{% block content %}
+    <div data-community-detail
+         data-project-id="{{ project_id }}"
+         x-data="communityDetail">
+        <p class="breadcrumb">
+            <a href="{% url 'community-list' %}">← Közösség</a>
+        </p>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <template x-if="project">
+            <div class="community-detail">
+                <header class="page-head">
+                    <div>
+                        <h1 x-text="project.name"></h1>
+                        <p class="muted">
+                            <span class="badge" x-text="project.license_display || 'Nincs licenc'"></span>
+                            <span class="badge" x-text="ratingText(project.rating)"></span>
+                            <span class="badge" x-text="project.download_count + ' letöltés'"></span>
+                        </p>
+                    </div>
+                    <div class="page-head-actions">
+                        <button type="button"
+                                class="btn btn-primary"
+                                @click="download()"
+                                :disabled="downloadBusy"
+                                x-text="downloadBusy ? 'Letöltés…' : 'STL letöltése'"></button>
+                    </div>
+                </header>
+                <section class="panel">
+                    <h2>Leírás</h2>
+                    <p x-text="project.description || 'Nincs leírás.'"></p>
+                    <h2>Címkék</h2>
+                    <p class="tag-row">
+                        <template x-for="slug in project.tags" :key="slug">
+                            <span class="badge tag-chip" x-text="slug"></span>
+                        </template>
+                        <span class="muted" x-show="!project.tags || !project.tags.length">Nincs címke.</span>
+                    </p>
+                </section>
+            </div>
+        </template>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/community.js' %}"></script>
+{% endblock %}

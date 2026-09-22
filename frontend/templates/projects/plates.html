@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Nyomtatási lapok – PrintForge{% endblock %}
+{% block content %}
+    <div data-plates-page
+         data-project-id="{{ project_id }}"
+         x-data="projectPlates">
+        {{ printers|json_script:"plate-printers-data" }}
+        {{ filaments|json_script:"plate-filaments-data" }}
+        {{ printer_profiles|json_script:"plate-printer-profiles-data" }}
+        <p class="breadcrumb">
+            <a href="{% url 'projects:detail' pk=project_id %}">← Projekt</a>
+        </p>
+        <header class="page-head">
+            <div>
+                <h1>Nyomtatási lapok</h1>
+                <p class="muted">Több modell egy lapon: elemek pozíciója, forgatása és méretezése (#28).</p>
+            </div>
+        </header>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <section class="panel" x-show="!loading" x-cloak>
+            <h2>Új lap</h2>
+            <form class="stack-form" @submit.prevent="createPlate()">
+                <label for="plate-name">Név</label>
+                <input id="plate-name"
+                       class="input"
+                       type="text"
+                       maxlength="200"
+                       required
+                       placeholder="Pl. A lap"
+                       x-model="plateForm.name"
+                       :disabled="creatingPlate">
+                <label for="plate-printer-profile">Nyomtató profil (opcionális)</label>
+                <select id="plate-printer-profile"
+                        class="input"
+                        x-model="plateForm.printer_profile"
+                        :disabled="creatingPlate">
+                    <option value="">Nincs profil</option>
+                    <template x-for="profile in printerProfiles" :key="profile.id">
+                        <option :value="profile.id" x-text="profile.name"></option>
+                    </template>
+                </select>
+                <div class="form-actions">
+                    <button type="submit"
+                            class="btn btn-primary"
+                            :disabled="creatingPlate || !plateForm.name.trim()"
+                            x-text="creatingPlate ? 'Létrehozás…' : 'Lap létrehozása'"></button>
+                </div>
+            </form>
+        </section>
+        <div class="plates-layout" x-show="!loading" x-cloak>
+            <section class="panel">
+                <h2>Lapok</h2>
+                <p class="muted" x-show="!plates.length">Még nincs lap ehhez a projekthez.</p>
+                <ul class="plate-list">
+                    <template x-for="plate in plates" :key="plate.id">
+                        <li :class="{ 'is-active': plate.id === selectedPlateId }">
+                            <button type="button" class="plate-select" @click="selectPlate(plate)">
+                                <strong x-text="plate.name"></strong>
+                                <span class="badge" x-text="plate.item_count + ' elem'"></span>
+                            </button>
+                        </li>
+                    </template>
+                </ul>
+            </section>
+            <section class="panel" x-show="selectedPlate" x-cloak>
+                <h2>
+                    Elemek – <span x-text="selectedPlate ? selectedPlate.name : ''"></span>
+                </h2>
+                <p class="muted" x-show="!items.length">Még nincs elem a lapon.</p>
+                <div class="table-wrap" x-show="items.length">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Verzió</th>
+                                <th>X</th>
+                                <th>Y</th>
+                                <th>Z</th>
+                                <th>Forgatás</th>
+                                <th>Méret</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="item in items" :key="item.id">
+                                <tr>
+                                    <td x-text="versionLabel(item.model_version)"></td>
+                                    <td x-text="item.position_x"></td>
+                                    <td x-text="item.position_y"></td>
+                                    <td x-text="item.position_z"></td>
+                                    <td x-text="item.rotation_z"></td>
+                                    <td x-text="item.scale"></td>
+                                    <td>
+                                        <button type="button"
+                                                class="btn btn-danger btn-small"
+                                                @click="removeItem(item)"
+                                                :disabled="removingItemId === item.id">Törlés</button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+                <h3>Elem hozzáadása</h3>
+                <form class="stack-form plate-item-form" @submit.prevent="addItem()">
+                    <label for="plate-item-version">Modell verzió</label>
+                    <select id="plate-item-version"
+                            class="input"
+                            required
+                            x-model="itemForm.model_version"
+                            :disabled="addingItem">
+                        <option value="">Válassz verziót…</option>
+                        <template x-for="version in versions" :key="version.id">
+                            <option :value="version.id" x-text="versionLabel(version.id)"></option>
+                        </template>
+                    </select>
+                    <div class="coord-row">
+                        <div>
+                            <label for="item-x">X (mm)</label>
+                            <input id="item-x"
+                                   class="input"
+                                   type="number"
+                                   step="0.1"
+                                   x-model.number="itemForm.position_x"
+                                   :disabled="addingItem">
+                        </div>
+                        <div>
+                            <label for="item-y">Y (mm)</label>
+                            <input id="item-y"
+                                   class="input"
+                                   type="number"
+                                   step="0.1"
+                                   x-model.number="itemForm.position_y"
+                                   :disabled="addingItem">
+                        </div>
+                        <div>
+                            <label for="item-z">Z (mm)</label>
+                            <input id="item-z"
+                                   class="input"
+                                   type="number"
+                                   step="0.1"
+                                   x-model.number="itemForm.position_z"
+                                   :disabled="addingItem">
+                        </div>
+                        <div>
+                            <label for="item-rotation">Forgatás Z (°)</label>
+                            <input id="item-rotation"
+                                   class="input"
+                                   type="number"
+                                   step="1"
+                                   x-model.number="itemForm.rotation_z"
+                                   :disabled="addingItem">
+                        </div>
+                        <div>
+                            <label for="item-scale">Méret</label>
+                            <input id="item-scale"
+                                   class="input"
+                                   type="number"
+                                   step="0.05"
+                                   min="0.01"
+                                   x-model.number="itemForm.scale"
+                                   :disabled="addingItem">
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn"
+                                :disabled="addingItem || !itemForm.model_version"
+                                x-text="addingItem ? 'Hozzáadás…' : 'Elem hozzáadása'"></button>
+                    </div>
+                </form>
+                <h3>Nyomtatási feladat</h3>
+                <p class="warning-box" x-show="!printers.length" x-cloak>
+                    <span>Nincs regisztrált nyomtató, ezért a feladat nem indítható.</span>
+                </p>
+                <form class="stack-form"
+                      x-show="printers.length"
+                      x-cloak
+                      @submit.prevent="enqueue()">
+                    <label for="job-printer">Nyomtató</label>
+                    <select id="job-printer"
+                            class="input"
+                            required
+                            x-model="jobForm.printer"
+                            :disabled="enqueuing">
+                        <option value="">Válassz nyomtatót…</option>
+                        <template x-for="printer in printers" :key="printer.id">
+                            <option :value="printer.id" x-text="printer.name"></option>
+                        </template>
+                    </select>
+                    <label for="job-filament">Filament (opcionális)</label>
+                    <select id="job-filament"
+                            class="input"
+                            x-model="jobForm.filament"
+                            :disabled="enqueuing">
+                        <option value="">Nincs megadva</option>
+                        <template x-for="filament in filaments" :key="filament.id">
+                            <option :value="filament.id"
+                                    x-text="filament.material ? filament.name + ' (' + filament.material + ')' : filament.name">
+                            </option>
+                        </template>
+                    </select>
+                    <label for="job-priority">Prioritás</label>
+                    <input id="job-priority"
+                           class="input"
+                           type="number"
+                           min="0"
+                           x-model.number="jobForm.priority"
+                           :disabled="enqueuing">
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="enqueuing || !jobForm.printer"
+                                x-text="enqueuing ? 'Sorba állítás…' : 'Nyomtatás sorba állítása'"></button>
+                    </div>
+                </form>
+            </section>
+        </div>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/plates.js' %}"></script>
+{% endblock %}

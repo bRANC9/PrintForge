@@ -423,17 +423,9 @@ def test_delete_query_param_is_url_decoded(monkeypatch):
     assert received == [name]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "PRODUCTION BUG (api-dev): OllamaModelNameSerializer's regex "
-        "'^[A-Za-z0-9._:/-]+$' accepts path-traversal-ish names such as "
-        "'../../etc/passwd', 'a/../../b' and '/absolute/path'. Reported; "
-        "expected to xpass once '..' segments / leading slashes are rejected."
-    ),
-    strict=False,
-)
 @pytest.mark.parametrize("name", ["../../etc/passwd", "a/../../b", "/absolute/path"])
 def test_path_traversalish_names_are_rejected(monkeypatch, name):
+    """Regression: '..' segments / leading slashes are rejected by the API."""
     monkeypatch.setattr("configuration.services.pull_ollama_model_task.delay", lambda pk: None)
     client = _staff_client()
 

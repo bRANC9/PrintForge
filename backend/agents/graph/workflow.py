@@ -164,8 +164,19 @@ def run_workflow(
     *,
     deps: WorkflowDeps,
     company_id: str | None = None,
+    reference_image: bytes | None = None,
+    reference_image_note: str = "",
 ) -> WorkflowState:
     """Run the prompt -> specification -> SCAD -> STL workflow once.
+
+    Args:
+        prompt: Raw user request.
+        deps: Injected dependencies (provider/CAD backend/RAG).
+        company_id: Optional workspace scope for RAG retrieval.
+        reference_image: Optional reference photo bytes (terv.md 27. fejezet).
+            Kept in-process only and offered to the Planner/Research LLM calls
+            when the provider supports vision; absent -> unchanged behaviour.
+        reference_image_note: Optional free-text note for the reference photo.
 
     Returns the final state. A failed run has ``status == "failed"`` and a
     structured ``error`` JSON string; it never raises for a workflow-level
@@ -175,6 +186,10 @@ def run_workflow(
     initial: WorkflowState = {
         "prompt": prompt,
         "company_id": company_id,
+        "reference_image": reference_image,
+        "reference_image_note": reference_image_note or "",
+        "reference_image_used": False,
+        "reference_image_warning": None,
         "attempt": 0,
         "max_attempts": deps.max_attempts,
         "research_sources": [],

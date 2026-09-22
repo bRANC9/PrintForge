@@ -839,3 +839,251 @@ ul.error-box {
     background: var(--accent);
     transition: width 200ms ease;
 }
+
+/* Phase 8: community library --------------------------------------------- */
+
+.filter-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.filter-panel .form-row .input {
+    max-width: none;
+}
+
+.community-card footer {
+    flex-wrap: wrap;
+    gap: 0.35rem 0.75rem;
+}
+
+.tag-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    margin: 0 0 0.6rem;
+}
+
+.tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.tag-chip .link-btn {
+    font-size: 0.85rem;
+    line-height: 1;
+}
+
+.community-detail h2 {
+    font-size: 1rem;
+    margin: 1rem 0 0.4rem;
+}
+
+.community-detail h2:first-child {
+    margin-top: 0;
+}
+
+/* Phase 8: project metadata / rating / sharing --------------------------- */
+
+.badge-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    margin: 0.35rem 0 0;
+}
+
+.meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 1.25rem;
+    margin-bottom: 1.25rem;
+}
+
+.meta-grid .panel h2 {
+    margin-top: 0;
+}
+
+.meta-grid .form-row .input,
+.meta-grid .form-row .textarea {
+    max-width: none;
+}
+
+.rating-widget {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.rating-widget .star {
+    background: none;
+    border: none;
+    padding: 0 0.05rem;
+    color: var(--muted);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.rating-widget .star.is-on {
+    color: #f5c542;
+}
+
+.rating-widget .star:disabled {
+    cursor: default;
+    opacity: 0.7;
+}
+
+.share-panel {
+    margin-top: 1.25rem;
+}
+
+.share-create {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.share-create .input {
+    max-width: 260px;
+}
+
+.share-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.share-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+}
+
+.share-token {
+    font-size: 0.78rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+/* Phase 8: reference image (#27) ----------------------------------------- */
+
+.reference-figure {
+    margin: 0 0 1rem;
+    padding: 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+}
+
+.reference-figure img {
+    display: block;
+    max-width: 100%;
+    max-height: 220px;
+    border-radius: 6px;
+}
+
+.reference-figure figcaption {
+    margin-top: 0.4rem;
+    font-size: 0.85rem;
+}
+
+.reference-preview {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.75rem;
+}
+
+.reference-thumb {
+    max-width: 140px;
+    max-height: 140px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+/* Phase 8: build plates (#28) -------------------------------------------- */
+
+.plates-layout {
+    display: grid;
+    grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+    gap: 1.25rem;
+    align-items: start;
+}
+
+@media (max-width: 900px) {
+    .plates-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.plate-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.plate-list li {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+}
+
+.plate-list li.is-active {
+    border-color: var(--accent);
+}
+
+.plate-select {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    background: none;
+    border: none;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.plate-item-form h3,
+.share-panel h3 {
+    margin: 1.1rem 0 0.5rem;
+    font-size: 0.95rem;
+}
+
+.coord-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 0.6rem;
+}
+
+.coord-row label {
+    display: block;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin-bottom: 0.2rem;
+}
+
+.coord-row .input {
+    max-width: none;
+}

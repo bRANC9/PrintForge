@@ -13,8 +13,9 @@ builder can import it without an import cycle.
 
 The state is intentionally a plain :class:`~typing.TypedDict`: LangGraph merges
 each node's returned partial dict into the running state, so nodes never mutate
-their input. ``bytes`` values (the exported STL) stay in-process -- they are
-never persisted to ``AgentRun.state_json`` as-is (see :mod:`agents.tasks`).
+their input. ``bytes`` values (the exported STL and the optional reference
+photo, terv.md 27. fejezet) stay in-process -- they are never persisted to
+``AgentRun.state_json`` as-is (see :mod:`agents.tasks`).
 """
 
 from __future__ import annotations
@@ -30,6 +31,17 @@ class WorkflowState(TypedDict, total=False):
     prompt: str
     #: Optional tenant/workspace scope used to filter RAG retrieval.
     company_id: str | None
+    #: Optional reference photo bytes (terv.md 27. fejezet). Like ``stl_bytes``
+    #: this stays in-process: it is passed to the LLM as ``images=[...]`` but is
+    #: never serialised into ``AgentRun.state_json`` (only its presence is).
+    reference_image: bytes | None
+    #: Optional free-text note attached to the reference photo by the user.
+    reference_image_note: str
+    #: Whether the reference image was actually accepted by an LLM call. Stays
+    #: ``False`` when there is no image or when vision was unavailable/rejected.
+    reference_image_used: bool
+    #: Why the reference image was *not* used (``None`` when unused/absent).
+    reference_image_warning: str | None
     #: Validated ``ModelSpecification`` as a plain dict (the only LLM<->CAD
     #: contract, terv.md 8. fejezet).
     specification: dict[str, Any]

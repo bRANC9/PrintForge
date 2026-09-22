@@ -22,6 +22,7 @@ from agents.llm import LLMError, LLMProvider
 from agents.spec import ModelSpecification
 
 from .state import WorkflowState, append_history, failure_state
+from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
 __all__ = [
     "PLANNER_SYSTEM_PROMPT",
@@ -95,12 +96,17 @@ def make_planner_node(
     def planner_node(state: WorkflowState) -> dict[str, Any]:
         # The Planner only ever asks for structured data. It must not be able
         # to produce a mesh: there is no mesh concept here at all.
-        prompt = state.get("prompt", "")
+        prompt = reference_prompt_for(provider, state)
         try:
-            raw = provider.structured(
+            # The optional reference image (terv.md 27.) is attached here; the
+            # helper falls back to a text-only call and never fails the run
+            # because of vision.
+            raw, image_used, image_warning = structured_with_reference_image(
+                provider,
                 prompt,
                 PlannerPlan,
                 system=PLANNER_SYSTEM_PROMPT,
+                images=reference_images(state),
             )
             plan = coerce_plan(raw)
         except (LLMError, ValidationError) as exc:
@@ -111,17 +117,22 @@ def make_planner_node(
                 message=str(exc),
             )
 
+        history = append_history(state, "planner: specification ready")
+        if image_warning:
+            history = [*history, f"planner: {image_warning}"]
         return {
             "specification": plan.specification.model_dump(),
             "needs_research": bool(plan.needs_research),
             "research_query": plan.research_query,
             "research_sources": [],
             "research_used": False,
+            "reference_image_used": image_used,
+            "reference_image_warning": image_warning,
             "attempt": 0,
             "max_attempts": int(max_attempts),
             "status": "planned",
             "error": None,
-            "history": append_history(state, "planner: specification ready"),
+            "history": history,
         }
 
     return planner_node

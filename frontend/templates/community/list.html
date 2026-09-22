@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Közösség – PrintForge{% endblock %}
+{% block content %}
+    {# The detail URL template (pk=0) is filled client-side by `detailUrl()`. #}
+    <div data-community-list
+         data-community-detail-url="{% url 'community-detail' pk=0 %}"
+         x-data="communityList">
+        <header class="page-head">
+            <div>
+                <h1>Közösségi modellek</h1>
+                <p class="muted">Nyilvános, AI-val generált parametrikus modellek. Böngészés bejelentkezés nélkül is.</p>
+            </div>
+            <div class="page-head-actions">
+                <input class="input"
+                       type="search"
+                       placeholder="Keresés név / leírás szerint…"
+                       x-model="q"
+                       @input="scheduleSearch()">
+            </div>
+        </header>
+        <section class="panel filter-panel">
+            <div class="form-row">
+                <label for="community-tag">Címke</label>
+                <select id="community-tag"
+                        class="input"
+                        x-model="tag"
+                        @change="onFilterChange()">
+                    <option value="">Minden címke</option>
+                    <template x-for="item in tags" :key="item.slug">
+                        <option :value="item.slug" x-text="item.name"></option>
+                    </template>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="community-license">Licenc</label>
+                <select id="community-license"
+                        class="input"
+                        x-model="license"
+                        @change="onFilterChange()">
+                    <option value="">Minden licenc</option>
+                    <template x-for="item in licenses" :key="item.value">
+                        <option :value="item.value" x-text="item.label"></option>
+                    </template>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="community-ordering">Rendezés</label>
+                <select id="community-ordering"
+                        class="input"
+                        x-model="ordering"
+                        @change="onFilterChange()">
+                    <option value="newest">Legújabb</option>
+                    <option value="downloads">Legtöbb letöltés</option>
+                    <option value="rating">Legjobb értékelés</option>
+                </select>
+            </div>
+        </section>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted"
+           x-show="!loading && !error && !projects.length"
+           x-cloak>Nincs a szűrőknek megfelelő nyilvános projekt.</p>
+        <div class="project-grid community-grid"
+             x-show="!loading && projects.length"
+             x-cloak>
+            <template x-for="project in projects" :key="project.id">
+                <a class="card project-card community-card"
+                   :href="detailUrl(project.id)">
+                    <h2 x-text="project.name"></h2>
+                    <p class="muted" x-text="project.description || 'Nincs leírás.'"></p>
+                    <p class="tag-row">
+                        <template x-for="slug in project.tags" :key="slug">
+                            <span class="badge tag-chip" x-text="slug"></span>
+                        </template>
+                    </p>
+                    <footer>
+                        <span class="badge" x-text="project.license_display || 'Nincs licenc'"></span>
+                        <span class="muted" x-text="ratingText(project.rating)"></span>
+                        <span class="muted" x-text="project.download_count + ' letöltés'"></span>
+                    </footer>
+                </a>
+            </template>
+        </div>
+        <div class="form-actions" x-show="!loading && hasMore" x-cloak>
+            <button type="button"
+                    class="btn"
+                    @click="loadMore()"
+                    :disabled="loadingMore"
+                    x-text="loadingMore ? 'Betöltés…' : 'Továbbiak betöltése'"></button>
+        </div>
+        <p class="muted" x-show="!loading && projects.length" x-cloak>
+            <span x-text="count + ' találat'"></span>
+        </p>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/community.js' %}"></script>
+{% endblock %}

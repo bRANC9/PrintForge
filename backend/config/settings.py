@@ -190,9 +190,17 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [REPO_ROOT / "frontend" / "static"]
 
+# Compressed + manifest: gzip on the wire and a content hash in every filename
+# (`app.<hash>.js`). The hash is what makes cache-busting work: a new build emits
+# new URLs, so browsers never serve a stale asset after a deploy. Do not switch
+# back to CompressedStaticFilesStorage -- that one keeps stable filenames and
+# requires a hard refresh on every release.
+# The forgiving subclass keeps that behaviour but falls back to the original
+# filename when the manifest is absent (tests, fresh checkout, CI), instead of
+# raising "Missing staticfiles manifest entry" on every template render.
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+    "staticfiles": {"BACKEND": "config.storage.ForgivingCompressedManifestStaticFilesStorage"},
 }
 
 MEDIA_URL = "media/"

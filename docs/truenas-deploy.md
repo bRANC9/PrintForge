@@ -95,14 +95,22 @@ credentials via `&db-env`; `web` holds the shared app env via `&app-env`, which
 | --- | --- | --- |
 | `POSTGRES_PASSWORD` | `db` | A strong password (web/worker inherit it) |
 | `DJANGO_SECRET_KEY` | `web` | `python3 -c "import secrets;print(secrets.token_urlsafe(64))"` |
-| `DJANGO_ALLOWED_HOSTS` | `web` | Your NAS hostname / IP |
+| `DJANGO_ALLOWED_HOSTS` | `web` | Every hostname/IP you open in the browser **and** your NAS hostname / IP, comma-separated (e.g. `printforge.lan,192.168.1.250,localhost`) |
+| `DJANGO_CSRF_TRUSTED_ORIGINS` | `web` | The browser **origin** including scheme and port, e.g. `http://192.168.1.250:8080` (required for logins/actions from a non-`localhost` origin) |
 | `OLLAMA_BASE_URL` | `web` | Ollama host. Default reaches Ollama on the Docker host; change it if Ollama runs elsewhere (`http://ollama:11434` for internal Ollama) |
 | `/mnt/<POOL>/...` | `pg`, `redis`, `media`, `scratch` | Your pool dataset paths |
 | `"8080:8000"` | `web` | A different host port if 8080 is taken (optional) |
 
-`DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS` and `OLLAMA_BASE_URL` are edited in
-the `web` block only — `worker` inherits them through the anchor (the LLM calls
-run in the Celery worker).
+`DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` and
+`OLLAMA_BASE_URL` are edited in the `web` block only — `worker` inherits them
+through the anchor (the LLM calls run in the Celery worker).
+
+> **Allowed hosts vs. CSRF origin.** `DJANGO_ALLOWED_HOSTS` takes **hostnames
+> and IPs only** (no port, no scheme). `DJANGO_CSRF_TRUSTED_ORIGINS` takes full
+> **origins** (`http://host:port`) and is what makes POSTs work when you open the
+> app by IP/port instead of `localhost`. Missing the first gives `400
+> DisallowedHost` on API calls (the page loads but lists nothing); missing the
+> second makes login/actions fail with a CSRF error.
 
 ### A4. Storage mapping in the UI
 
@@ -165,6 +173,47 @@ errors.
 > interpolation (literal values only). Do not add a `Watchtower` service — the
 > host one already picks up new `:latest` images via the labels in the YAML.
 
+#### Symptom: the project list is empty even though pages load
+
+The `/projects/` page renders (it is a public template) but the cards are filled
+client-side from `/api/v1/projects/`. If that call is rejected, the grid stays
+empty and no card is clickable. Check the browser DevTools → **Network** tab and
+look for the API request:
+
+| Response | Cause | Fix |
+| --- | --- | --- |
+| `400 DisallowedHost` | The browser origin's IP/hostname is missing from `DJANGO_ALLOWED_HOSTS` | Add it (A3) and recreate `web` |
+| `403 Forbidden` | You are not logged in, or your user is not a member of any workspace | Log in; ensure the user has a `WorkspaceMember` row |
+
+To confirm from inside the container, compare the two calls:
+
+```bash
+# 200 -> Django is fine, the issue is the browser's Host header
+docker exec -it <web-container> \
+  python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/v1/projects/').status)"
+
+# 400 -> the IP is not in DJANGO_ALLOWED_HOSTS
+curl -si http://<truenas-host>:8080/api/v1/projects/ | head -1
+```
+
+**Changing env values requires recreating the container** — Compose applies
+`environment:` only at container creation, so `restart` is not enough:
+
+```bash
+# Path B
+docker compose --env-file ../.env -f docker-compose.prod.yml up -d --force-recreate web
+# Path A: Stop then Start the app in the TrueNAS UI (an Update/Redeploy may not recreate it)
+docker exec <web-container> env | grep DJANGO_ALLOWED_HOSTS   # confirm it stuck
+```
+
+> **Static assets after a deploy.** The app uses WhiteNoise with a
+> content-hashed manifest (`app.<hash>.js`), so a new image emits new asset URLs
+> and browsers fetch them automatically — no hard refresh needed. Hashed names
+> are only produced when `DJANGO_DEBUG=false` (in `DEBUG` the plain filename is
+> used on purpose). If a page keeps serving stale JS/CSS, check that
+> `DJANGO_DEBUG=false` is set and that `collectstatic` ran (it does on every
+> container start).
+
 ---
 
 ## Path B — SSH + `docker compose` (alternative)
@@ -194,8 +243,8 @@ Edit `/mnt/<pool>/apps/printforge/.env`:
 ```env
 DJANGO_DEBUG=false
 DJANGO_SECRET_KEY=<paste output of the command below>
-DJANGO_ALLOWED_HOSTS=truenas.lan,192.168.1.10
-DJANGO_CSRF_TRUSTED_ORIGINS=          # only needed with HTTPS (section 6)
+DJANGO_ALLOWED_HOSTS=truenas.lan,192.168.1.10,localhost
+DJANGO_CSRF_TRUSTED_ORIGINS=http://192.168.1.10:8080   # origin incl. port; https://<domain> behind TLS (see section 6)
 POSTGRES_PASSWORD=<strong-password>
 DATA_ROOT=/mnt/<pool>/apps/printforge
 SANDBOX_WORK_DIR=/mnt/<pool>/apps/printforge/scratch

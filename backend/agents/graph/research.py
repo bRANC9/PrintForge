@@ -24,6 +24,7 @@ from agents.llm import LLMError, LLMProvider
 from agents.spec import ModelSpecification
 
 from .state import WorkflowState, append_history
+from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
 __all__ = ["RESEARCH_SYSTEM_PROMPT", "make_research_node"]
 
@@ -109,15 +110,24 @@ def make_research_node(
         sources = [_source_of(document) for document in documents]
         specification = dict(state.get("specification") or {})
         used = False
+        image_used = False
+        image_warning: str | None = None
 
         if documents:
             try:
-                enriched = provider.structured(
+                # The reference image (terv.md 27.) is offered to Research as
+                # well; the helper degrades to a text-only call on any vision
+                # problem so enrichment stays best-effort.
+                enriched, image_used, image_warning = structured_with_reference_image(
+                    provider,
                     _research_prompt(
-                        state.get("prompt", ""), specification, _format_context(documents)
+                        reference_prompt_for(provider, state),
+                        specification,
+                        _format_context(documents),
                     ),
                     ModelSpecification,
                     system=RESEARCH_SYSTEM_PROMPT,
+                    images=reference_images(state),
                 )
                 specification = ModelSpecification.model_validate(enriched).model_dump()
                 used = True
@@ -125,11 +135,17 @@ def make_research_node(
                 # Enrichment is optional: fall back to the Planner spec.
                 logger.warning("Research enrichment failed, keeping Planner spec: %s", exc)
 
+        # The Planner may already have used the image; never downgrade that.
+        any_image_used = bool(state.get("reference_image_used")) or image_used
+        warning = state.get("reference_image_warning") or image_warning
+
         entry = f"research: {len(sources)} source(s), enriched={used}"
         return {
             "specification": specification,
             "research_sources": sources,
             "research_used": used,
+            "reference_image_used": any_image_used,
+            "reference_image_warning": warning,
             "status": "researched",
             "history": append_history(state, entry),
         }

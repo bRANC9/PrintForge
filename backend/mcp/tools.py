@@ -15,16 +15,32 @@ class Tool:
     name: str
     description: str
     handler: Callable
+    #: Optional permission gate, invoked with the same keyword arguments as the
+    #: handler *before* it runs. It must raise (e.g.
+    #: :class:`~django.core.exceptions.PermissionDenied`) when the caller is not
+    #: allowed. ``None`` means "no workspace-role check" and is only used by the
+    #: phase-1 skeleton tools.
+    authorize: Callable | None = None
 
 
 _REGISTRY: dict[str, Tool] = {}
 
 
-def register(name: str, description: str) -> Callable:
+def register(
+    name: str,
+    description: str,
+    *,
+    authorize: Callable | None = None,
+) -> Callable:
     def decorator(func: Callable) -> Callable:
         if name in _REGISTRY:
             raise ValueError(f"MCP tool already registered: {name}")
-        _REGISTRY[name] = Tool(name=name, description=description, handler=func)
+        _REGISTRY[name] = Tool(
+            name=name,
+            description=description,
+            handler=func,
+            authorize=authorize,
+        )
         return func
 
     return decorator
@@ -38,10 +54,14 @@ def call(tool_name: str, /, **kwargs):
     # The tool identifier is positional-only so it never collides with a tool
     # parameter literally named ``name`` (e.g. ``create_workspace``).
     #
-    # TODO(phase-7): enforce the same workspace-role permissions here as for the
-    # web user (terv.md 20., 25. fejezet) before dispatching to the handler.
-    # This is the single chokepoint every MCP tool must flow through; tools may
-    # not opt out of it (`allow_shell` stays forbidden).
-    if tool_name not in _REGISTRY:
+    # Single chokepoint every MCP tool must flow through (terv.md 20., 25.
+    # fejezet): when a tool declares an ``authorize`` gate it is enforced here,
+    # with the same workspace-role rules as the web user, *before* the handler
+    # runs. Tools cannot opt out of their own gate and `allow_shell` stays
+    # forbidden.
+    tool = _REGISTRY.get(tool_name)
+    if tool is None:
         raise KeyError(f"Unknown MCP tool: {tool_name}")
-    return _REGISTRY[tool_name].handler(**kwargs)
+    if tool.authorize is not None:
+        tool.authorize(**kwargs)
+    return tool.handler(**kwargs)
