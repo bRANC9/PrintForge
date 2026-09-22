@@ -79,6 +79,13 @@ def test_happy_path_generates_source_then_exports_stl():
     assert state["validation"]["status"] == "valid"
     assert state["error"] is None
 
+    # A valid model now goes through the optional vision review
+    # (docs/vision-self-check.md); without a vision provider it skips, but the
+    # decision is still recorded and the run stays "done".
+    assert state["vision_used"] is False
+    assert state["vision_review"] == {"skipped": True, "reason": "no_vision"}
+    assert any(entry.startswith("review: skipped") for entry in state["history"])
+
     # The Planner only produces structured data (one structured call) ...
     assert provider.calls == ["PlannerPlan"]
     # ... and the CAD agent only renders OpenSCAD source.

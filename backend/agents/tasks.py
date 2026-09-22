@@ -47,9 +47,11 @@ from django.utils import timezone
 
 from accounts.models import User
 from agents.graph import WorkflowDeps, run_workflow
+from agents.graph.reviser import make_llm_reviser
 from agents.llm import get_provider
 from agents.services import fail_run, finish_run, start_run
 from designs.cad.openscad import OpenSCADBackend
+from designs.cad.preview import render_stl_preview
 from designs.models import ModelVersion, model_artifact_path
 from designs.services import create_next_version
 from embeddings.services import retrieve
@@ -68,6 +70,7 @@ logger = logging.getLogger(__name__)
 
 SCAD_FILENAME = "model.scad"
 STL_FILENAME = "model.stl"
+PREVIEW_FILENAME = "preview.png"
 
 
 def build_dependencies() -> WorkflowDeps:
@@ -82,12 +85,20 @@ def build_dependencies() -> WorkflowDeps:
     by ``settings.RAG_ENABLED`` and by ``DB_IS_POSTGRES``: when RAG is disabled
     it returns ``[]`` without touching a model or the database, and the Research
     node keeps the Planner's specification untouched.
+
+    The CAD retry hook is the LLM reviser (docs/vision-self-check.md 4.): it
+    turns validator/vision errors into a corrected specification, falling back
+    to the unchanged one on any failure. The vision self-check gets the real
+    headless preview renderer.
     """
+    provider = get_provider()
     return WorkflowDeps(
-        provider=get_provider(),
+        provider=provider,
         cad_backend=OpenSCADBackend(),
         retrieve_fn=retrieve,
         max_attempts=int(getattr(settings, "AGENT_MAX_ATTEMPTS", 3)),
+        reviser=make_llm_reviser(provider),
+        preview_renderer=render_stl_preview,
     )
 
 
@@ -219,6 +230,26 @@ def _workflow_error(
     )
 
 
+def _vision_review_summary(review: Any) -> dict[str, Any]:
+    """Reduce a ``vision_review`` payload to a JSON-safe summary (no bytes).
+
+    The review node stores either a ``ReviewResult`` dump
+    (``matches``/``issues``/``summary``) or a ``{"skipped": True, "reason":
+    ...}`` marker; both are already byte-free. This helper only keeps the
+    documented fields, so a future reviewer cannot leak large/opaque data into
+    ``AgentRun.state_json`` or ``ModelVersion.validation_json``.
+    """
+    if not isinstance(review, dict) or not review:
+        return {}
+    if review.get("skipped"):
+        return {"skipped": True, "reason": review.get("reason")}
+    return {
+        "matches": bool(review.get("matches")),
+        "issues": [str(issue) for issue in review.get("issues") or []],
+        "summary": str(review.get("summary") or ""),
+    }
+
+
 def _summarise_state(
     state: dict[str, Any],
     *,
@@ -228,8 +259,9 @@ def _summarise_state(
 
     The raw ``stl_bytes`` are deliberately not persisted on the run: only their
     size is kept (the artifact itself is written to the storage backend). The
-    visual-prompt payload (docs/visual-editing.md) is likewise reduced to its
-    count -- never the raw annotation JSON.
+    same holds for the rendered ``preview_image`` -- only the vision verdict and
+    usage flag are summarised. The visual-prompt payload (docs/visual-editing.md)
+    is likewise reduced to its count -- never the raw annotation JSON.
     """
     scad_source = str(state.get("scad_source") or "")
     stl_bytes = state.get("stl_bytes") or b""
@@ -248,6 +280,10 @@ def _summarise_state(
         "reference_image_warning": state.get("reference_image_warning"),
         # Visual-prompt provenance (docs/visual-editing.md): count only.
         "annotation_count": len(annotations or []),
+        # Vision self-check provenance (docs/vision-self-check.md): flags and
+        # verdict only, never the preview bytes.
+        "vision_used": bool(state.get("vision_used", False)),
+        "vision_review": _vision_review_summary(state.get("vision_review")),
         "validation": dict(state.get("validation") or {}),
         "scad_chars": len(scad_source),
         "stl_bytes": len(stl_bytes),
@@ -278,6 +314,11 @@ def _persist_version(
     For a visual-prompt edit (docs/visual-editing.md 3.5) the new version also
     records ``parent_version`` (the edited base) and ``annotations_json`` (the
     exact input payload), forming the reproducible edit chain.
+
+    When the vision self-check rendered a preview (docs/vision-self-check.md 5.)
+    the PNG is written through the storage backend and linked on
+    ``ModelVersion.preview_image``; ``validation_json`` records its path and the
+    byte-free ``vision_review`` summary. Runs without a preview are unchanged.
     """
     reference_image = state.get("reference_image")
     reference_note = str(state.get("reference_image_note") or "")
@@ -297,8 +338,10 @@ def _persist_version(
     storage = get_storage()
     scad_rel = model_artifact_path(version, SCAD_FILENAME)
     stl_rel = model_artifact_path(version, STL_FILENAME)
+    preview_rel = model_artifact_path(version, PREVIEW_FILENAME)
     scad_source = str(state.get("scad_source") or "")
     stl_bytes = state.get("stl_bytes") or b""
+    preview_bytes = state.get("preview_image") or b""
     storage.write_bytes(scad_rel, scad_source.encode("utf-8"))
     storage.write_bytes(stl_rel, stl_bytes)
 
@@ -306,7 +349,7 @@ def _persist_version(
     version.stl_file.name = stl_rel
     version.parent_version = parent_version
     version.annotations_json = list(annotations or [])
-    version.validation_json = {
+    validation_json = {
         "status": "done",
         "stage": "done",
         "errors": [],
@@ -321,17 +364,26 @@ def _persist_version(
         "scad_file": scad_rel,
         "stl_file": stl_rel,
         "stl_bytes": len(stl_bytes),
+        # Vision self-check (docs/vision-self-check.md 5.): the path of the
+        # rendered preview and the byte-free review verdict.
+        "vision_used": bool(state.get("vision_used", False)),
+        "vision_review": _vision_review_summary(state.get("vision_review")),
         "completed_at": timezone.now().isoformat(),
     }
-    version.save(
-        update_fields=[
-            "scad_file",
-            "stl_file",
-            "parent_version",
-            "annotations_json",
-            "validation_json",
-        ]
-    )
+    update_fields = [
+        "scad_file",
+        "stl_file",
+        "parent_version",
+        "annotations_json",
+        "validation_json",
+    ]
+    if preview_bytes:
+        storage.write_bytes(preview_rel, preview_bytes)
+        version.preview_image.name = preview_rel
+        validation_json["preview_file"] = preview_rel
+        update_fields.append("preview_image")
+    version.validation_json = validation_json
+    version.save(update_fields=update_fields)
     return version
 
 

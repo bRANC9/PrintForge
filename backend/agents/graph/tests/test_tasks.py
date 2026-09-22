@@ -16,7 +16,7 @@ from django.conf import settings
 from factories import ModelVersionFactory, ProjectFactory
 
 from agents.graph import WorkflowDeps
-from agents.graph.tests.fakes import FakeCADBackend, FakeProvider
+from agents.graph.tests.fakes import FakeCADBackend, FakeProvider, FakeVisionProvider
 from agents.llm import LLMError
 from agents.models import AgentRun, AgentRunStatus
 from agents.spec import ModelSpecification
@@ -24,6 +24,8 @@ from agents.tasks import NotificationKind, build_dependencies, run_agent_workflo
 from files.services import LocalStorage
 
 pytestmark = pytest.mark.django_db
+
+PREVIEW_PNG = b"\x89PNG\r\n\x1a\nfake-preview"
 
 
 class NotifyRecorder:
@@ -41,13 +43,17 @@ class NotifyRecorder:
 
 
 def _deps(
-    *, provider: FakeProvider | None = None, cad: FakeCADBackend | None = None
+    *,
+    provider: FakeProvider | None = None,
+    cad: FakeCADBackend | None = None,
+    **overrides: Any,
 ) -> WorkflowDeps:
     return WorkflowDeps(
         provider=provider or FakeProvider(),
         cad_backend=cad or FakeCADBackend(),
         retrieve_fn=lambda *args, **kwargs: [],
         max_attempts=3,
+        **overrides,
     )
 
 
@@ -84,6 +90,45 @@ def test_task_persists_run_version_and_artifacts(monkeypatch, tmp_path):
     assert version.stl_file.name == f"projects/{project.pk}/v1/model.stl"
     assert storage.read_bytes(version.scad_file.name) == cad.scad_source.encode("utf-8")
     assert storage.read_bytes(version.stl_file.name) == cad.stl_bytes
+
+
+def test_task_persists_the_preview_image_and_vision_review(monkeypatch, tmp_path):
+    """The vision self-check's PNG and verdict are stored (docs/vision-self-check.md 5.)."""
+    project = ProjectFactory()
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    deps = _deps(
+        provider=provider,
+        preview_renderer=lambda _stl: PREVIEW_PNG,
+    )
+    storage = _install(monkeypatch, tmp_path, deps)
+
+    run_id = run_agent_workflow(project.pk, "make a holder", project.created_by_id)
+
+    run = AgentRun.objects.get(pk=run_id)
+    assert run.status == AgentRunStatus.DONE
+    assert run.state_json["vision_used"] is True
+    assert run.state_json["vision_review"] == {"matches": True, "issues": [], "summary": "ok"}
+
+    version = project.versions.get()
+    preview_rel = f"projects/{project.pk}/v1/preview.png"
+    assert version.preview_image.name == preview_rel
+    assert storage.read_bytes(preview_rel) == PREVIEW_PNG
+    assert version.validation_json["preview_file"] == preview_rel
+    assert version.validation_json["vision_used"] is True
+    assert version.validation_json["vision_review"]["matches"] is True
+
+
+def test_task_without_vision_has_no_preview_file(monkeypatch, tmp_path):
+    project = ProjectFactory()
+    _install(monkeypatch, tmp_path, _deps())
+
+    run_id = run_agent_workflow(project.pk, "make a holder", project.created_by_id)
+
+    assert AgentRun.objects.get(pk=run_id).status == AgentRunStatus.DONE
+    version = project.versions.get()
+    assert not version.preview_image.name
+    assert "preview_file" not in version.validation_json
+    assert version.validation_json["vision_used"] is False
 
 
 def test_task_without_user_leaves_created_by_empty(monkeypatch, tmp_path):

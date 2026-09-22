@@ -97,6 +97,10 @@ def test_editor_prompt_carries_the_annotation_instruction_and_shape():
     assert provider.systems[0] == EDITOR_SYSTEM_PROMPT
     # Boundary: the system prompt forbids code/mesh output.
     assert "Never emit OpenSCAD code, G-code or STL data" in provider.systems[0]
+    # The Editor must describe geometry with the shared primitive list too.
+    assert "primitives" in provider.systems[0]
+    assert "position" in provider.systems[0]
+    assert "min Z = 0" in provider.systems[0]
 
 
 def test_editor_validation_failure_is_a_structured_editor_error():
@@ -125,3 +129,57 @@ def test_editor_llm_failure_is_a_structured_editor_error():
     assert error["stage"] == "editor"
     assert error["type"] == "LLMError"
     assert "editor model offline" in error["message"]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic anchor enforcement (docs/visual-editing.md 3.5)
+# ---------------------------------------------------------------------------
+
+
+def test_editor_snaps_operation_and_fills_label_from_the_annotation():
+    provider = _provider()
+    node = make_editor_node(provider=provider, max_attempts=3)
+
+    result = node(_state())
+
+    operation = result["specification"]["operations"][0]
+    assert operation["origin"] == {"x": 35.0, "y": 12.5, "z": 8.0}
+    assert operation["normal"] == {"x": 0.0, "y": 0.0, "z": 1.0}
+    assert operation["label"] == ANNOTATION["instruction"]
+
+
+FAR_EDIT_SPEC: dict[str, Any] = {
+    **DEFAULT_SPEC,
+    "operations": [
+        {
+            "kind": "hole",
+            "origin": {"x": 535.0, "y": 12.5, "z": 8.0},  # 500 mm from the annotation
+            "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
+            "depth": 8.0,
+            "diameter": 4.0,
+        }
+    ],
+}
+
+
+def test_editor_records_a_history_warning_for_a_far_operation():
+    provider = _provider(
+        plan={
+            "specification": FAR_EDIT_SPEC,
+            "needs_research": False,
+            "research_query": None,
+        }
+    )
+    node = make_editor_node(provider=provider, max_attempts=3)
+
+    result = node(_state())
+
+    assert result["status"] == "planned"
+    assert result["specification"]["operations"][0]["origin"] == {
+        "x": 535.0,
+        "y": 12.5,
+        "z": 8.0,
+    }
+    anchors = [entry for entry in result["history"] if entry.startswith("editor: anchor:")]
+    assert len(anchors) == 1
+    assert "kept unchanged" in anchors[0]

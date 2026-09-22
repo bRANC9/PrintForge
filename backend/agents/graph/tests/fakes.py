@@ -14,7 +14,13 @@ from agents.llm import LLMProvider
 from agents.spec import ModelSpecification
 from designs.cad.base import CADBackend, GeneratedModel
 
-__all__ = ["DEFAULT_SPEC", "ENRICHED_SPEC", "FakeCADBackend", "FakeProvider"]
+__all__ = [
+    "DEFAULT_SPEC",
+    "ENRICHED_SPEC",
+    "FakeCADBackend",
+    "FakeProvider",
+    "FakeVisionProvider",
+]
 
 DEFAULT_SPEC: dict[str, Any] = ModelSpecification.example()
 
@@ -65,6 +71,50 @@ class FakeProvider(LLMProvider):
                 raise AssertionError("unexpected research enrichment call")
             return dict(self.enriched)
         raise AssertionError(f"unexpected schema {name!r}")
+
+
+class FakeVisionProvider(FakeProvider):
+    """Vision-capable fake: returns canned ``ReviewResult`` payloads in order.
+
+    Everything else is inherited from :class:`FakeProvider`, so the Planner and
+    Research paths keep working. The review calls are recorded separately
+    (``review_prompts``/``review_images``/``review_systems``) and also appended
+    to ``calls`` as ``"ReviewResult"``.
+    """
+
+    name = "fake-vision"
+
+    def __init__(
+        self,
+        *,
+        reviews: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.reviews = [dict(review) for review in (reviews or [])]
+        self.review_prompts: list[str] = []
+        self.review_images: list[list[bytes]] = []
+        self.review_systems: list[str] = []
+
+    def supports_vision(self) -> bool:
+        return True
+
+    def structured(
+        self,
+        prompt: str,
+        schema: type[BaseModel] | dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        name = getattr(schema, "__name__", str(schema))
+        if name == "ReviewResult":
+            self.calls.append(name)
+            self.review_prompts.append(prompt)
+            self.review_images.append(list(kwargs.get("images") or []))
+            self.review_systems.append(str(kwargs.get("system", "")))
+            if not self.reviews:
+                raise AssertionError("unexpected ReviewResult call")
+            return dict(self.reviews.pop(0))
+        return super().structured(prompt, schema, **kwargs)
 
 
 class FakeCADBackend(CADBackend):

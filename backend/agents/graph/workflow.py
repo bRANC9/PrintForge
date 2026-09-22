@@ -13,8 +13,19 @@ Graph shape::
                              v                    | invalid (attempt < max)
                           validate ---------------+
                              |
-                             +-- valid --> END
+                             +-- valid --> review
+                             |                |
+                             |                +-- retry (attempt < max) --> cad
+                             |                |
+                             |                +-- END (match / skip / exhausted)
+                             |
                              +-- invalid after max attempts --> END (status=failed)
+
+    ``review`` is the optional vision self-check (docs/vision-self-check.md):
+    it renders a preview and, when the provider supports vision, asks the model
+    to compare it with the request. It skips (never fails) when there is no STL,
+    no vision or a review error, and it only routes back to ``cad`` while
+    ``attempt < max_attempts``.
 
     In edit mode (non-empty annotations) ``START`` routes to ``editor`` instead
     of ``planner``; the editor returns the same partial state, so the rest of
@@ -37,15 +48,24 @@ from langgraph.graph import END, START, StateGraph
 from agents.llm import LLMProvider
 from agents.rag import retrieve
 from designs.cad.base import CADBackend
+from designs.cad.preview import render_stl_preview
 
 from .cad import SpecReviser, make_cad_node
 from .editor import make_editor_node
 from .planner import make_planner_node
 from .research import make_research_node
+from .review import make_review_node
 from .state import WorkflowState
 from .validator import make_validate_node
 
-__all__ = ["WorkflowDeps", "build_workflow", "route_entry", "run_workflow"]
+__all__ = [
+    "WorkflowDeps",
+    "build_workflow",
+    "route_after_review",
+    "route_after_validate",
+    "route_entry",
+    "run_workflow",
+]
 
 
 def _default_max_attempts() -> int:
@@ -71,6 +91,10 @@ class WorkflowDeps:
     research_limit: int = 5
     #: Optional CAD retry hook (see :data:`agents.graph.cad.SpecReviser`).
     reviser: SpecReviser | None = None
+    #: Renderer used by the vision self-check: ``bytes(stl) -> PNG bytes``.
+    #: Defaults to the import-light headless renderer; tests inject a fake so no
+    #: real mesh/trimesh/Pillow work is needed.
+    preview_renderer: Callable[..., bytes] = render_stl_preview
 
 
 # ---------------------------------------------------------------------------
@@ -106,12 +130,28 @@ def route_after_cad(state: WorkflowState) -> str:
 
 
 def route_after_validate(state: WorkflowState) -> str:
-    """Bounded retry: back to ``cad`` only while attempts remain.
+    """Route a validated model into the vision ``review``, or retry/finish.
 
     ``validate`` sets ``status == "retry"`` only when the model is invalid *and*
     ``attempt < max_attempts``; once the bound is reached it sets
-    ``status == "failed"`` and the workflow ends. This is what makes the loop
-    bounded -- there is no unconditional back-edge.
+    ``status == "failed"`` and the workflow ends. A valid model (``"done"``)
+    goes through the optional vision self-check before finishing. This is what
+    makes the loop bounded -- there is no unconditional back-edge.
+    """
+    status = state.get("status")
+    if status == "done":
+        return "review"
+    if status == "retry":
+        return "cad"
+    return END
+
+
+def route_after_review(state: WorkflowState) -> str:
+    """Bounded retry: back to ``cad`` only while the review asked for one.
+
+    The review sets ``status == "retry"`` only when the preview did not match
+    *and* ``attempt < max_attempts``; otherwise it keeps ``status == "done"``
+    (match, no vision, skipped or exhausted bound), so the workflow ends.
     """
     return "cad" if state.get("status") == "retry" else END
 
@@ -149,6 +189,13 @@ def build_workflow(deps: WorkflowDeps):
         "validate",
         make_validate_node(cad_backend=deps.cad_backend),
     )
+    graph.add_node(
+        "review",
+        make_review_node(
+            deps.provider,
+            render_preview=deps.preview_renderer,
+        ),
+    )
 
     graph.add_conditional_edges(
         START,
@@ -180,6 +227,11 @@ def build_workflow(deps: WorkflowDeps):
     graph.add_conditional_edges(
         "validate",
         route_after_validate,
+        {"review": "review", "cad": "cad", END: END},
+    )
+    graph.add_conditional_edges(
+        "review",
+        route_after_review,
         {"cad": "cad", END: END},
     )
 
@@ -236,6 +288,10 @@ def run_workflow(
         "max_attempts": deps.max_attempts,
         "research_sources": [],
         "research_used": False,
+        # Vision self-check (docs/vision-self-check.md): the review node fills
+        # these in; the empty defaults keep the summary/persistence paths simple.
+        "vision_used": False,
+        "vision_review": {},
         "status": "pending",
         "error": None,
         "history": [],

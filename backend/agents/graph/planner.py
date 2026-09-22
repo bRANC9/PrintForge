@@ -39,7 +39,16 @@ PLANNER_SYSTEM_PROMPT = (
     "(2) 'needs_research' and 'research_query' - whether real-world product or "
     "standard-part data (e.g. exact phone dimensions, ISO screw sizes) must be "
     "looked up first, and a concise lookup query if so. "
-    "Use sensible printable defaults when a value is missing. "
+    "Describe the real geometry with the specification's 'primitives' list: "
+    "build the object from one or more primitives in millimetres, each one a "
+    "'box', 'cylinder', 'sphere' or 'cone' placed by its 'position' - the "
+    "primitive centre in mm - with an optional 'rotation' in degrees. "
+    "Use role 'add' for material and role 'subtract' for holes and cutouts. "
+    "The part must rest on the build plate (min Z = 0) and use sensible, "
+    "printable sizes. Keep dimensions, angle, wall_thickness and mounting "
+    "filled for compatibility, and use 'primitives': [] only when the object "
+    "really is the built-in phone holder; otherwise always describe the object "
+    "with primitives. Use sensible printable defaults when a value is missing. "
     "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
 )
 

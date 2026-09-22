@@ -14,19 +14,31 @@ data. The operations are rendered later by the CAD node through
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
+from django.conf import settings
 from pydantic import ValidationError
 
 from agents.llm import LLMError, LLMProvider
+from agents.spec import MAX_OPERATION_LABEL
 
 from .planner import PlannerPlan, coerce_plan
 from .state import WorkflowState, append_history, failure_state
 from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
-__all__ = ["EDITOR_SYSTEM_PROMPT", "make_editor_node"]
+__all__ = [
+    "DEFAULT_ANCHOR_TOLERANCE_MM",
+    "EDITOR_SYSTEM_PROMPT",
+    "enforce_annotation_anchors",
+    "make_editor_node",
+]
+
+#: Snap tolerance (mm) used when ``settings.AGENT_ANCHOR_TOLERANCE_MM`` is absent.
+DEFAULT_ANCHOR_TOLERANCE_MM = 25.0
 
 EDITOR_SYSTEM_PROMPT = (
     "You are the Editor agent of an OpenSCAD 3D-printing workflow. "
@@ -35,6 +47,15 @@ EDITOR_SYSTEM_PROMPT = (
     "centroid + average normal), each carrying its own 'instruction'. "
     "Return ONE JSON object with 'specification' (the FULL updated "
     "ModelSpecification) plus 'needs_research'/'research_query'. "
+    "The specification describes real geometry with its 'primitives' list: "
+    "one or more primitives in millimetres, each one a 'box', 'cylinder', "
+    "'sphere' or 'cone' placed by its 'position' - the primitive centre in mm - "
+    "with an optional 'rotation' in degrees. Use role 'add' for material and "
+    "role 'subtract' for holes and cutouts; the part must rest on the build "
+    "plate (min Z = 0) and use sensible, printable sizes. "
+    "Keep the base object's existing 'primitives' unless the edit instruction "
+    "explicitly changes them, and keep the existing 'primitives': [] only when "
+    "the object really is the built-in phone holder. "
     "Each annotation instruction MUST become one or more entries in the "
     "specification's 'operations' list: use the annotation's point (or region "
     "centroid) as the operation 'origin' in model coordinates (mm) and the "
@@ -72,6 +93,150 @@ def _editor_prompt(provider: LLMProvider, state: WorkflowState) -> str:
         "edit requires a change; emit 'operations': [] when the edit adds no "
         "feature."
     )
+
+
+class _Anchor(NamedTuple):
+    """One reference frame derived from an annotation (docs/visual-editing.md 2)."""
+
+    origin: tuple[float, float, float]
+    axis: tuple[float, float, float]
+    label: str
+
+
+def _coerce_vec3(value: Any) -> tuple[float, float, float] | None:
+    """Return a finite ``(x, y, z)`` tuple, or ``None`` for an invalid vector.
+
+    ``annotations`` arrive from the API as JSON (``[x, y, z]``) while
+    ``operations`` come from a dumped ``ModelSpecification`` (``{x, y, z}``), so
+    both shapes are accepted.
+    """
+    if isinstance(value, dict):
+        raw: tuple[Any, Any, Any] = (value.get("x"), value.get("y"), value.get("z"))
+    elif isinstance(value, (list, tuple)) and len(value) == 3:
+        raw = (value[0], value[1], value[2])
+    else:
+        return None
+    try:
+        x, y, z = (float(component) for component in raw)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(component) for component in (x, y, z)):
+        return None
+    return (x, y, z)
+
+
+def _normalise(vector: tuple[float, float, float] | None) -> tuple[float, float, float] | None:
+    """Return the unit vector of *vector*, or ``None`` when it is zero/invalid."""
+    if vector is None:
+        return None
+    x, y, z = vector
+    length = math.sqrt(x * x + y * y + z * z)
+    if not math.isfinite(length) or length <= 0.0:
+        return None
+    return (x / length, y / length, z / length)
+
+
+def _vec3_payload(template: Any, values: tuple[float, float, float]) -> Any:
+    """Serialise *values* in the same container shape as *template*.
+
+    Keeping the caller's shape (list vs ``{"x": ...}``) means an operation that
+    is already anchored round-trips byte-for-byte.
+    """
+    if isinstance(template, (list, tuple)):
+        return [values[0], values[1], values[2]]
+    return {"x": values[0], "y": values[1], "z": values[2]}
+
+
+def _reference_frames(annotations: list[dict[str, Any]]) -> list[_Anchor]:
+    """Build the usable reference frames from the annotation payload.
+
+    The reference origin is ``region.centroid`` when present, otherwise the
+    annotation ``point``; the axis is the (normalised) annotation ``normal``.
+    Annotations without a valid origin or with a zero normal are skipped -- they
+    cannot anchor anything deterministically.
+    """
+    frames: list[_Anchor] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        region = annotation.get("region")
+        region = region if isinstance(region, dict) else {}
+        origin_raw = region.get("centroid")
+        if origin_raw is None:
+            origin_raw = annotation.get("point")
+        origin = _coerce_vec3(origin_raw)
+        if origin is None:
+            continue
+        normal_raw = annotation.get("normal")
+        if normal_raw is None:
+            normal_raw = region.get("normal")
+        axis = _normalise(_coerce_vec3(normal_raw))
+        if axis is None:
+            continue
+        frames.append(
+            _Anchor(
+                origin=origin,
+                axis=axis,
+                label=str(annotation.get("instruction") or "").strip(),
+            )
+        )
+    return frames
+
+
+def enforce_annotation_anchors(
+    operations: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    *,
+    tolerance_mm: float,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Deterministically anchor *operations* to the user's annotations.
+
+    The LLM must not be able to silently place a feature far from the surface
+    prompt that requested it. Each operation is therefore matched to the nearest
+    annotation reference (``region.centroid`` else ``point``): within
+    *tolerance_mm* its ``origin`` and ``normal`` are snapped to that reference
+    and an empty ``label`` is filled from the annotation ``instruction``;
+    otherwise it is kept and a warning is returned. The input dicts are never
+    mutated -- the returned operations are deep copies.
+
+    Returns a ``(operations, warnings)`` tuple.
+    """
+    frames = _reference_frames(annotations)
+    if not frames:
+        # No usable annotation: nothing to enforce, no warnings, no mutation.
+        return [copy.deepcopy(operation) for operation in operations], []
+
+    try:
+        tolerance = float(tolerance_mm)
+    except (TypeError, ValueError):
+        tolerance = 0.0
+
+    adjusted: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for index, operation in enumerate(operations):
+        copied = copy.deepcopy(operation)
+        origin = _coerce_vec3(copied.get("origin"))
+        if origin is None:
+            warnings.append(f"operation {index} has no valid origin (kept unchanged)")
+            adjusted.append(copied)
+            continue
+
+        nearest = min(frames, key=lambda frame: math.dist(origin, frame.origin))
+        distance = math.dist(origin, nearest.origin)
+        if distance <= tolerance:
+            copied["origin"] = _vec3_payload(copied.get("origin"), nearest.origin)
+            copied["normal"] = _vec3_payload(copied.get("normal"), nearest.axis)
+            if not str(copied.get("label") or "").strip():
+                copied["label"] = nearest.label[:MAX_OPERATION_LABEL]
+            adjusted.append(copied)
+        else:
+            warnings.append(
+                f"operation {index} is {distance:.1f} mm from the nearest annotation "
+                "(kept unchanged)"
+            )
+            adjusted.append(copied)
+
+    return adjusted, warnings
 
 
 def make_editor_node(
@@ -112,11 +277,33 @@ def make_editor_node(
                 message=str(exc),
             )
 
+        specification = plan.specification.model_dump()
         history = append_history(state, "editor: specification updated (edit mode)")
+
+        # Deterministic guardrail: the LLM must not silently place a feature far
+        # from the annotation that asked for it (docs/visual-editing.md 3.5).
+        annotations = list(state.get("annotations") or [])
+        if annotations:
+            tolerance = getattr(
+                settings,
+                "AGENT_ANCHOR_TOLERANCE_MM",
+                DEFAULT_ANCHOR_TOLERANCE_MM,
+            )
+            operations, anchor_warnings = enforce_annotation_anchors(
+                specification.get("operations", []),
+                annotations,
+                tolerance_mm=tolerance,
+            )
+            specification["operations"] = operations
+            history = [
+                *history,
+                *(f"editor: anchor: {warning}" for warning in anchor_warnings),
+            ]
+
         if image_warning:
             history = [*history, f"editor: {image_warning}"]
         return {
-            "specification": plan.specification.model_dump(),
+            "specification": specification,
             "needs_research": bool(plan.needs_research),
             "research_query": plan.research_query,
             "research_sources": [],

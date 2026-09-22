@@ -67,6 +67,19 @@ class WorkflowState(TypedDict, total=False):
     scad_source: str
     #: STL bytes produced by the Validator after a successful validation.
     stl_bytes: bytes
+    #: Rendered PNG preview of ``stl_bytes`` produced by the vision self-check
+    #: (docs/vision-self-check.md). Like ``stl_bytes`` and ``reference_image``
+    #: this stays in-process: it is handed to the vision LLM as ``images=[...]``
+    #: but is **never** serialised into ``AgentRun.state_json`` (only a
+    #: bytes-free summary is -- see :mod:`agents.tasks`).
+    preview_image: bytes
+    #: Structured vision review verdict: either a ``ReviewResult`` dump
+    #: (``matches``/``issues``/``summary``) or a ``{"skipped": True,
+    #: "reason": ...}`` marker. Contains no bytes, so it is safe to persist.
+    vision_review: dict[str, Any]
+    #: Whether the rendered preview was actually judged by a vision model.
+    #: ``False`` when there was no STL, no vision support, or the review failed.
+    vision_used: bool
     #: Structured validation result (status/errors/attempt).
     validation: dict[str, Any]
     #: 1-based number of CAD generation attempts already made.
