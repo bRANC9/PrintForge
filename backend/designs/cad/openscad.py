@@ -64,6 +64,9 @@ __all__ = [
     "DEFAULT_IMAGE",
     "MAX_OPERATIONS",
     "MAX_PRIMITIVES",
+    "MAX_PROFILE_POINTS",
+    "MAX_ROUND_RADIUS_MM",
+    "MIN_PROFILE_POINTS",
     "PRIMITIVE_ROLES",
     "PRIMITIVE_TYPES",
     "SANDBOX_FLAGS",
@@ -577,7 +580,29 @@ MAX_PRIMITIVE_ROTATION_DEG = 360.0
 #: Hard cap on the number of rendered primitives: unbounded lists are a DoS vector.
 MAX_PRIMITIVES = 64
 
-PRIMITIVE_TYPES: tuple[str, ...] = ("box", "cylinder", "sphere", "cone")
+# ---------------------------------------------------------------------------
+# 2D ``extrude`` primitive bounds (mirrors ``agents.spec``; docs/skills.md 5).
+# Kept local so the CAD package stays decoupled from ``llm-provider``.
+# ---------------------------------------------------------------------------
+
+#: Minimum number of profile points needed to describe a polygon.
+MIN_PROFILE_POINTS = 3
+#: Maximum number of profile points accepted for one primitive (bounded payload).
+MAX_PROFILE_POINTS = 256
+#: Bounds for a profile coordinate in the XZ plane (mm); shares the primitive
+#: centre range so a profile cannot place geometry outside the build volume.
+MIN_PROFILE_COORD_MM = -MAX_PRIMITIVE_POSITION_MM
+MAX_PROFILE_COORD_MM = MAX_PRIMITIVE_POSITION_MM
+#: Bounds for the optional hollow-wall thickness of an ``extrude`` primitive (mm).
+MIN_EXTRUDE_WALL_MM = MIN_PRIMITIVE_MM
+MAX_EXTRUDE_WALL_MM = 100.0
+#: Bounds for the optional top-edge rounding radius of an ``extrude`` primitive (mm).
+MIN_ROUND_RADIUS_MM = 0.0
+MAX_ROUND_RADIUS_MM = 100.0
+#: Numerical tolerance for the deterministic polygon-offset / degeneracy checks.
+_OFFSET_EPSILON = 1e-6
+
+PRIMITIVE_TYPES: tuple[str, ...] = ("box", "cylinder", "sphere", "cone", "extrude")
 PRIMITIVE_ROLES: tuple[str, ...] = ("add", "subtract")
 _ADDITIVE_ROLES = frozenset({"add"})
 #: Required size fields per primitive type; missing ones are a specification error
@@ -606,6 +631,11 @@ class RenderPrimitive:
     ``position`` is the centre of the shape and ``rotation`` is in degrees
     (XYZ order). Unused size fields stay ``None`` so the renderer can rely on
     the per-type required fields (mirrors ``agents.spec.Primitive``).
+
+    For ``type="extrude"`` the 2D ``profile`` (points in the XZ plane) is
+    extruded upward from ``position`` by ``height``. ``inner_profile`` is the
+    profile offset inward by ``wall_thickness`` (computed once at parse time, or
+    ``None`` when the wall is degenerate and the render degrades to solid).
     """
 
     type: str
@@ -616,6 +646,10 @@ class RenderPrimitive:
     depth: float | None = None
     height: float | None = None
     diameter: float | None = None
+    profile: tuple[tuple[float, float], ...] = ()
+    wall_thickness: float | None = None
+    inner_profile: tuple[tuple[float, float], ...] | None = None
+    round_radius: float | None = None
     label: str = ""
 
     @property
@@ -688,7 +722,257 @@ def _fallback_size(kind: str, field: str, spec: dict[str, Any]) -> float | None:
     return None
 
 
-def _parse_primitive(item: Any, index: int, spec: dict[str, Any]) -> RenderPrimitive:
+# ---------------------------------------------------------------------------
+# ``extrude`` geometry helpers (deterministic polygon offset in Python)
+# ---------------------------------------------------------------------------
+
+
+def _polygon_signed_area(points: Sequence[tuple[float, float]]) -> float:
+    """Shoelace signed area; positive for a counter-clockwise outline."""
+    area = 0.0
+    count = len(points)
+    for index in range(count):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % count]
+        area += x1 * y2 - x2 * y1
+    return area / 2.0
+
+
+def _point_in_polygon(px: float, py: float, points: Sequence[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon test (only used off the boundary)."""
+    inside = False
+    count = len(points)
+    for index in range(count):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % count]
+        if (y1 > py) != (y2 > py):
+            x_intersect = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+            if px < x_intersect:
+                inside = not inside
+    return inside
+
+
+def _point_segment_distance(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> float:
+    """Shortest distance from ``(px, py)`` to the segment ``(ax, ay)-(bx, by)``."""
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq <= _OFFSET_EPSILON:
+        return math.hypot(px - ax, py - ay)
+    factor = ((px - ax) * dx + (py - ay) * dy) / length_sq
+    factor = max(0.0, min(1.0, factor))
+    return math.hypot(px - (ax + factor * dx), py - (ay + factor * dy))
+
+
+def _clean_profile(
+    points: Sequence[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Drop duplicate consecutive/closure points that would make an edge degenerate."""
+    cleaned: list[tuple[float, float]] = []
+    for point in points:
+        if (
+            not cleaned
+            or math.hypot(point[0] - cleaned[-1][0], point[1] - cleaned[-1][1]) > _OFFSET_EPSILON
+        ):
+            cleaned.append(point)
+    if (
+        len(cleaned) > 1
+        and math.hypot(cleaned[0][0] - cleaned[-1][0], cleaned[0][1] - cleaned[-1][1])
+        <= _OFFSET_EPSILON
+    ):
+        cleaned.pop()
+    return cleaned
+
+
+def _inward_offset(
+    points: Sequence[tuple[float, float]], distance: float
+) -> tuple[tuple[float, float], ...] | None:
+    """Offset a simple polygon inward by ``distance``.
+
+    The offset is computed **in Python** (per-edge inward normal + line
+    intersection) rather than with OpenSCAD ``offset(delta=-t)`` so the hollow
+    geometry is deterministic and unit-testable, and so a degenerate result can
+    be detected *before* it reaches the sandbox. For an over-thick wall the
+    per-edge offset lines still intersect (producing a spurious, inverted
+    outline), so a result is rejected unless every offset vertex is inside the
+    source polygon and at least ``distance`` away from every source edge.
+
+    Returns ``None`` when the offset is degenerate: fewer than three usable
+    points, a zero-area profile, a flipped orientation, a non-simple result or
+    an over-thick wall. Callers degrade to a solid extrusion in that case.
+    """
+    if distance <= 0 or len(points) < MIN_PROFILE_POINTS:
+        return None
+    source = _clean_profile(points)
+    if len(source) < MIN_PROFILE_POINTS:
+        return None
+    area = _polygon_signed_area(source)
+    if abs(area) <= _OFFSET_EPSILON:
+        return None
+    orientation = 1.0 if area > 0 else -1.0
+    count = len(source)
+
+    # One inward-offset line per edge: a point on the line plus its direction.
+    lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for index in range(count):
+        x1, y1 = source[index]
+        x2, y2 = source[(index + 1) % count]
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length <= _OFFSET_EPSILON:
+            return None
+        ux, uy = dx / length, dy / length
+        # Left normal (interior for CCW) flipped for clockwise input.
+        nx, ny = -uy * orientation, ux * orientation
+        lines.append(((x1 + nx * distance, y1 + ny * distance), (ux, uy)))
+
+    offset_points: list[tuple[float, float]] = []
+    for index in range(count):
+        (ax, ay), (adx, ady) = lines[index - 1]
+        (bx, by), (bdx, bdy) = lines[index]
+        denominator = adx * bdy - ady * bdx
+        if abs(denominator) <= 1e-9:
+            # Collinear edges: either offset line places the shared vertex.
+            offset_points.append((bx, by))
+            continue
+        factor = ((bx - ax) * bdy - (by - ay) * bdx) / denominator
+        offset_points.append((ax + factor * adx, ay + factor * ady))
+
+    offset_area = _polygon_signed_area(offset_points)
+    if orientation * offset_area <= _OFFSET_EPSILON:
+        return None  # collapsed or flipped
+    for ox, oy in offset_points:
+        if not _point_in_polygon(ox, oy, source):
+            return None
+        nearest = min(
+            _point_segment_distance(ox, oy, *source[index], *source[(index + 1) % count])
+            for index in range(count)
+        )
+        if nearest < distance - _OFFSET_EPSILON:
+            return None
+    return tuple(offset_points)
+
+
+def _effective_round_radius(
+    profile: Sequence[tuple[float, float]], radius: float | None
+) -> float | None:
+    """Clamp ``round_radius`` to what the profile can carry, else ``None``.
+
+    OpenSCAD ``offset(r=...)`` dilates the outline by ``radius``; a radius larger
+    than half the profile's smaller bounding-box span can erase the shape, so it
+    is dropped (graceful degradation) rather than emitted unbounded.
+    """
+    if radius is None or radius <= 0:
+        return None
+    xs = [point[0] for point in profile]
+    ys = [point[1] for point in profile]
+    span = min(max(xs) - min(xs), max(ys) - min(ys))
+    if radius > span / 2.0:
+        return None
+    return radius
+
+
+def _parse_profile(item: dict[str, Any], path: str) -> tuple[tuple[float, float], ...]:
+    """Coerce an ``extrude`` ``profile`` into bounded ``(x, y)`` points.
+
+    Re-validates defensively with :func:`_coerce_float` (via :func:`_op_float`)
+    because the LLM payload is untrusted even when ``agents.spec`` already
+    validated it. Points are inline values -- never a file, so the sandbox
+    ``import()``/``surface()`` ban is preserved.
+    """
+    raw = item.get("profile")
+    if raw is None:
+        raise SpecificationError(f"{path}.profile: required for an 'extrude' primitive")
+    if not isinstance(raw, (list, tuple)):
+        raise SpecificationError(
+            f"{path}.profile: must be a list of {{x, y}} points (extrude primitive)"
+        )
+    if len(raw) < MIN_PROFILE_POINTS:
+        raise SpecificationError(
+            f"{path}.profile: at least {MIN_PROFILE_POINTS} points required for an "
+            f"'extrude' primitive (got {len(raw)})"
+        )
+    if len(raw) > MAX_PROFILE_POINTS:
+        raise SpecificationError(
+            f"{path}.profile: at most {MAX_PROFILE_POINTS} points allowed for an "
+            f"'extrude' primitive (got {len(raw)})"
+        )
+    points: list[tuple[float, float]] = []
+    for point_index, point in enumerate(raw):
+        point_path = f"{path}.profile[{point_index}]"
+        if not isinstance(point, dict):
+            raise SpecificationError(f"{point_path}: must be an object with x, y")
+        x = _op_float(
+            point, "x", point_path, minimum=MIN_PROFILE_COORD_MM, maximum=MAX_PROFILE_COORD_MM
+        )
+        y = _op_float(
+            point, "y", point_path, minimum=MIN_PROFILE_COORD_MM, maximum=MAX_PROFILE_COORD_MM
+        )
+        points.append((x, y))
+    return tuple(points)
+
+
+def _parse_extrude(
+    item: dict[str, Any],
+    path: str,
+    *,
+    role: str,
+    position: tuple[float, float, float],
+    rotation: tuple[float, float, float],
+    height: float | None,
+    warnings: list[str] | None,
+) -> RenderPrimitive:
+    """Build a validated ``extrude`` primitive (profile + optional wall/rounding)."""
+    if height is None:
+        raise SpecificationError(f"{path}: 'height' required for an 'extrude' primitive")
+    profile = _parse_profile(item, path)
+    wall = _op_optional_float(
+        item,
+        "wall_thickness",
+        path,
+        minimum=MIN_EXTRUDE_WALL_MM,
+        maximum=MAX_EXTRUDE_WALL_MM,
+    )
+    inner_profile: tuple[tuple[float, float], ...] | None = None
+    if wall is not None and wall > 0:
+        inner_profile = _inward_offset(profile, wall)
+        if inner_profile is None:
+            _collect_warning(
+                warnings,
+                f"{path}: wall_thickness {wall}mm is too thick for the profile; "
+                "rendering a solid extrusion",
+            )
+    radius = _op_optional_float(
+        item,
+        "round_radius",
+        path,
+        minimum=MIN_ROUND_RADIUS_MM,
+        maximum=MAX_ROUND_RADIUS_MM,
+    )
+    effective_radius = _effective_round_radius(profile, radius)
+    if radius is not None and radius > 0 and effective_radius is None:
+        _collect_warning(
+            warnings,
+            f"{path}: round_radius {radius}mm exceeds the profile; ignoring rounding",
+        )
+    return RenderPrimitive(
+        type="extrude",
+        role=role,
+        position=position,
+        rotation=rotation,
+        height=height,
+        profile=profile,
+        wall_thickness=wall,
+        inner_profile=inner_profile,
+        round_radius=effective_radius,
+        label=_sanitize_label(item.get("label", "")),
+    )
+
+
+def _parse_primitive(
+    item: Any, index: int, spec: dict[str, Any], warnings: list[str] | None = None
+) -> RenderPrimitive:
     path = f"primitives[{index}]"
     if not isinstance(item, dict):
         raise SpecificationError(f"{path} must be an object")
@@ -731,6 +1015,18 @@ def _parse_primitive(item: Any, index: int, spec: dict[str, Any]) -> RenderPrimi
         "height": height,
         "diameter": diameter,
     }
+    # An ``extrude`` is handled before the size-fallback loop: it needs a profile
+    # and a height and never borrows the box/cylinder ``dimensions`` fallback.
+    if kind == "extrude":
+        return _parse_extrude(
+            item,
+            path,
+            role=role,
+            position=position,
+            rotation=rotation,
+            height=height,
+            warnings=warnings,
+        )
     # Weak-model tolerance: repair a missing required size from the spec
     # ``dimensions`` before failing. An explicit primitive value always wins.
     for name in _REQUIRED_SIZES[kind]:
@@ -823,6 +1119,13 @@ def parse_primitives(
     **skipped** with a human-readable warning collected into ``warnings`` rather
     than failing the render.
 
+    ``extrude`` primitives (docs/skills.md 5) are handled separately: they
+    require at least :data:`MIN_PROFILE_POINTS` inline profile points and a
+    ``height`` (never the ``dimensions`` fallback). An optional
+    ``wall_thickness`` computes a deterministic inward offset in Python; if the
+    wall is too thick for the shape the primitive degrades to a solid extrusion
+    with a warning. ``validate`` still reports that as a blocking problem.
+
     If no primitive survives and the object is **not** holder-like, one ``box``
     is synthesized from ``dimensions`` (see :func:`_synthesize_box`). A
     holder-like/legacy spec instead yields ``[]`` so the historical holder
@@ -843,7 +1146,7 @@ def parse_primitives(
     primitives: list[RenderPrimitive] = []
     for index, item in enumerate(raw):
         try:
-            primitives.append(_parse_primitive(item, index, spec))
+            primitives.append(_parse_primitive(item, index, spec, warnings))
         except SpecificationError as exc:
             _collect_warning(warnings, f"skipped primitives[{index}]: {exc}")
 
@@ -859,6 +1162,60 @@ def parse_primitives(
         )
         primitives.append(synthesized)
     return primitives
+
+
+def _extrude_problems(specification: dict[str, Any] | None) -> list[str]:
+    """Return blocking problems for every malformed ``extrude`` primitive.
+
+    Individual malformed primitives are normally *skipped* with a warning
+    (weak-model tolerance), but an ``extrude`` carries a polygon the part cannot
+    be recovered from, so these are surfaced as blocking problems for
+    :meth:`OpenSCADBackend.validate`: a missing/too-few profile, a missing or
+    non-positive height and a wall thicker than the shape can carry.
+    """
+    spec: dict[str, Any] = specification if isinstance(specification, dict) else {}
+    raw = spec.get("primitives")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    problems: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type", "")).strip().lower() != "extrude":
+            continue
+        path = f"primitives[{index}]"
+
+        profile: tuple[tuple[float, float], ...] | None = None
+        try:
+            profile = _parse_profile(item, path)
+        except SpecificationError as exc:
+            problems.append(str(exc))
+
+        try:
+            _op_float(item, "height", path, minimum=MIN_PRIMITIVE_MM, maximum=MAX_PRIMITIVE_MM)
+        except SpecificationError as exc:
+            problems.append(str(exc))
+
+        wall = item.get("wall_thickness")
+        if profile is None or wall is None:
+            continue
+        try:
+            wall_value = _op_float(
+                item,
+                "wall_thickness",
+                path,
+                minimum=MIN_EXTRUDE_WALL_MM,
+                maximum=MAX_EXTRUDE_WALL_MM,
+            )
+        except SpecificationError as exc:
+            problems.append(str(exc))
+            continue
+        if _inward_offset(profile, wall_value) is None:
+            problems.append(
+                f"{path}.wall_thickness {wall_value}mm is too thick for the profile "
+                "(inward offset is degenerate)"
+            )
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1470,32 @@ def _required_primitive(value: float | None, primitive: RenderPrimitive, field: 
     return value
 
 
+def _points_literal(points: Sequence[tuple[float, float]]) -> str:
+    """Format a 2D point list as an inline OpenSCAD ``points`` value."""
+    body = ", ".join(f"[{_num(x)}, {_num(y)}]" for x, y in points)
+    return f"[{body}]"
+
+
+def _extrude_shape(primitive: RenderPrimitive) -> str:
+    """2D child expression for an ``extrude``: polygon, hollow wall and rounding.
+
+    * hollow wall -> ``difference()`` of the outer and (Python-offset) inner
+      polygon, so only inline point lists reach OpenSCAD;
+    * ``round_radius`` -> an OpenSCAD ``offset(r=...)`` around that expression
+      (a native 2D transform, never ``import()``/``surface()``).
+    """
+    outer = f"polygon(points={_points_literal(primitive.profile)})"
+    inner = primitive.inner_profile
+    if primitive.wall_thickness and primitive.wall_thickness > 0 and inner:
+        inner_polygon = f"polygon(points={_points_literal(inner)})"
+        shape = f"difference() {{ {outer}; {inner_polygon}; }}"
+    else:
+        shape = outer
+    if primitive.round_radius and primitive.round_radius > 0:
+        shape = f"offset(r={_num(primitive.round_radius)}) {shape}"
+    return shape
+
+
 def _render_primitive(primitive: RenderPrimitive, indent: str) -> str:
     """OpenSCAD statement for a primitive placed at its centre of mass."""
     px, py, pz = primitive.position
@@ -1137,12 +1520,20 @@ def _render_primitive(primitive: RenderPrimitive, indent: str) -> str:
     elif primitive.type == "sphere":
         diameter = _required_primitive(primitive.diameter, primitive, "diameter")
         geometry = f"{translate} sphere(d={_num(diameter)});"
-    else:  # cone
+    elif primitive.type == "cone":
         diameter = _required_primitive(primitive.diameter, primitive, "diameter")
         height = _required_primitive(primitive.height, primitive, "height")
         geometry = (
             f"{translate} {rotate} "
             f"cylinder(d1={_num(diameter)}, d2=0, h={_num(height)}, center=true);"
+        )
+    else:  # extrude
+        height = _required_primitive(primitive.height, primitive, "height")
+        if not primitive.profile:
+            raise SpecificationError("Primitive 'extrude' is missing required field 'profile'")
+        geometry = (
+            f"{translate} {rotate} linear_extrude(height={_num(height)}) "
+            f"{_extrude_shape(primitive)};"
         )
     comment = f"{indent}// primitive: {primitive.type}"
     if primitive.label:
@@ -1378,6 +1769,9 @@ class OpenSCADBackend(CADBackend):
                 parse_primitives(model.specification)
             except SpecificationError as exc:
                 problems.append(str(exc))
+            # ``extrude`` primitives are skipped individually during render, but
+            # their polygon/wall problems are blocking for validation.
+            problems.extend(_extrude_problems(model.specification))
         return problems
 
     def export(self, model: GeneratedModel | str, format: str) -> bytes:
