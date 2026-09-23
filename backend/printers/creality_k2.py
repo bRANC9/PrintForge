@@ -12,7 +12,9 @@ look like a local API are gated or unofficial:
   exposed by default**: Creality's Moonraker config restricts clients via
   ``trusted_clients``/``[authorization]`` and the config tree is root-owned and
   locked, so an arbitrary LAN host is refused until the operator unlocks the
-  printer. Moonraker also knows nothing about the CFS.
+  printer. The CFS is exposed as the Klipper ``box`` object
+  (``GET /printer/objects/query?box``); the payload shape is firmware-dependent
+  (see :mod:`printers.k2_box`).
 * The CFS (Creality Filament System) is a proprietary subsystem that speaks its
   own protocol over RS-485 internally and a Creality WebSocket on port ``9999``
   externally. Community projects (k2-websocket-re, CFSync, ha-creality-lan)
@@ -24,10 +26,11 @@ look like a local API are gated or unofficial:
 Consequently the adapter ships a **best-effort, opt-in** transport:
 
 * :class:`MoonrakerK2Transport` uses the on-device Moonraker (port ``7125``) for
-  status/upload/start/cancel -- exactly the documented Klipper API -- and reads
-  the CFS from the proprietary WebSocket (port ``9999``). Both paths are
-  unofficial/gated and firmware-dependent; they never fake success, so an
-  unreachable or locked printer raises
+  status/upload/start/cancel -- exactly the documented Klipper API. For the CFS
+  it prefers Moonraker's ``[box]`` object query and falls back to the
+  proprietary WebSocket (port ``9999``) when that query fails or reports no
+  slots. Both paths are unofficial/gated and firmware-dependent; they never fake
+  success, so an unreachable or locked printer raises
   :class:`~printers.base.PrinterConnectionError` and the job is marked
   ``FAILED``.
 * :class:`UnconfiguredK2Transport` remains the explicit "no protocol" fallback
@@ -47,9 +50,11 @@ from typing import NoReturn
 from .base import (
     CfsSlot,
     PrinterBackend,
+    PrinterBackendError,
     PrinterProtocolNotImplementedError,
     PrinterStatus,
 )
+from .k2_box import slots_from_box_object
 from .k2_websocket import K2_WEBSOCKET_PORT, read_cfs_slots
 from .moonraker import MoonrakerClient, moonraker_base_url, status_from_objects
 
@@ -158,11 +163,13 @@ class UnconfiguredK2Transport(K2Transport):
 
 
 class MoonrakerK2Transport(K2Transport):
-    """K2 transport using the on-device Moonraker + the CFS WebSocket.
+    """K2 transport using the on-device Moonraker + the CFS WebSocket fallback.
 
     Print operations (status/upload/start/cancel) go through
-    :class:`~printers.moonraker.MoonrakerClient` on port ``7125``; the CFS is
-    read from the proprietary WebSocket on port ``9999``. Both are injectable so
+    :class:`~printers.moonraker.MoonrakerClient` on port ``7125``. The CFS is
+    read from Moonraker's ``[box]`` object first (the primary source), falling
+    back to the proprietary WebSocket on port ``9999`` when that query fails or
+    reports no slots. Both the client and the WebSocket reader are injectable so
     tests never touch the network. Nothing is faked: an unreachable printer
     raises :class:`~printers.base.PrinterConnectionError`.
     """
@@ -201,7 +208,29 @@ class MoonrakerK2Transport(K2Transport):
         self._client.cancel_print()
 
     def fetch_cfs_slots(self) -> list[CfsSlot]:
+        """Return the CFS slots, preferring Moonraker's ``[box]`` object.
+
+        The stock K2 Moonraker exposes the CFS as the Klipper ``box`` object
+        (``GET /printer/objects/query?box``), which is the primary source. When
+        that query fails (locked/older firmware, no ``box`` module) or reports
+        no slots, fall back to the proprietary port-9999 WebSocket reader.
+        Nothing is fabricated: if both paths fail, the WebSocket error
+        propagates so the queue can mark the job ``FAILED``.
+        """
+        box_slots = self._box_slots()
+        if box_slots:
+            return box_slots
         return self._cfs_reader(self.host, port=self._cfs_port, timeout=self.timeout)
+
+    def _box_slots(self) -> list[CfsSlot]:
+        """CFS slots from Moonraker's ``box`` object, or ``[]`` when unavailable."""
+        try:
+            return slots_from_box_object(self._client.query_box())
+        except PrinterBackendError:
+            # The box object is optional; a failure here must not hide the
+            # WebSocket fallback. ``slots_from_box_object`` never raises, so the
+            # only errors caught are the client's connection/protocol errors.
+            return []
 
 
 class CrealityK2Backend(PrinterBackend):

@@ -19,10 +19,12 @@ logged** and never included in :class:`~printers.base.PrinterStatus.raw`.
 CFS
 ---
 
-Moonraker knows nothing about the Creality Filament System, so
+A plain Moonraker printer has no Creality Filament System, so
 :meth:`MoonrakerBackend.cfs_slots` returns ``[]`` (the base contract for a
-printer without a CFS). The K2 reads its CFS from the proprietary WebSocket
-instead (see :mod:`printers.k2_websocket`).
+printer without a CFS). On a Creality K2 the CFS is exposed as the Klipper
+``box`` object; :meth:`MoonrakerClient.query_box` fetches it and
+:mod:`printers.k2_box` maps it to slots. The K2 transport prefers that object
+and falls back to the proprietary WebSocket in :mod:`printers.k2_websocket`.
 """
 
 from __future__ import annotations
@@ -102,6 +104,15 @@ class MoonrakerClient(JsonHttpClient):
         # Moonraker wants valueless query keys (``?print_stats&virtual_sdcard``).
         query = "&".join(urllib.parse.quote(name, safe="") for name in names)
         return self.request_json(f"/printer/objects/query?{query}").get("result", {})
+
+    def query_box(self) -> dict[str, Any]:
+        """Return ``result`` of ``/printer/objects/query?box``.
+
+        On a Creality K2 the Klipper ``box`` object carries the CFS state; a
+        plain Moonraker printer reports no such object (or an empty payload),
+        which :func:`printers.k2_box.slots_from_box_object` turns into ``[]``.
+        """
+        return self.query_objects("box")
 
     def upload_file(self, gcode_bytes: bytes, filename: str) -> str:
         """Upload ``gcode_bytes`` under ``gcodes/`` and return its remote path."""

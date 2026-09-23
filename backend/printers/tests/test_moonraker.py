@@ -150,6 +150,18 @@ def test_query_objects_builds_a_valueless_query_and_returns_result():
     assert result == {"status": {"print_stats": {}}}
 
 
+def test_query_box_requests_only_the_box_object():
+    opener = FakeOpener(json.dumps({"result": {"status": {"box": {"slots": []}}}}).encode())
+    client = MoonrakerClient("http://printer.local:7125", opener=opener)
+
+    result = client.query_box()
+
+    request = opener.requests[0][0]
+    assert request.full_url == "http://printer.local:7125/printer/objects/query?box"
+    assert request.get_method() == "GET"
+    assert result == {"status": {"box": {"slots": []}}}
+
+
 def test_api_key_is_sent_only_when_configured():
     opener = FakeOpener(b"{}")
     MoonrakerClient("http://printer.local:7125", api_key="secret", opener=opener).query_objects(

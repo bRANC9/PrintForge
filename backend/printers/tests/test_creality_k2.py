@@ -20,6 +20,7 @@ from printers.creality_k2 import (
     MoonrakerK2Transport,
     UnconfiguredK2Transport,
 )
+from printers.moonraker import MoonrakerError
 
 
 def _printer(host: str = "k2.local", api_key: str = "") -> SimpleNamespace:
@@ -180,16 +181,28 @@ def test_backend_name_is_stable():
 
 
 class FakeMoonrakerClient:
-    """Records calls and returns canned Moonraker results."""
+    """Records calls and returns canned Moonraker results.
 
-    def __init__(self, *, objects=None, remote="remote.gcode"):
+    ``box`` is the ``[box]`` object-query ``result``; ``box_error`` (when set) is
+    raised by :meth:`query_box` so the WebSocket fallback can be exercised.
+    """
+
+    def __init__(self, *, objects=None, remote="remote.gcode", box=None, box_error=None):
         self._objects = objects or {}
         self._remote = remote
+        self._box = box if box is not None else {}
+        self._box_error = box_error
         self.calls: list[object] = []
 
     def query_objects(self, *objects):
         self.calls.append(("query", objects))
         return self._objects
+
+    def query_box(self):
+        self.calls.append("query_box")
+        if self._box_error is not None:
+            raise self._box_error
+        return self._box
 
     def upload_file(self, gcode_bytes, filename):
         self.calls.append(("upload", gcode_bytes, filename))
@@ -244,10 +257,97 @@ def test_moonraker_transport_reads_cfs_from_the_injected_reader():
         seen.update(host=host, port=port, timeout=timeout)
         return slots
 
-    transport = MoonrakerK2Transport("k2.local", timeout=2.0, cfs_reader=fake_reader)
+    # No box object on this (faked) printer -> the WebSocket reader is used.
+    client = FakeMoonrakerClient(box={})
+    transport = MoonrakerK2Transport("k2.local", timeout=2.0, client=client, cfs_reader=fake_reader)
 
     assert transport.fetch_cfs_slots() == slots
     assert seen == {"host": "k2.local", "port": 9999, "timeout": 2.0}
+    assert client.calls == ["query_box"]
+
+
+# ---------------------------------------------------------------------------
+# MoonrakerK2Transport -- box object first, WebSocket fallback
+# ---------------------------------------------------------------------------
+
+
+def _box_result(*slots: dict) -> dict:
+    """Build a ``[box]`` object-query ``result`` payload."""
+    return {"status": {"box": {"slots": list(slots)}}}
+
+
+def test_moonraker_transport_prefers_the_box_object():
+    client = FakeMoonrakerClient(
+        box=_box_result(
+            {
+                "index": 0,
+                "material": "PLA",
+                "brand": "Creality",
+                "name": "Hyper PLA",
+                "color": "#1a1a1a",
+                "present": True,
+                "loaded": True,
+            }
+        )
+    )
+    ws_calls: list[object] = []
+
+    def fake_reader(*args, **kwargs):
+        ws_calls.append((args, kwargs))
+        return [CfsSlot(index=9, empty=True)]
+
+    transport = MoonrakerK2Transport("k2.local", client=client, cfs_reader=fake_reader)
+
+    slots = transport.fetch_cfs_slots()
+
+    assert [slot.index for slot in slots] == [0]
+    assert slots[0].material == "PLA"
+    assert slots[0].brand == "Creality"
+    assert slots[0].empty is False
+    assert ws_calls == []  # the box object answered, so the WebSocket was not touched
+    assert client.calls == ["query_box"]
+
+
+def test_moonraker_transport_falls_back_to_websocket_when_box_query_fails():
+    client = FakeMoonrakerClient(box_error=MoonrakerError("no [box] object"))
+    ws_slots = [CfsSlot(index=0, material="PETG", empty=False)]
+    seen: dict[str, object] = {}
+
+    def fake_reader(host, *, port, timeout):
+        seen.update(host=host, port=port, timeout=timeout)
+        return ws_slots
+
+    transport = MoonrakerK2Transport("k2.local", timeout=1.5, client=client, cfs_reader=fake_reader)
+
+    assert transport.fetch_cfs_slots() == ws_slots
+    assert seen == {"host": "k2.local", "port": 9999, "timeout": 1.5}
+    assert client.calls == ["query_box"]
+
+
+def test_moonraker_transport_empty_box_falls_back_and_can_yield_no_slots():
+    client = FakeMoonrakerClient(box=_box_result())
+    ws_calls: list[object] = []
+
+    def fake_reader(*args, **kwargs):
+        ws_calls.append((args, kwargs))
+        return []
+
+    transport = MoonrakerK2Transport("k2.local", client=client, cfs_reader=fake_reader)
+
+    assert transport.fetch_cfs_slots() == []
+    assert len(ws_calls) == 1
+    assert client.calls == ["query_box"]
+
+
+def test_moonraker_transport_missing_box_falls_back_to_websocket():
+    client = FakeMoonrakerClient(box={"status": {}})  # Moonraker answered, no box object
+    ws_slots = [CfsSlot(index=0, empty=True)]
+
+    transport = MoonrakerK2Transport(
+        "k2.local", client=client, cfs_reader=lambda host, *, port, timeout: ws_slots
+    )
+
+    assert transport.fetch_cfs_slots() == ws_slots
 
 
 def test_creality_backend_uses_moonraker_transport_by_default():
