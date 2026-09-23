@@ -154,7 +154,10 @@ def test_ollama_timeout_db_override_round_trip():
     assert payload["sources"]["ollama_timeout"] == "db"
 
 
-def test_ollama_timeout_is_coerced_and_cleared():
+def test_ollama_timeout_is_coerced_and_cleared(monkeypatch):
+    monkeypatch.delattr(django_settings, "OLLAMA_TIMEOUT", raising=False)
+    monkeypatch.delenv("OLLAMA_TIMEOUT", raising=False)
+
     update_settings(ollama_timeout="240")
     assert get_setting("ollama_timeout") == 240
 
