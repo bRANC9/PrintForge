@@ -262,11 +262,13 @@ OLLAMA_VISION_MODEL = env("OLLAMA_VISION_MODEL", default="")
 # LLM provider selection (terv.md 19. fejezet). "ollama" is the default and
 # needs nothing else; set it to "openai" to use any OpenAI-compatible endpoint
 # (hosted OpenAI or a local gateway), which is when OPENAI_BASE_URL /
-# OPENAI_API_KEY are read. Cloud LLMs are always optional. Runtime overrides:
-# `llm_provider`, `openai_base_url`, `openai_api_key`.
+# OPENAI_API_KEY / OPENAI_MODEL are read. Cloud LLMs are always optional.
+# Runtime overrides: `llm_provider`, `openai_base_url`, `openai_api_key`,
+# `openai_model`.
 LLM_PROVIDER = env("LLM_PROVIDER", default="ollama")
 OPENAI_BASE_URL = env("OPENAI_BASE_URL", default="")
 OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
+OPENAI_MODEL = env("OPENAI_MODEL", default="gpt-4o-mini")
 
 # Embedding / RAG
 EMBEDDING_MODEL = env("EMBEDDING_MODEL", default="bge-m3")

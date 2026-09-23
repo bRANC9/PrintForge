@@ -9,10 +9,12 @@ from django.core.cache import cache
 
 from configuration.models import AppSettings
 from configuration.services import (
+    _SETTING_SPECS,
     SETTING_NAMES,
     effective_settings,
     get_setting,
     get_settings,
+    is_secret_setting,
     update_settings,
 )
 from configuration.services import test_ollama as probe_ollama
@@ -115,6 +117,66 @@ def test_ollama_vision_model_max_length_is_enforced():
         update_settings(ollama_vision_model="x" * 201)
 
     assert effective_settings()["overrides"]["ollama_vision_model"] is None
+
+
+def test_openai_model_is_registered_with_service_default(monkeypatch):
+    monkeypatch.delattr(django_settings, "OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    assert "openai_model" in SETTING_NAMES
+    assert get_setting("openai_model") == "gpt-4o-mini"
+    assert effective_settings()["sources"]["openai_model"] == "default"
+
+
+def test_openai_model_falls_back_to_settings_attr(monkeypatch):
+    monkeypatch.setattr(django_settings, "OPENAI_MODEL", "gpt-4o")
+
+    assert get_setting("openai_model") == "gpt-4o"
+    assert effective_settings()["sources"]["openai_model"] == "env"
+
+
+def test_openai_model_db_override_round_trip():
+    update_settings(openai_model="gpt-4o")
+
+    assert get_setting("openai_model") == "gpt-4o"
+    payload = effective_settings()
+    assert payload["effective"]["openai_model"] == "gpt-4o"
+    assert payload["overrides"]["openai_model"] == "gpt-4o"
+    assert payload["sources"]["openai_model"] == "db"
+
+
+def test_openai_model_empty_string_clears_override():
+    update_settings(openai_model="gpt-4o")
+    assert effective_settings()["sources"]["openai_model"] == "db"
+
+    update_settings(openai_model="")
+
+    payload = effective_settings()
+    assert payload["overrides"]["openai_model"] is None
+    assert payload["sources"]["openai_model"] != "db"
+
+
+def test_openai_model_max_length_is_enforced():
+    with pytest.raises(ValueError, match="openai_model"):
+        update_settings(openai_model="x" * 201)
+
+    assert effective_settings()["overrides"]["openai_model"] is None
+
+
+def test_is_secret_setting_uses_the_registry_marker():
+    assert is_secret_setting("openai_api_key") is True
+    assert is_secret_setting("ollama_model") is False
+    assert is_secret_setting("not_a_setting") is False
+
+
+def test_setting_specs_stay_tuple_shaped_and_flag_secrets():
+    # Backward compatibility: consumers indexing the old ``(attr, default)``
+    # shape keep working.
+    assert _SETTING_SPECS["openai_api_key"][0] == "OPENAI_API_KEY"
+    assert _SETTING_SPECS["openai_api_key"][1] == ""
+    assert _SETTING_SPECS["openai_api_key"].secret is True
+    assert _SETTING_SPECS["ollama_model"][:2] == ("OLLAMA_MODEL", "qwen3-coder:30b")
+    assert _SETTING_SPECS["ollama_model"].secret is False
 
 
 def test_rag_enabled_is_tri_state():

@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, NamedTuple
 
 from django.conf import settings as django_settings
 from django.core.cache import cache
@@ -48,6 +48,7 @@ __all__ = [
     "get_setting",
     "get_settings",
     "invalidate_settings_cache",
+    "is_secret_setting",
     "list_ollama_library_models",
     "list_ollama_models",
     "list_pulls",
@@ -61,27 +62,44 @@ __all__ = [
     "update_settings",
 ]
 
-#: name -> (settings/env attribute, hardcoded default). The default's type also
-#: drives coercion (``bool`` for ``rag_enabled``, ``int`` for ``*_sec``).
-_SETTING_SPECS: dict[str, tuple[str, Any]] = {
-    "ollama_base_url": ("OLLAMA_BASE_URL", "http://localhost:11434"),
-    "ollama_model": ("OLLAMA_MODEL", "qwen3-coder:30b"),
-    "ollama_vision_model": ("OLLAMA_VISION_MODEL", ""),
-    "llm_provider": ("LLM_PROVIDER", "ollama"),
-    "openai_base_url": ("OPENAI_BASE_URL", ""),
-    "openai_api_key": ("OPENAI_API_KEY", ""),
-    "embedding_model": ("EMBEDDING_MODEL", "bge-m3"),
-    "rag_enabled": ("RAG_ENABLED", False),
-    "search_backend": ("SEARCH_BACKEND", ""),
-    "searxng_base_url": ("SEARXNG_BASE_URL", ""),
-    "openscad_mode": ("OPENSCAD_MODE", "local"),
-    "openscad_timeout_sec": ("OPENSCAD_TIMEOUT_SEC", 60),
-    "openscad_memory_limit": ("OPENSCAD_MEMORY_LIMIT", "1g"),
-    "openscad_cpu_limit": ("OPENSCAD_CPU_LIMIT", "1.0"),
-    "slicer_mode": ("SLICER_MODE", "local"),
-    "slicer_timeout_sec": ("SLICER_TIMEOUT_SEC", 300),
-    "storage_backend": ("STORAGE_BACKEND", "local"),
-    "mcp_service_user_id": ("MCP_SERVICE_USER_ID", ""),
+
+class SettingSpec(NamedTuple):
+    """Registry entry for a runtime setting.
+
+    ``attr`` is the Django settings / ``os.environ`` attribute name, ``default``
+    is the hardcoded fallback and ``secret`` flags credentials.
+
+    The entry remains tuple-shaped (``spec[0]`` / ``spec[1]``), so consumers
+    written against the previous ``(attr, default)`` registry keep working.
+    """
+
+    attr: str
+    default: Any
+    secret: bool = False
+
+
+#: name -> registry entry. The ``default``'s type also drives coercion
+#: (``bool`` for ``rag_enabled``, ``int`` for ``*_sec``).
+_SETTING_SPECS: dict[str, SettingSpec] = {
+    "ollama_base_url": SettingSpec("OLLAMA_BASE_URL", "http://localhost:11434"),
+    "ollama_model": SettingSpec("OLLAMA_MODEL", "qwen3-coder:30b"),
+    "ollama_vision_model": SettingSpec("OLLAMA_VISION_MODEL", ""),
+    "llm_provider": SettingSpec("LLM_PROVIDER", "ollama"),
+    "openai_base_url": SettingSpec("OPENAI_BASE_URL", ""),
+    "openai_api_key": SettingSpec("OPENAI_API_KEY", "", secret=True),
+    "openai_model": SettingSpec("OPENAI_MODEL", "gpt-4o-mini"),
+    "embedding_model": SettingSpec("EMBEDDING_MODEL", "bge-m3"),
+    "rag_enabled": SettingSpec("RAG_ENABLED", False),
+    "search_backend": SettingSpec("SEARCH_BACKEND", ""),
+    "searxng_base_url": SettingSpec("SEARXNG_BASE_URL", ""),
+    "openscad_mode": SettingSpec("OPENSCAD_MODE", "local"),
+    "openscad_timeout_sec": SettingSpec("OPENSCAD_TIMEOUT_SEC", 60),
+    "openscad_memory_limit": SettingSpec("OPENSCAD_MEMORY_LIMIT", "1g"),
+    "openscad_cpu_limit": SettingSpec("OPENSCAD_CPU_LIMIT", "1.0"),
+    "slicer_mode": SettingSpec("SLICER_MODE", "local"),
+    "slicer_timeout_sec": SettingSpec("SLICER_TIMEOUT_SEC", 300),
+    "storage_backend": SettingSpec("STORAGE_BACKEND", "local"),
+    "mcp_service_user_id": SettingSpec("MCP_SERVICE_USER_ID", ""),
 }
 
 #: Names accepted by :func:`get_setting` / :func:`update_settings`.
@@ -121,7 +139,7 @@ def _to_bool(value: Any) -> bool:
 
 def _coerce(name: str, value: Any) -> Any:
     """Coerce ``value`` to the type implied by the setting's default."""
-    default = _SETTING_SPECS[name][1]
+    default = _SETTING_SPECS[name].default
     if isinstance(default, bool):
         return _to_bool(value)
     if isinstance(default, int):
@@ -139,7 +157,7 @@ def _store_value(name: str, value: Any) -> Any:
     non-null CharFields store ``""``. Both are treated as "no override".
     """
     if value is None or value == "":
-        default = _SETTING_SPECS[name][1]
+        default = _SETTING_SPECS[name].default
         # Nullable fields (bool/int) use None; non-null CharFields use "".
         return None if isinstance(default, (bool, int)) else ""
     return _coerce(name, value)
@@ -184,7 +202,7 @@ def _resolve(obj: AppSettings, name: str) -> tuple[Any, str]:
     if override is not _MISSING:
         return _coerce(name, override), "db"
 
-    upper, default = _SETTING_SPECS[name]
+    upper, default = _SETTING_SPECS[name][:2]
     if hasattr(django_settings, upper):
         value = getattr(django_settings, upper)
         if value is not None:
@@ -195,6 +213,17 @@ def _resolve(obj: AppSettings, name: str) -> tuple[Any, str]:
         return _coerce(name, env_value), "env"
 
     return default, "default"
+
+
+def is_secret_setting(name: str) -> bool:
+    """Whether the runtime setting ``name`` holds a credential.
+
+    Backed by the first-class ``secret`` marker on :data:`_SETTING_SPECS`.
+    Unknown names return ``False``; callers that need extra protection (e.g.
+    the API masking layer) may add a name-based heuristic on top.
+    """
+    spec = _SETTING_SPECS.get(name)
+    return bool(spec.secret) if spec is not None else False
 
 
 def get_setting(name: str) -> Any:

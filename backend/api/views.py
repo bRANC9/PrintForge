@@ -34,6 +34,7 @@ from configuration.services import (
     effective_settings,
     get_setting,
     get_settings,
+    is_secret_setting,
     list_ollama_library_models,
     list_ollama_models,
     list_pulls,
@@ -967,16 +968,25 @@ class NotificationViewSet(
 
 #: Sentinel returned instead of a secret setting's real value.
 MASKED_SETTING_VALUE = "***"
-#: Runtime settings whose value must never be echoed back in cleartext.
-#: ``configuration.models.AppSettings`` has no dedicated secret field, so the
-#: API owns the (name-based) classification until one lands.
+#: Fallback name-based classification for settings the configuration registry
+#: does not (yet) mark with ``secret=True``. The registry is authoritative; this
+#: heuristic only keeps unknown credential-like names protected.
 _SECRET_SETTING_NAMES = frozenset({"openai_api_key"})
 _SECRET_SETTING_SUFFIXES = ("_api_key", "_secret", "_token", "_password")
 
 
 def _is_secret_setting(name: str) -> bool:
-    """Whether the runtime setting ``name`` holds a credential."""
-    return name in _SECRET_SETTING_NAMES or name.endswith(_SECRET_SETTING_SUFFIXES)
+    """Whether the runtime setting ``name`` holds a credential.
+
+    The configuration registry's first-class ``secret`` marker is consulted
+    first; the name-based heuristic remains as a fallback so nothing regresses
+    for settings that are not registered.
+    """
+    return (
+        is_secret_setting(name)
+        or name in _SECRET_SETTING_NAMES
+        or name.endswith(_SECRET_SETTING_SUFFIXES)
+    )
 
 
 def _mask_secret_settings(payload: dict) -> dict:

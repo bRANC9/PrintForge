@@ -9,6 +9,7 @@ from django.test import Client
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from api.views import MASKED_SETTING_VALUE, _is_secret_setting
 from configuration.services import get_setting
 
 pytestmark = pytest.mark.django_db
@@ -119,6 +120,60 @@ def test_patch_settings_rejects_oversized_vision_model(staff):
 
     assert response.status_code == 400
     assert "ollama_vision_model" in response.json()["detail"]
+
+
+def test_patch_settings_round_trips_openai_model(staff):
+    response = auth(staff).patch(
+        "/api/v1/settings/",
+        {"openai_model": "gpt-4o"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["effective"]["openai_model"] == "gpt-4o"
+    assert body["overrides"]["openai_model"] == "gpt-4o"
+    assert body["sources"]["openai_model"] == "db"
+    assert get_setting("openai_model") == "gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# Secret masking wiring (registry marker + name-based fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_secret_classification_consults_registry_then_name_heuristic():
+    assert _is_secret_setting("openai_api_key") is True  # registry secret marker
+    assert _is_secret_setting("some_future_token") is True  # fallback heuristic
+    assert _is_secret_setting("ollama_model") is False
+
+
+def test_settings_api_masks_the_registry_secret(staff):
+    response = auth(staff).patch(
+        "/api/v1/settings/",
+        {"openai_api_key": "sk-real"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["effective"]["openai_api_key"] == MASKED_SETTING_VALUE
+    assert body["overrides"]["openai_api_key"] == MASKED_SETTING_VALUE
+    # The real value is still resolvable server-side.
+    assert get_setting("openai_api_key") == "sk-real"
+
+
+def test_settings_patch_mask_sentinel_keeps_the_stored_secret(staff):
+    auth(staff).patch("/api/v1/settings/", {"openai_api_key": "sk-real"}, format="json")
+
+    response = auth(staff).patch(
+        "/api/v1/settings/",
+        {"openai_api_key": MASKED_SETTING_VALUE},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert get_setting("openai_api_key") == "sk-real"
 
 
 def test_patch_rejects_unknown_name(staff):

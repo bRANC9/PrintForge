@@ -42,6 +42,10 @@ class AppSettings(models.Model):
     llm_provider = models.CharField(max_length=50, blank=True)
     openai_base_url = models.URLField(blank=True)
     openai_api_key = models.CharField(max_length=255, blank=True)
+    # Model name for the OpenAI-compatible provider. Empty means "fall back to
+    # ``OPENAI_MODEL`` / the service default (``gpt-4o-mini``)", matching every
+    # other override field on this singleton.
+    openai_model = models.CharField(max_length=200, blank=True)
     embedding_model = models.CharField(max_length=200, blank=True)
     rag_enabled = models.BooleanField(null=True, blank=True)
     # Web search for the Research agent; empty disables it.
