@@ -275,6 +275,42 @@ def test_select_skills_cap_limits_embedding_matches(owner, workspace):
     assert [skill.pk for skill in selected] == [skills[0].pk, skills[1].pk]
 
 
+def test_select_skills_margin_drops_a_marginally_weaker_match(owner, workspace):
+    best = create_skill(name="Best", workspace=workspace, created_by=owner)
+    close = create_skill(name="Close", workspace=workspace, created_by=owner)
+
+    def ranker(*, prompt, candidates, limit):
+        return [(best.pk, 0.50), (close.pk, 0.42)]
+
+    selected = select_skills(
+        prompt="an unrelated wish",
+        workspace=workspace,
+        ranker=ranker,
+        min_score=0.35,
+        margin=0.05,
+    )
+
+    assert [skill.pk for skill in selected] == [best.pk]
+
+
+def test_select_skills_margin_keeps_a_close_second_match(owner, workspace):
+    best = create_skill(name="Best", workspace=workspace, created_by=owner)
+    close = create_skill(name="Close", workspace=workspace, created_by=owner)
+
+    def ranker(*, prompt, candidates, limit):
+        return [(best.pk, 0.50), (close.pk, 0.47)]
+
+    selected = select_skills(
+        prompt="an unrelated wish",
+        workspace=workspace,
+        ranker=ranker,
+        min_score=0.35,
+        margin=0.05,
+    )
+
+    assert [skill.pk for skill in selected] == [best.pk, close.pk]
+
+
 def test_select_skills_threshold_returns_empty_when_all_weak(owner, workspace):
     first = create_skill(name="First", workspace=workspace, created_by=owner)
     second = create_skill(name="Second", workspace=workspace, created_by=owner)

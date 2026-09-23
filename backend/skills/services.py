@@ -34,6 +34,7 @@ from .models import Skill, SkillKind
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_MARGIN",
     "DEFAULT_MAX_SKILLS",
     "DEFAULT_MIN_SCORE",
     "create_skill",
@@ -47,6 +48,12 @@ __all__ = [
 #: Minimum cosine similarity for the embedding fallback to keep a skill.
 #: Below this a "match" is treated as noise and dropped from the Planner prompt.
 DEFAULT_MIN_SCORE = 0.35
+
+#: Relative margin: only skills whose score is within this distance of the best
+#: match are kept, so a marginally-relevant second skill does not pollute the
+#: prompt. An absolute threshold alone is too coarse when the candidates are all
+#: similar (e.g. several "3D-printing recipe" skills).
+DEFAULT_MARGIN = 0.05
 
 #: Hard cap on how many skills the embedding fallback may return, best first.
 DEFAULT_MAX_SKILLS = 3
@@ -318,14 +325,16 @@ def _select_by_embedding(
     prompt: str,
     ranker: Callable[..., Sequence[Any]] | None,
     min_score: float = DEFAULT_MIN_SCORE,
+    margin: float = DEFAULT_MARGIN,
     max_skills: int = DEFAULT_MAX_SKILLS,
 ) -> list[Skill]:
     """Run the (injected or default) ranker; never raise on embedding failure.
 
-    Keeps the best-first candidates whose score clears ``min_score`` and stops
-    after ``max_skills``. A ranker that returns plain ids (no scores) is treated
-    as an explicit, already-vetted ordering: its items bypass the threshold but
-    still count towards the cap.
+    Keeps the best-first candidates whose score clears ``min_score`` and stays
+    within ``margin`` of the best score, stopping after ``max_skills``. A ranker
+    that returns plain ids (no scores) is treated as an explicit, already-vetted
+    ordering: its items bypass the threshold/margin but still count towards the
+    cap.
     """
     if not prompt or not candidates or max_skills <= 0:
         return []
@@ -338,12 +347,18 @@ def _select_by_embedding(
 
     by_id = {skill.pk: skill for skill in candidates}
     result: list[Skill] = []
+    top_score: float | None = None
     for skill_id, score in _normalize_ranked_items(ranked):
         skill = by_id.get(skill_id)
         if skill is None or skill in result:
             continue
-        if score is not None and score < min_score:
-            continue
+        if score is not None:
+            if score < min_score:
+                continue
+            if top_score is None:
+                top_score = score
+            elif score < top_score - margin:
+                continue
         result.append(skill)
         if len(result) >= max_skills:
             break
@@ -358,6 +373,7 @@ def select_skills(
     manual_ids: Iterable[int] | None = None,
     ranker: Callable[..., Sequence[Any]] | None = None,
     min_score: float = DEFAULT_MIN_SCORE,
+    margin: float = DEFAULT_MARGIN,
     max_skills: int = DEFAULT_MAX_SKILLS,
 ) -> list[Skill]:
     """Choose the skills for a generation run (docs/skills.md 3.).
@@ -371,10 +387,11 @@ def select_skills(
        deterministic matches are explicit too, so they are also left unfiltered.
     3. Only when that yields nothing does the embedding fallback run, through
        the injectable ``ranker`` seam (defaulting to the shared embeddings
-       service). It keeps the best-first candidates scoring at least
-       ``min_score`` (cosine similarity) and returns at most ``max_skills`` --
-       an empty list when nothing clears the bar. Embedding failures degrade to
-       no selection and never raise.
+        service). It keeps the best-first candidates scoring at least
+        ``min_score`` (cosine similarity) and within ``margin`` of the best
+        score, and returns at most ``max_skills`` -- an empty list when nothing
+        clears the bar. Embedding failures degrade to no selection and never
+        raise.
     """
     candidates = _candidate_skills(workspace)
 
@@ -393,5 +410,6 @@ def select_skills(
         prompt=prompt,
         ranker=ranker,
         min_score=min_score,
+        margin=margin,
         max_skills=max_skills,
     )
