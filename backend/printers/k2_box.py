@@ -16,13 +16,24 @@ payload shapes in the wild:
 
 * the community "flat" schema -- a single ``box["slots"]`` list of
   self-describing slot objects (``index`` / ``name`` / ``material`` / ``color``
-  / ``brand`` / ``present`` / ``loaded`` / ``external``). This is the shape
-  this module maps.
-* the stock Creality schema -- per-unit ``T1``..``T4`` objects holding parallel
-  ``material_type`` / ``color_value`` / ``vendor`` arrays. That shape carries no
-  ``slots`` list and is intentionally **not** parsed here: this module returns
-  ``[]`` for it (the K2 transport then falls back to the proprietary WebSocket
-  reader in :mod:`printers.k2_websocket`), rather than guessing.
+  / ``brand`` / ``present`` / ``loaded`` / ``external``). This is the preferred
+  shape and is parsed first.
+* the stock Creality schema -- per-unit ``T1``..``Tn`` objects, each holding
+  four parallel per-slot arrays (``material_type`` / ``color_value`` /
+  ``vender``) alongside unit telemetry (``state``, ``temperature``,
+  ``dry_and_humidity``, ``filament``, ``remain_len``, ...). It carries no
+  ``slots`` list. This module now parses that shape as a best-effort fallback.
+
+The stock mapping is deliberately conservative: ``material_type`` is a Creality
+material *code* (``"101001"``), not a human name, and ``vender`` is raw RFID
+vendor data, so both are carried through verbatim rather than decoded -- the
+community code tables disagree between sources. ``name`` is left empty because
+the stock schema has no per-slot spool name, and ``state`` is the owning unit's
+connection state (there is no confirmed per-slot state field).
+
+When neither shape is parseable the function returns ``[]`` and the K2
+transport falls back to the proprietary WebSocket reader in
+:mod:`printers.k2_websocket`.
 
 Because the schema is firmware-dependent, :func:`slots_from_box_object` is
 deliberately defensive: any unexpected shape yields ``[]`` instead of raising.
@@ -33,6 +44,7 @@ raised by the Moonraker client, not by this parser).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .base import CfsSlot
@@ -49,20 +61,35 @@ _EMPTY_STATES = frozenset({"empty", "none", "absent", "unloaded", "0", "false", 
 #: Per-slot ``state`` strings that mean "a spool is present".
 _LOADED_STATES = frozenset({"loaded", "present", "ready", "1", "true", "yes"})
 
+#: Stock-schema CFS unit key: ``T1``..``Tn`` (case-insensitive).
+_UNIT_KEY = re.compile(r"^T(\d+)$", re.IGNORECASE)
+
+#: Number of bays a single stock CFS unit exposes. Used to derive a flat,
+#: collision-free ``index`` across units (``(unit - 1) * 4 + bay``) -- the same
+#: numbering the WebSocket parser uses -- and to bound a malformed array.
+_SLOTS_PER_UNIT = 4
+
+#: Stock-schema per-unit brand arrays. The firmware misspells the vendor field
+#: as ``vender``; both spellings are accepted.
+_STOCK_BRAND_KEYS = ("vendor", "vender")
+
 
 def slots_from_box_object(payload: Any) -> list[CfsSlot]:
     """Map a Moonraker ``[box]`` object-query payload to CFS slots.
 
     ``payload`` may be the full ``/printer/objects/query?box`` response
     (``{"result": {"status": {"box": {...}}}}``), just its ``result``
-    (``{"status": {"box": {...}}}}``) or the ``box`` object itself. The CFS
-    state is read from ``box["slots"]`` (the community "flat" schema).
+    (``{"status": {"box": {...}}}}``) or the ``box`` object itself.
 
-    The parser never raises: a missing ``box``, a missing/non-list ``slots``, a
-    non-dict slot or a partial slot all degrade to ``[]``/defaults. Entries
-    flagged ``external: true`` (the external spool holder) are skipped, mirroring
-    :func:`printers.k2_websocket.parse_boxs_info`, which drops the spool holder
-    because :class:`~printers.base.CfsSlot` describes a CFS bay.
+    The community "flat" schema (``box["slots"]``) is tried first; when it
+    yields no slots the stock Creality schema (per-unit ``T1``..``Tn`` with
+    parallel arrays) is parsed as a fallback. Both branches are defensive: a
+    missing ``box``, a malformed slot or an unknown shape degrades to ``[]`` and
+    the function never raises.
+
+    Entries flagged ``external: true`` (the external spool holder) are skipped,
+    mirroring :func:`printers.k2_websocket.parse_boxs_info`, which drops the
+    spool holder because :class:`~printers.base.CfsSlot` describes a CFS bay.
 
     Returns the slots sorted by ``index``.
     """
@@ -70,6 +97,14 @@ def slots_from_box_object(payload: Any) -> list[CfsSlot]:
     if not isinstance(box, dict):
         return []
 
+    slots = _flat_slots(box)
+    if slots:
+        return slots
+    return _stock_slots(box)
+
+
+def _flat_slots(box: dict[str, Any]) -> list[CfsSlot]:
+    """Parse the community flat schema (``box["slots"]``), or ``[]``."""
     raw_slots = box.get("slots")
     if not isinstance(raw_slots, list):
         return []
@@ -85,6 +120,61 @@ def slots_from_box_object(payload: Any) -> list[CfsSlot]:
     return slots
 
 
+def _stock_slots(box: dict[str, Any]) -> list[CfsSlot]:
+    """Parse the stock Creality schema (per-unit ``T1``..``Tn``), or ``[]``.
+
+    Units are visited in numeric order so the derived indices are stable even
+    when the payload's key order is arbitrary. Unknown keys and non-object
+    units are ignored.
+    """
+    units: list[tuple[int, dict[str, Any]]] = []
+    for key, value in box.items():
+        number = _unit_number(key)
+        if number is None or not isinstance(value, dict):
+            continue
+        units.append((number, value))
+    units.sort(key=lambda item: item[0])
+
+    slots: list[CfsSlot] = []
+    for number, unit in units:
+        slots.extend(_slots_from_unit(unit, number))
+    slots.sort(key=lambda slot: slot.index)
+    return slots
+
+
+def _slots_from_unit(unit: dict[str, Any], number: int) -> list[CfsSlot]:
+    """Expand one stock unit's parallel arrays into up to four CFS slots."""
+    materials = unit.get("material_type")
+    colors = unit.get("color_value")
+    brands = _first_list(unit, _STOCK_BRAND_KEYS)
+
+    count = min(
+        _SLOTS_PER_UNIT,
+        max(_list_length(materials), _list_length(colors), _list_length(brands)),
+    )
+    if count <= 0:
+        return []
+
+    unit_state = unit.get("state")
+    slots: list[CfsSlot] = []
+    for position in range(count):
+        material = _clean_text(_at(materials, position))
+        color = _clean_text(_at(colors, position))
+        brand = _clean_text(_at(brands, position))
+        slots.append(
+            CfsSlot(
+                index=(number - 1) * _SLOTS_PER_UNIT + position,
+                material=material,
+                brand=brand,
+                name="",
+                color=color,
+                state=_slot_state(unit_state, position),
+                empty=not (material or color or brand),
+            )
+        )
+    return slots
+
+
 def _extract_box(payload: Any) -> Any:
     """Return the ``box`` object from a response/result/box payload, else ``None``."""
     if not isinstance(payload, dict):
@@ -96,10 +186,54 @@ def _extract_box(payload: Any) -> Any:
     status = payload.get("status")
     if isinstance(status, dict) and "box" in status:
         return status["box"]
-    # ...or the box object itself.
-    if "slots" in payload:
+    # ...or the box object itself, in either schema.
+    if "slots" in payload or _has_unit_keys(payload):
         return payload
     return None
+
+
+def _has_unit_keys(mapping: dict[str, Any]) -> bool:
+    """Whether ``mapping`` looks like a stock box (has a ``T<n>`` key)."""
+    return any(_unit_number(key) is not None for key in mapping)
+
+
+def _unit_number(key: Any) -> int | None:
+    """Return the positive unit number from a ``T<n>`` key, else ``None``."""
+    if not isinstance(key, str):
+        return None
+    match = _UNIT_KEY.match(key.strip())
+    if match is None:
+        return None
+    number = int(match.group(1))
+    return number if number > 0 else None
+
+
+def _first_list(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """Return the first list-valued field among ``keys``, else ``None``."""
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _list_length(value: Any) -> int:
+    """Length of a list, or ``0`` for anything else."""
+    return len(value) if isinstance(value, list) else 0
+
+
+def _at(value: Any, position: int) -> Any:
+    """Return ``value[position]`` for a list, else ``None`` (out-of-range safe)."""
+    if isinstance(value, list) and 0 <= position < len(value):
+        return value[position]
+    return None
+
+
+def _slot_state(unit_state: Any, position: int) -> str:
+    """Slot state: a per-slot array element when given, else the unit state."""
+    if isinstance(unit_state, list):
+        return _clean_state(_at(unit_state, position))
+    return _clean_state(unit_state)
 
 
 def _slot_from_mapping(raw: dict[str, Any], position: int) -> CfsSlot:

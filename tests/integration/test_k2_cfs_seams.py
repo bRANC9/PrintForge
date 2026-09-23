@@ -78,7 +78,7 @@ BOX_PAYLOAD = {
     }
 }
 
-#: The stock Creality schema (per-unit arrays, no ``slots`` list): unparsed.
+#: The stock Creality schema (per-unit arrays, no ``slots`` list): parsed directly.
 STOCK_CREALITY_PAYLOAD = {"result": {"status": {"box": {"T1": {"material_type": ["PLA"]}}}}}
 
 
@@ -106,21 +106,17 @@ def test_fetch_cfs_slots_prefers_the_real_box_object_query():
     assert reader_calls == []
 
 
-def test_stock_creality_box_shape_falls_back_to_the_websocket():
+def test_stock_creality_box_shape_is_parsed_without_the_websocket():
     opener = _FakeOpener(
         {"http://k2.local:7125/printer/objects/query?box": json.dumps(STOCK_CREALITY_PAYLOAD)}
     )
-    ws_slots = [CfsSlot(index=0, material="PETG", empty=False)]
-    seen: dict[str, Any] = {}
 
-    def reader(host, *, port, timeout):
-        seen.update(host=host, port=port, timeout=timeout)
-        return ws_slots
+    def reader(*args, **kwargs):
+        raise AssertionError("the stock [box] schema parses, so the WebSocket must not run")
 
     slots = _transport(opener, reader=reader).fetch_cfs_slots()
 
-    assert slots == ws_slots
-    assert seen == {"host": "k2.local", "port": 9999, "timeout": 2.0}
+    assert [(slot.index, slot.material, slot.empty) for slot in slots] == [(0, "PLA", False)]
     assert opener.urls == ["http://k2.local:7125/printer/objects/query?box"]
 
 
@@ -163,12 +159,16 @@ def test_real_client_round_trips_a_box_query_payload():
     assert opener.urls == ["http://k2.local:7125/printer/objects/query?box"]
 
 
-@pytest.mark.parametrize("payload", [BOX_PAYLOAD, STOCK_CREALITY_PAYLOAD])
-def test_parser_never_invents_slots_for_unknown_payloads(payload):
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (BOX_PAYLOAD, 1),
+        (STOCK_CREALITY_PAYLOAD, 1),
+        ({"result": {"status": {"box": {"unknown": 1}}}}, 0),
+        ({"not": "a box"}, 0),
+    ],
+)
+def test_parser_only_reports_parseable_slots(payload, expected):
     from printers.k2_box import slots_from_box_object
 
-    slots = slots_from_box_object(payload)
-    if payload is BOX_PAYLOAD:
-        assert len(slots) == 1
-    else:
-        assert slots == []
+    assert len(slots_from_box_object(payload)) == expected
