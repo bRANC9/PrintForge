@@ -82,6 +82,25 @@
                        x-cloak>Az elérhető modellek betöltése sikertelen: <span x-text="modelsError"></span></p>
                 </div>
                 <div class="form-row">
+                    <label for="setting-ollama-vision-model">Vision modell <span class="badge"
+       :class="'source-' + source('ollama_vision_model')"
+       x-text="source('ollama_vision_model')"></span></label>
+                    <input id="setting-ollama-vision-model"
+                           class="input"
+                           type="text"
+                           list="vision-model-options"
+                           placeholder="llava:7b"
+                           x-model="form.ollama_vision_model"
+                           :disabled="saving">
+                    <datalist id="vision-model-options">
+                        <template x-for="model in visionModelOptions" :key="model.name">
+                            <option :value="model.name"
+                                    x-text="model.missing ? model.name + ' (nem elérhető)' : model.name"></option>
+                        </template>
+                    </datalist>
+                    <p class="muted field-hint">Üresen hagyva ugyanaz, mint a fő Ollama modell (a review a fő modellt használja).</p>
+                </div>
+                <div class="form-row">
                     <label for="setting-embedding-model">Embedding modell <span class="badge"
        :class="'source-' + source('embedding_model')"
        x-text="source('embedding_model')"></span></label>

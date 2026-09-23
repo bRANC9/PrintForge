@@ -850,6 +850,7 @@
             return {
                 ollama_base_url: "",
                 ollama_model: "",
+                ollama_vision_model: "",
                 embedding_model: "",
                 rag_enabled: false,
                 openscad_mode: "",
@@ -867,6 +868,7 @@
             return {
                 ollama_base_url: data.ollama_base_url || "",
                 ollama_model: data.ollama_model || "",
+                ollama_vision_model: data.ollama_vision_model || "",
                 embedding_model: data.embedding_model || "",
                 rag_enabled: Boolean(data.rag_enabled),
                 openscad_mode: data.openscad_mode || "",
@@ -945,6 +947,7 @@
                     options = options.filter((model) => {
                         const caps = Array.isArray(model.capabilities) ? model.capabilities : [];
                         if (kind === "embedding") return caps.includes("embedding");
+                        if (kind === "vision") return caps.includes("vision");
                         return (
                             caps.includes("completion") ||
                             caps.includes("tools") ||
@@ -961,6 +964,10 @@
 
             get ollamaModelOptions() {
                 return this.modelOptionsFor(this.form.ollama_model, "completion");
+            },
+
+            get visionModelOptions() {
+                return this.modelOptionsFor(this.form.ollama_vision_model, "vision");
             },
 
             get embeddingModelOptions() {
