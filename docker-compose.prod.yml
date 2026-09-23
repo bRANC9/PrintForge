@@ -80,9 +80,15 @@ x-app-env: &app-env
     OPENSCAD_MODE: ${OPENSCAD_MODE:-docker}
     OPENSCAD_IMAGE: ${OPENSCAD_IMAGE:-ghcr.io/branc9/printforge-openscad:latest}
     SLICER_MODE: ${SLICER_MODE:-docker}
-    SLICER_IMAGE: ${SLICER_IMAGE:-ghcr.io/branc9/printforge-prusaslicer:latest}
-    # The PrusaSlicer backend reads PRUSASLICER_IMAGE; keep it in sync with SLICER_IMAGE.
+    # Active slicer backend: prusaslicer (default) or orca (alias orcaslicer).
+    SLICER_BACKEND: ${SLICER_BACKEND:-prusaslicer}
+    # Per-backend sandbox images. Each backend reads its own alias, but
+    # SLICER_IMAGE — a deployment-wide override — wins for whichever backend is
+    # active, so it is left unset by default. Switching backend only needs
+    # SLICER_BACKEND=orca: ORCASLICER_IMAGE already points at the Orca image.
+    SLICER_IMAGE: ${SLICER_IMAGE:-}
     PRUSASLICER_IMAGE: ${PRUSASLICER_IMAGE:-ghcr.io/branc9/printforge-prusaslicer:latest}
+    ORCASLICER_IMAGE: ${ORCASLICER_IMAGE:-ghcr.io/branc9/printforge-orcaslicer:latest}
 
 services:
     db:

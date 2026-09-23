@@ -126,3 +126,14 @@ jobs:
 
       - name: Validate optional SearXNG override
         run: docker compose -f docker-compose.yml -f docker-compose.search.yml config --quiet
+
+      # The OrcaSlicer backend is opt-in; make sure the override still resolves.
+      - name: Validate OrcaSlicer backend override
+        run: >-
+          SLICER_BACKEND=orca
+          ORCASLICER_IMAGE=ghcr.io/branc9/printforge-orcaslicer:latest
+          docker compose -f docker-compose.yml config --quiet
+
+      # Static lint of the OrcaSlicer sandbox Dockerfile (no image build here).
+      - name: Lint OrcaSlicer sandbox Dockerfile
+        run: docker buildx build --check -f docker/slicer-orca/Dockerfile docker/slicer-orca

@@ -6,6 +6,7 @@ name: Release
 #   App (web/worker): ghcr.io/<owner>/printforge
 #   OpenSCAD sandbox: ghcr.io/<owner>/printforge-openscad
 #   Slicer sandbox:   ghcr.io/<owner>/printforge-prusaslicer
+#   Orca sandbox:     ghcr.io/<owner>/printforge-orcaslicer
 #
 # The sandbox images are independent of the app image. Watchtower only tracks the
 # app image (the compose `web`/`worker` services); the sandbox images are pulled
@@ -91,6 +92,9 @@ jobs:
           - name: printforge-prusaslicer
             context: docker/slicer
             file: docker/slicer/Dockerfile
+          - name: printforge-orcaslicer
+            context: docker/slicer-orca
+            file: docker/slicer-orca/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v5

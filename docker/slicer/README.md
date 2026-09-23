@@ -87,11 +87,12 @@ before use; the command is always a list, never a shell string.
 | `SLICER_MEMORY_LIMIT` | `2g` | `--memory` value |
 | `SLICER_CPU_LIMIT` | `2.0` | `--cpus` value |
 
-## Later backend: OrcaSlicer
+## Second backend: OrcaSlicer
 
-[OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) is a planned second
-backend. It is **not implemented yet**: OrcaSlicer links wxWidgets/OpenGL and
-its headless CLI frequently needs a virtual display (`Xvfb`), so containerising
-it is a larger integration risk than PrusaSlicer. When it lands it will
-implement the same `SlicerBackend` contract (`slice` / `estimate`) and get its
-own image; the worker and task interface stay unchanged.
+[OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer) is the optional second
+backend and has its own sandbox image in [`../slicer-orca`](../slicer-orca).
+OrcaSlicer links wxWidgets/OpenGL and needs a virtual display even in CLI mode,
+so that image ships `Xvfb` and wraps the CLI in `xvfb-run -a` (a knowingly
+larger integration surface than this PrusaSlicer image). Select it with
+`SLICER_BACKEND=orca`; PrusaSlicer stays the default and the `SlicerBackend`
+contract (`slice` / `estimate`) is unchanged.

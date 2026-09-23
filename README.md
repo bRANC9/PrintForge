@@ -96,6 +96,14 @@ variables from `.env.example`.
 - **OpenAI-compatible LLM provider** — set `LLM_PROVIDER=openai` plus
   `OPENAI_BASE_URL` and `OPENAI_API_KEY`. This works for hosted OpenAI or any
   OpenAI-compatible gateway; Ollama stays the default (`LLM_PROVIDER=ollama`).
+- **OrcaSlicer slicing backend (opt-in)** — the optional second slicer uses the
+  headless OrcaSlicer sandbox image
+  `ghcr.io/branc9/printforge-orcaslicer` (a wxWidgets/GL app wrapped in Xvfb).
+  Enable it with `SLICER_BACKEND=orca` in `.env`; `ORCASLICER_IMAGE` already
+  defaults to the published image (set `SLICER_IMAGE` only to pin both backends
+  to one image). PrusaSlicer remains the default and the Orca image is only
+  pulled when a job selects this backend. See
+  [`docker/slicer-orca/README.md`](docker/slicer-orca/README.md).
 
 ### TrueNAS SCALE 25.10 (Goldeye)
 
@@ -117,8 +125,9 @@ variables from `.env.example`.
 
 Releases publish the Django (web/worker) image to GitHub Container Registry as
 `ghcr.io/branc9/printforge`, plus the CAD/slicing sandbox images
-`ghcr.io/branc9/printforge-openscad` and
-`ghcr.io/branc9/printforge-prusaslicer` (same tag scheme). On a host that already
+`ghcr.io/branc9/printforge-openscad`,
+`ghcr.io/branc9/printforge-prusaslicer` and
+`ghcr.io/branc9/printforge-orcaslicer` (same tag scheme). On a host that already
 runs Watchtower (e.g. TrueNAS), deploy the pull-based stack instead of building:
 
 ```bash
