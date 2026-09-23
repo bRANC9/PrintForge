@@ -58,6 +58,12 @@ services:
       # Ollama runs on another machine, put its address here. For an internal
       # Ollama container use http://ollama:11434 (see the block at the bottom).
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # EDIT: the Ollama model used for generation. "worker" inherits this
+      # through the anchor (all LLM calls run in the Celery worker).
+      OLLAMA_MODEL: qwen3-coder:30b
+      # EDIT (optional): a vision-capable model (e.g. llava:7b, qwen2.5-vl:7b)
+      # used only by the agent self-check review. Leave empty to use OLLAMA_MODEL.
+      OLLAMA_VISION_MODEL: ""
       MEDIA_ROOT: /data/media
     # Resolve the Docker host by name on Linux (TrueNAS); used by OLLAMA_BASE_URL.
     extra_hosts:

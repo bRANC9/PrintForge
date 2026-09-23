@@ -98,12 +98,13 @@ credentials via `&db-env`; `web` holds the shared app env via `&app-env`, which
 | `DJANGO_ALLOWED_HOSTS` | `web` | Every hostname/IP you open in the browser **and** your NAS hostname / IP, comma-separated (e.g. `printforge.lan,192.168.1.250,localhost`) |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | `web` | The browser **origin** including scheme and port, e.g. `http://192.168.1.250:8080` (required for logins/actions from a non-`localhost` origin) |
 | `OLLAMA_BASE_URL` | `web` | Ollama host. Default reaches Ollama on the Docker host; change it if Ollama runs elsewhere (`http://ollama:11434` for internal Ollama) |
+| `OLLAMA_VISION_MODEL` | `web` | **Optional.** A vision-capable model (e.g. `llava:7b`, `qwen2.5-vl:7b`) used only by the agent self-check review. Leave empty to reuse `OLLAMA_MODEL` |
 | `/mnt/<POOL>/...` | `pg`, `redis`, `media`, `scratch` | Your pool dataset paths |
 | `"8080:8000"` | `web` | A different host port if 8080 is taken (optional) |
 
-`DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` and
-`OLLAMA_BASE_URL` are edited in the `web` block only — `worker` inherits them
-through the anchor (the LLM calls run in the Celery worker).
+`DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`,
+`OLLAMA_BASE_URL` and `OLLAMA_VISION_MODEL` are edited in the `web` block only —
+`worker` inherits them through the anchor (the LLM calls run in the Celery worker).
 
 > **Allowed hosts vs. CSRF origin.** `DJANGO_ALLOWED_HOSTS` takes **hostnames
 > and IPs only** (no port, no scheme). `DJANGO_CSRF_TRUSTED_ORIGINS` takes full
@@ -475,6 +476,12 @@ Everything the sandbox needs is baked into the images and the compose files:
   `extra_hosts: host.docker.internal:host-gateway`, so the LLM calls made by the
   Celery worker reach Ollama running on the Docker host. Change the value if
   Ollama runs on another machine, or to `http://ollama:11434` for internal Ollama.
+- **Ollama models** — the main model is `OLLAMA_MODEL` (default
+  `qwen3-coder:30b`). **Optional:** set `OLLAMA_VISION_MODEL` to a vision-capable
+  model (e.g. `llava:7b`, `qwen2.5-vl:7b`) to run the agent self-check review on
+  a separate model; leave it **empty** to reuse `OLLAMA_MODEL`. On Path B
+  (SSH/`.env`) set both in `.env`; on Path A (Custom App) edit them in the `web`
+  environment of the pasted YAML.
 - **Mode switch** — the backend defaults to `local`. Set **CAD mód = docker** and
   **Slicing mód = docker** on the app's Settings page after install (see A5). The
   sandbox image names already default to the published GHCR images, so no env is

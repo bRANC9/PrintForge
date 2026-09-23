@@ -41,11 +41,28 @@ x-app-env: &app-env
     REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-coder:30b}
+    # Optional vision model for the agent self-check review; empty = use OLLAMA_MODEL.
+    OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-}
+    # LLM provider: "ollama" (default) or "openai" for any OpenAI-compatible
+    # endpoint (hosted OpenAI or a local gateway). OPENAI_* are only used then.
+    LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
     EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
     RAG_ENABLED: ${RAG_ENABLED:-false}
+    # Web search for the Research agent. Empty SEARCH_BACKEND disables it;
+    # docker-compose.search.yml adds a self-hosted SearXNG and points this here.
+    SEARCH_BACKEND: ${SEARCH_BACKEND:-}
+    SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://searxng:8080}
+    # Storage: "local" (default) or "s3" (S3/MinIO; requires the AWS_* vars).
     STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
     MEDIA_ROOT: /data/media
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-}
+    AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
+    AWS_S3_REGION_NAME: ${AWS_S3_REGION_NAME:-}
     # Gunicorn tuning for the `web` service (ignored by the celery `worker`).
     # Lower GUNICORN_WORKERS on a small NAS; see docs/truenas-deploy.md.
     GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
