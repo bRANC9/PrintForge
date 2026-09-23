@@ -385,6 +385,26 @@ class ModelSpecification(BaseModel):
         """Upper-case the material so downstream CAD logic can match reliably."""
         return value.strip().upper()
 
+    @model_validator(mode="after")
+    def _fill_extrude_height(self) -> "ModelSpecification":
+        """Default a missing ``extrude`` height to the object height.
+
+        Small local models frequently emit an ``extrude`` primitive with
+        ``height: null`` even though the CAD backend needs it. A 2D extrusion's
+        height *is* the object's height, so the missing value is taken from
+        ``dimensions.height`` (clamped to the printable bounds). This keeps the
+        LLM<->CAD contract valid without weakening the CAD validation, and is
+        idempotent. ``wall_thickness`` is deliberately **not** guessed: absent
+        means a solid extrusion.
+        """
+        for primitive in self.primitives:
+            if primitive.type != "extrude" or primitive.height is not None:
+                continue
+            primitive.height = min(
+                max(self.dimensions.height, MIN_PRIMITIVE_MM), MAX_PRIMITIVE_MM
+            )
+        return self
+
     @model_serializer(mode="wrap")
     def _omit_empty_collections(
         self, handler: Callable[[ModelSpecification], dict[str, Any]]

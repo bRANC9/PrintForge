@@ -551,6 +551,15 @@ def test_valid_extrude_primitive_validates():
     assert dumped["primitives"][0]["profile"][0] == {"x": 0.0, "y": 0.0}
 
 
+def test_extrude_missing_height_defaults_to_object_height():
+    extrude = {**VALID_EXTRUDE, "height": None}
+    model = ModelSpecification.model_validate(
+        spec(dimensions={"width": 60, "height": 25, "thickness": 3}, primitives=[extrude])
+    )
+    # A 2D extrusion's height is the object height; the spec fills it in.
+    assert model.primitives[0].height == pytest.approx(25.0)
+
+
 def test_extrude_defaults_have_empty_profile_and_optional_walls():
     primitive = Primitive.model_validate({**VALID_EXTRUDE})
     assert primitive.wall_thickness == pytest.approx(1.2)
