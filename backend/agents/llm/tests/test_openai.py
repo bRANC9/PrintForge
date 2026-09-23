@@ -144,18 +144,20 @@ def test_model_falls_back_to_django_settings(monkeypatch, settings):
     assert provider.model == "django-model"
 
 
-def test_model_falls_back_to_environment(monkeypatch):
-    monkeypatch.setenv("OPENAI_MODEL", "env-model")
+def test_model_falls_back_to_settings_when_service_raises(settings):
+    # ``openai_model`` is now a registered runtime setting; when the settings
+    # service raises (unknown name / unreachable), the provider falls back to
+    # Django settings.
+    settings.OPENAI_MODEL = "settings-model"
 
-    def unknown(name: str) -> Any:
-        # The real service knows openai_base_url/api_key but not yet
-        # openai_model, so it resolves the former and raises for the latter.
-        if name in {"openai_base_url", "openai_api_key"}:
-            return None
-        raise ValueError(f"Unknown setting: {name}")
+    def broken(name: str) -> Any:
+        # base_url/api_key resolve normally; the model name raises.
+        if name == "openai_model":
+            raise ValueError(f"Unknown setting: {name}")
+        return None
 
-    provider = OpenAICompatibleProvider(get_setting=unknown)
-    assert provider.model == "env-model"
+    provider = OpenAICompatibleProvider(get_setting=broken)
+    assert provider.model == "settings-model"
 
 
 def test_reload_picks_up_runtime_settings_change():

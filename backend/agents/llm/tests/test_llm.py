@@ -115,6 +115,104 @@ def test_get_provider_rejects_unknown_name():
 
 
 # ---------------------------------------------------------------------------
+# Factory runtime provider resolution (injected seam / monkeypatch, no DB)
+# ---------------------------------------------------------------------------
+
+
+def test_get_provider_uses_injected_seam_for_runtime_override():
+    """A runtime ``llm_provider`` override selects the backend (seam injected)."""
+    provider = get_provider(
+        get_setting=fake_settings(
+            {
+                "llm_provider": "openai-compatible",
+                "openai_base_url": "http://gateway:8000/v1/",
+                "openai_api_key": "sk-test",
+                "openai_model": "local-model",
+            }
+        )
+    )
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.name == "openai-compatible"
+    assert provider.base_url == "http://gateway:8000/v1"
+    assert provider.model == "local-model"
+
+
+def test_get_provider_reads_llm_provider_from_settings_service(monkeypatch):
+    """Without an explicit name the factory asks the runtime settings service."""
+    monkeypatch.setattr(
+        "agents.llm.factory._service_setting",
+        lambda name: "openai-compatible" if name == "llm_provider" else None,
+    )
+    # The constructed provider resolves its own settings; stub it so no DB is hit.
+    monkeypatch.setattr("agents.llm.openai._service_setting", lambda name: None)
+
+    provider = get_provider()
+    assert isinstance(provider, OpenAICompatibleProvider)
+
+
+def test_get_provider_runtime_override_accepts_openai_alias(monkeypatch):
+    monkeypatch.setattr(
+        "agents.llm.factory._service_setting",
+        lambda name: "openai" if name == "llm_provider" else None,
+    )
+    monkeypatch.setattr("agents.llm.openai._service_setting", lambda name: None)
+
+    assert isinstance(get_provider(), OpenAICompatibleProvider)
+
+
+def test_get_provider_runtime_override_beats_django_setting(monkeypatch, settings):
+    settings.LLM_PROVIDER = "ollama"
+    monkeypatch.setattr(
+        "agents.llm.factory._service_setting",
+        lambda name: "openai-compatible" if name == "llm_provider" else None,
+    )
+    monkeypatch.setattr("agents.llm.openai._service_setting", lambda name: None)
+
+    assert isinstance(get_provider(), OpenAICompatibleProvider)
+
+
+def test_get_provider_explicit_name_wins_over_runtime_override(monkeypatch):
+    monkeypatch.setattr("agents.llm.factory._service_setting", lambda name: "openai-compatible")
+    monkeypatch.setattr("agents.llm.ollama._service_setting", lambda name: None)
+
+    provider = get_provider("ollama")
+    assert isinstance(provider, OllamaProvider)
+
+
+def test_get_provider_falls_back_to_django_setting_when_service_fails(monkeypatch, settings):
+    settings.LLM_PROVIDER = "openai-compatible"
+
+    def broken(name: str) -> Any:
+        raise RuntimeError("settings service unavailable")
+
+    monkeypatch.setattr("agents.llm.factory._service_setting", broken)
+    monkeypatch.setattr("agents.llm.openai._service_setting", lambda name: None)
+
+    assert isinstance(get_provider(), OpenAICompatibleProvider)
+
+
+def test_get_provider_falls_back_to_ollama_when_unconfigured(monkeypatch, settings):
+    settings.LLM_PROVIDER = ""
+    monkeypatch.setattr("agents.llm.factory._service_setting", lambda name: None)
+    monkeypatch.setattr("agents.llm.ollama._service_setting", lambda name: None)
+
+    provider = get_provider()
+    assert isinstance(provider, OllamaProvider)
+    assert provider.name == "ollama"
+
+
+def test_factory_service_setting_delegates_to_configuration_service(monkeypatch):
+    """The lazy seam reads ``configuration.services.get_setting`` (no DB here)."""
+    fake_module = types.ModuleType("configuration.services")
+    fake_module.get_setting = lambda name: f"value:{name}"
+    monkeypatch.setitem(sys.modules, "configuration.services", fake_module)
+
+    from agents.llm.factory import _service_setting as factory_service_setting
+
+    assert factory_service_setting("llm_provider") == "value:llm_provider"
+
+
+# ---------------------------------------------------------------------------
 # Runtime settings resolution (injected seam, no Django settings, no DB)
 # ---------------------------------------------------------------------------
 
