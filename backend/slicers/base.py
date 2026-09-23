@@ -15,6 +15,7 @@ an OrcaSlicer backend can implement the same contract later.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -22,6 +23,9 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "DEFAULT_FILAMENT_DENSITY",
+    "DEFAULT_FILAMENT_DIAMETER",
+    "MATERIAL_DENSITIES",
     "FilamentSettings",
     "ModelInput",
     "PlateMesh",
@@ -33,7 +37,12 @@ __all__ = [
     "SlicerError",
     "SlicerTimeout",
     "UnsupportedModelError",
+    "filament_density_for",
+    "filament_grams_from_length",
+    "resolve_filament_density",
+    "resolve_filament_diameter",
     "resolve_model",
+    "with_default_filament_density",
 ]
 
 
@@ -78,6 +87,154 @@ class FilamentSettings:
     brand: str = ""
     color: str = ""
     settings: Mapping[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Filament density / mass helpers
+# ---------------------------------------------------------------------------
+#
+# PrusaSlicer computes ``filament used [g]`` from the loaded ``filament_density``.
+# A profile that omits it makes the slicer log ``filament_density = 0`` and emit
+# ``filament used [g] = 0`` even though the extruded length (``filament used
+# [mm]``) is meaningful. These helpers supply a published typical density for
+# the profile's material; an explicit ``filament_density`` always wins.
+
+#: Published typical densities (g/cm³) for common FDM materials.
+MATERIAL_DENSITIES: dict[str, float] = {
+    "PLA": 1.24,
+    "PETG": 1.27,
+    "ABS": 1.04,
+    "ASA": 1.07,
+    "TPU": 1.21,
+    "PA": 1.14,  # Nylon
+    "PC": 1.20,
+}
+
+#: Density (g/cm³) assumed when the material is unknown or blank.
+DEFAULT_FILAMENT_DENSITY = 1.24
+
+#: Filament diameter (mm) assumed when a profile does not set one.
+DEFAULT_FILAMENT_DIAMETER = 1.75
+
+#: Accepted material spellings -> canonical key in :data:`MATERIAL_DENSITIES`.
+_MATERIAL_ALIASES: dict[str, str] = {
+    "PLA": "PLA",
+    "POLYLACTICACID": "PLA",
+    "POLYLACTIDE": "PLA",
+    "PETG": "PETG",
+    "ABS": "ABS",
+    "ASA": "ASA",
+    "TPU": "TPU",
+    "PA": "PA",
+    "NYLON": "PA",
+    "PA6": "PA",
+    "PA12": "PA",
+    "PC": "PC",
+    "POLYCARBONATE": "PC",
+}
+
+#: Longest canonical key first, so ``"PETG-CF"`` matches ``PETG`` not ``PET``.
+_MATERIAL_KEY_ORDER: tuple[str, ...] = tuple(sorted(MATERIAL_DENSITIES, key=len, reverse=True))
+
+
+def _normalise_material(material: str | None) -> str:
+    """Upper-case ``material`` and drop separators (``"pa-cf"`` -> ``"PACF"``)."""
+    return "".join(char for char in (material or "").upper() if char.isalnum())
+
+
+def _positive_float(value: Any) -> float | None:
+    """Coerce ``value`` to a finite, strictly positive float (else ``None``)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def filament_density_for(material: str | None) -> float:
+    """Return a typical density (g/cm³) for ``material``.
+
+    Matching is case/separator-insensitive, so ``"PLA+"``, ``"pa-cf"`` and
+    ``"Nylon"`` all resolve; anything unrecognised falls back to
+    :data:`DEFAULT_FILAMENT_DENSITY` (PLA's 1.24 g/cm³).
+    """
+    normalised = _normalise_material(material)
+    if not normalised:
+        return DEFAULT_FILAMENT_DENSITY
+    canonical = _MATERIAL_ALIASES.get(normalised, normalised)
+    if canonical in MATERIAL_DENSITIES:
+        return MATERIAL_DENSITIES[canonical]
+    for key in _MATERIAL_KEY_ORDER:
+        if normalised.startswith(key):
+            return MATERIAL_DENSITIES[key]
+    return DEFAULT_FILAMENT_DENSITY
+
+
+def _explicit_filament_density(settings: Mapping[str, Any] | None) -> float | None:
+    """Read a valid explicit ``filament_density`` (inline key or ``overrides``)."""
+    settings = settings or {}
+    candidates: list[Any] = [settings.get("filament_density")]
+    overrides = settings.get("overrides")
+    if isinstance(overrides, Mapping):
+        candidates.append(overrides.get("filament_density"))
+    for value in candidates:
+        number = _positive_float(value)
+        if number is not None:
+            return number
+    return None
+
+
+def resolve_filament_density(settings: Mapping[str, Any] | None, material: str | None) -> float:
+    """A profile's effective density: explicit value, else the material default."""
+    explicit = _explicit_filament_density(settings)
+    if explicit is not None:
+        return explicit
+    return filament_density_for(material)
+
+
+def with_default_filament_density(
+    settings: Mapping[str, Any] | None, material: str | None
+) -> dict[str, Any]:
+    """Copy ``settings``, adding a material-derived ``filament_density`` if unset.
+
+    An explicit, valid ``filament_density`` -- inline or under ``overrides`` --
+    is never overwritten, so a profile always wins over the material default.
+    """
+    result = dict(settings or {})
+    if _explicit_filament_density(result) is not None:
+        return result
+    result["filament_density"] = filament_density_for(material)
+    return result
+
+
+def resolve_filament_diameter(
+    settings: Mapping[str, Any] | None,
+    default: float = DEFAULT_FILAMENT_DIAMETER,
+) -> float:
+    """Read ``filament_diameter`` (inline key or ``overrides``) or return ``default``."""
+    settings = settings or {}
+    value = settings.get("filament_diameter")
+    if value is None:
+        overrides = settings.get("overrides")
+        if isinstance(overrides, Mapping):
+            value = overrides.get("filament_diameter")
+    return _positive_float(value) or default
+
+
+def filament_grams_from_length(
+    length_mm: float,
+    density: float,
+    diameter: float = DEFAULT_FILAMENT_DIAMETER,
+) -> float:
+    """Estimate filament mass (g) from extruded length (mm), density, diameter.
+
+    ``mass = length x (pi x r^2) x density / 1000`` (mm³ -> g via ``g/cm³``).
+    """
+    radius = diameter / 2.0
+    volume_mm3 = length_mm * math.pi * radius * radius
+    return volume_mm3 * density / 1000.0
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 from factories import ModelVersionFactory, ProjectFactory, UserFactory, WorkspaceFactory
 
@@ -12,7 +15,7 @@ from notifications.services import NotificationKind
 from printers.models import Printer, PrintJob, PrintJobStatus
 from slicers import prusaslicer, services, tasks
 from slicers.base import SlicedResult, SlicerError
-from slicers.models import PrinterProfile
+from slicers.models import FilamentProfile, PrinterProfile
 
 pytestmark = pytest.mark.django_db
 
@@ -178,6 +181,57 @@ def test_printer_settings_fall_back_to_default():
     settings = services.printer_settings(None)
     assert settings.name == profile.name
     assert settings.settings["bed_shape"] == "0x0"
+
+
+def test_filament_settings_defaults_density_from_material():
+    profile = FilamentProfile.objects.create(name="Generic PETG", material="PETG")
+
+    settings = services.filament_settings(profile)
+
+    assert settings.settings["filament_density"] == 1.27
+
+
+def test_filament_settings_keeps_explicit_density():
+    profile = FilamentProfile.objects.create(
+        name="PLA", material="PLA", settings_json={"filament_density": 1.30}
+    )
+
+    settings = services.filament_settings(profile)
+
+    assert settings.settings["filament_density"] == 1.30
+
+
+def test_slice_job_persists_nonzero_filament_g_for_pla_without_density(job, tmp_path, monkeypatch):
+    """Regression: a PLA profile without ``filament_density`` must not yield 0 g."""
+    job.filament = FilamentProfile.objects.create(name="Generic PLA", material="PLA")
+    job.save(update_fields=["filament"])
+    storage = _storage_with_model(job, tmp_path)
+    loaded_ini: list[str] = []
+
+    gcode = (
+        b"; estimated printing time (normal mode) = 1m 0s\n"
+        b"; filament used [mm] = 1000.00\n"
+        b"; filament used [g] = 0.00\n"
+        b"G1 X0 Y0 E0\n"
+    )
+
+    def run(args, **kwargs):  # noqa: ANN001, ANN003
+        Path(args[args.index("--output") + 1]).write_bytes(gcode)
+        for index, value in enumerate(args):
+            if value == "--load":
+                loaded_ini.append(Path(args[index + 1]).read_text())
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    backend = prusaslicer.PrusaSlicerBackend(mode="local")
+
+    result = services.slice_job(job, backend=backend, storage=storage)
+
+    job.refresh_from_db()
+    assert job.status == PrintJobStatus.READY
+    assert job.slicing_json["estimate"]["filament_g"] > 0
+    assert result["estimate"]["filament_g"] > 0
+    assert any("filament_density = 1.24" in text for text in loaded_ini)
 
 
 def test_celery_task_slices(job, tmp_path, monkeypatch):

@@ -49,6 +49,12 @@ PrusaSlicer loads printer, then filament, then process, so later profiles win.
 The ``ProcessProfile.layer_height`` field is injected as ``layer_height`` when
 no explicit value is present.
 
+When a filament profile omits ``filament_density``, a published typical density
+for the profile's ``material`` is injected (see :mod:`slicers.base`), so the
+slicer can emit a non-zero ``filament used [g]``. An explicit density always
+wins. If the slicer still reports ``0`` grams, the backend derives the mass
+from ``filament used [mm]`` x density x diameter.
+
 Build plates
 ------------
 ``slice_plate`` passes a **3MF project** (see :mod:`slicers.threemf`) carrying
@@ -82,7 +88,11 @@ from .base import (
     SlicerBackend,
     SlicerError,
     SlicerTimeout,
+    filament_grams_from_length,
+    resolve_filament_density,
+    resolve_filament_diameter,
     resolve_model,
+    with_default_filament_density,
 )
 from .threemf import build_plate_3mf
 
@@ -239,6 +249,11 @@ def prepare_profiles(
         ("process", process.name, process.settings),
     )
     for label, name, settings_json in sources:
+        if label == "filament" and (filament.material or settings_json):
+            # A missing filament_density makes PrusaSlicer report 0 g; default it
+            # from the material so the gram estimate stays meaningful. An
+            # explicit density (inline or in ``overrides``) is never touched.
+            settings_json = with_default_filament_density(settings_json, filament.material)
         external, extra_overrides, inline = extract_profile_config(settings_json)
         if label == "process" and process.layer_height is not None and "layer_height" not in inline:
             inline["layer_height"] = _stringify(process.layer_height)
@@ -302,6 +317,26 @@ def parse_gcode_estimates(gcode: str) -> dict[str, Any]:
     match = _RE_FILAMENT_G.search(gcode)
     if match:
         estimates["filament_g"] = float(match.group(1))
+    return estimates
+
+
+def _fill_missing_filament_grams(
+    estimates: dict[str, Any], filament: FilamentSettings
+) -> dict[str, Any]:
+    """Backfill ``filament_g`` from length x density when the slicer reports 0.
+
+    PrusaSlicer writes both ``filament used [mm]`` and ``filament used [g]``.
+    When the density is missing or unusable the gram value is ``0`` (or absent)
+    while the length stays correct, so derive the mass from the effective
+    density/diameter as a fallback. A positive slicer value is never replaced.
+    """
+    grams = estimates.get("filament_g")
+    length = estimates.get("filament_mm")
+    if (isinstance(grams, (int, float)) and grams > 0) or not length or length <= 0:
+        return estimates
+    density = resolve_filament_density(filament.settings, filament.material)
+    diameter = resolve_filament_diameter(filament.settings)
+    estimates["filament_g"] = round(filament_grams_from_length(length, density, diameter), 2)
     return estimates
 
 
@@ -466,7 +501,7 @@ class PrusaSlicerBackend(SlicerBackend):
             self._run_cli(args, config)
             data = self._read_gcode(output_dir)
 
-        return self._result_from_gcode(data)
+        return self._result_from_gcode(data, filament=filament)
 
     def slice_plate(
         self,
@@ -518,6 +553,7 @@ class PrusaSlicerBackend(SlicerBackend):
 
         return self._result_from_gcode(
             data,
+            filament=filament,
             extra_metadata={"plate": {"item_count": len(items), "format": "3mf"}},
         )
 
@@ -549,9 +585,15 @@ class PrusaSlicerBackend(SlicerBackend):
         return output_path.read_bytes()
 
     def _result_from_gcode(
-        self, data: bytes, *, extra_metadata: Mapping[str, Any] | None = None
+        self,
+        data: bytes,
+        *,
+        filament: FilamentSettings | None = None,
+        extra_metadata: Mapping[str, Any] | None = None,
     ) -> SlicedResult:
         estimates = parse_gcode_estimates(data.decode("utf-8", errors="replace"))
+        if filament is not None:
+            estimates = _fill_missing_filament_grams(estimates, filament)
         metadata: dict[str, Any] = {"slicer": self.name, **estimates}
         if extra_metadata:
             metadata.update(extra_metadata)

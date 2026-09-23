@@ -34,6 +34,7 @@ from .base import (
     SliceModel,
     SlicerBackend,
     SlicerError,
+    with_default_filament_density,
 )
 from .models import FilamentProfile, PrinterProfile, ProcessProfile
 from .prusaslicer import PrusaSlicerBackend
@@ -165,15 +166,21 @@ def printer_settings(printer: Any | None, profile: PrinterProfile | None = None)
 
 
 def filament_settings(profile: FilamentProfile | None) -> FilamentSettings:
-    """Build :class:`FilamentSettings` from a ``FilamentProfile`` row."""
+    """Build :class:`FilamentSettings` from a ``FilamentProfile`` row.
+
+    When ``settings_json`` omits ``filament_density``, a published typical
+    density for ``profile.material`` is filled in so the slicer can compute a
+    gram estimate (see :mod:`slicers.base`). An explicit density always wins.
+    """
     if profile is None:
         return FilamentSettings()
+    settings = with_default_filament_density(dict(profile.settings_json or {}), profile.material)
     return FilamentSettings(
         name=profile.name,
         material=profile.material,
         brand=profile.brand,
         color=profile.color,
-        settings=dict(profile.settings_json or {}),
+        settings=settings,
     )
 
 

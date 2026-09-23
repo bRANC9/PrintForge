@@ -34,6 +34,14 @@ GCODE = (
     b"G1 X0 Y0 E0\n"
 )
 
+#: PrusaSlicer output when ``filament_density = 0``: length is real, grams are not.
+ZERO_GRAM_GCODE = (
+    b"; estimated printing time (normal mode) = 1m 0s\n"
+    b"; filament used [mm] = 1000.00\n"
+    b"; filament used [g] = 0.00\n"
+    b"G1 X0 Y0 E0\n"
+)
+
 PRINTER = PrinterSettings(
     name="K2 Pro", printer_model="K2", settings={"bed_shape": "0x0,350x0,350x350,0x350"}
 )
@@ -136,6 +144,49 @@ def test_prepare_profiles_missing_external_config_raises(tmp_path):
             FilamentSettings(),
             ProcessSettings(),
         )
+
+
+# ---------------------------------------------------------------------------
+# filament density (filament_g = 0.0 regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("material", "density"),
+    [("PLA", "1.24"), ("PETG", "1.27"), ("ABS", "1.04"), ("Nylon", "1.14")],
+)
+def test_prepare_profiles_defaults_filament_density_per_material(tmp_path, material, density):
+    filament = FilamentSettings(name=material, material=material, settings={"temperature": 210})
+    prepare_profiles(tmp_path, PrinterSettings(), filament, ProcessSettings())
+
+    assert f"filament_density = {density}" in (tmp_path / "filament.ini").read_text()
+
+
+def test_prepare_profiles_unknown_material_uses_fallback(tmp_path):
+    filament = FilamentSettings(
+        name="Mystery", material="Unobtainium", settings={"temperature": 200}
+    )
+    prepare_profiles(tmp_path, PrinterSettings(), filament, ProcessSettings())
+
+    assert "filament_density = 1.24" in (tmp_path / "filament.ini").read_text()
+
+
+def test_prepare_profiles_explicit_filament_density_wins(tmp_path):
+    filament = FilamentSettings(
+        name="PLA", material="PLA", settings={"filament_density": 1.30, "temperature": 210}
+    )
+    prepare_profiles(tmp_path, PrinterSettings(), filament, ProcessSettings())
+
+    text = (tmp_path / "filament.ini").read_text()
+    assert "filament_density = 1.3" in text
+    assert "filament_density = 1.24" not in text
+
+
+def test_prepare_profiles_skips_density_for_an_empty_filament(tmp_path):
+    config_files, _ = prepare_profiles(
+        tmp_path, PrinterSettings(), FilamentSettings(), ProcessSettings()
+    )
+    assert config_files == []
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +294,27 @@ def test_slice_writes_generated_ini_files(monkeypatch, tmp_path):
     assert len(seen) == 3
     assert any("nozzle_diameter" not in text and "bed_shape" in text for text in seen)
     assert any("layer_height = 0.15" in text for text in seen)
+
+
+def test_slice_derives_grams_from_length_when_slicer_reports_zero(monkeypatch):
+    run, _ = _fake_run(output=ZERO_GRAM_GCODE)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    filament = FilamentSettings(name="Generic PLA", material="PLA", settings={})
+    backend = PrusaSlicerBackend(mode="local")
+    result = backend.slice(b"solid x\n", PRINTER, filament, PROCESS)
+
+    assert result.estimated_filament_mm == pytest.approx(1000.0)
+    assert result.estimated_filament_g == pytest.approx(2.98, abs=0.01)
+    assert backend.estimate(result)["filament_g"] > 0
+
+
+def test_slice_keeps_a_positive_slicer_gram_estimate(monkeypatch):
+    run, _ = _fake_run()
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = PrusaSlicerBackend(mode="local").slice(b"solid x\n", PRINTER, FILAMENT, PROCESS)
+    assert result.estimated_filament_g == pytest.approx(3.70)
 
 
 def test_slice_passes_overrides(monkeypatch):

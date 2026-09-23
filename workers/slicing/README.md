@@ -68,6 +68,14 @@ PrusaSlicer writes into the G-code:
 `{"estimated_time_sec", "estimated_time", "filament_g", "filament_mm", "format",
 "slicer"}`.
 
+PrusaSlicer derives `filament used [g]` from the filament density. When a
+`FilamentProfile.settings_json` omits `filament_density`, the backend injects a
+published typical density for `FilamentProfile.material` (PLA 1.24, PETG 1.27,
+ABS 1.04, ASA 1.07, TPU 1.21, Nylon/PA 1.14, PC 1.20; unknown -> 1.24), so the
+gram estimate stays non-zero. An explicit `filament_density` (inline or under
+`overrides`) always wins. Should the slicer still report `0` grams, the backend
+derives the mass from `filament used [mm]` x density x diameter instead.
+
 ### Build plates
 
 A `PrintJob` selects the slicing path from its target (terv.md 28. fejezet):
