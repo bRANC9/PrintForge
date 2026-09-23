@@ -2,7 +2,8 @@
 
 CRUD/tag handling, visibility scoping and the deterministic
 ``select_skills`` order (manual -> object_kind/tag -> injectable embedding
-fallback), including the "embedding failure never raises" guarantee.
+fallback), including the "embedding failure never raises" guarantee and the
+embedding fallback's ``min_score`` threshold / ``max_skills`` cap.
 """
 
 from __future__ import annotations
@@ -237,3 +238,124 @@ def test_select_skills_swallows_embedding_failure(monkeypatch, owner, workspace)
 
     # No deterministic match -> the default ranker runs and fails gracefully.
     assert select_skills(prompt="something completely different", workspace=workspace) == []
+
+
+# ---------------------------------------------------------------------------
+# Selection -- embedding threshold & cap
+# ---------------------------------------------------------------------------
+
+
+def test_select_skills_threshold_drops_weak_embedding_matches(owner, workspace):
+    strong = create_skill(name="Strong", workspace=workspace, created_by=owner)
+    weak = create_skill(name="Weak", workspace=workspace, created_by=owner)
+
+    def ranker(*, prompt, candidates, limit):
+        return [(strong.pk, 0.9), (weak.pk, 0.1)]
+
+    selected = select_skills(
+        prompt="an unrelated wish", workspace=workspace, ranker=ranker, min_score=0.35
+    )
+
+    assert [skill.pk for skill in selected] == [strong.pk]
+
+
+def test_select_skills_cap_limits_embedding_matches(owner, workspace):
+    skills = [
+        create_skill(name=f"Item{i}", workspace=workspace, created_by=owner) for i in range(4)
+    ]
+
+    def ranker(*, prompt, candidates, limit):
+        assert limit == 2
+        return [(skill.pk, 0.9 - index * 0.05) for index, skill in enumerate(skills)]
+
+    selected = select_skills(
+        prompt="an unrelated wish", workspace=workspace, ranker=ranker, max_skills=2
+    )
+
+    assert [skill.pk for skill in selected] == [skills[0].pk, skills[1].pk]
+
+
+def test_select_skills_threshold_returns_empty_when_all_weak(owner, workspace):
+    first = create_skill(name="First", workspace=workspace, created_by=owner)
+    second = create_skill(name="Second", workspace=workspace, created_by=owner)
+
+    def ranker(*, prompt, candidates, limit):
+        return [(first.pk, 0.34), (second.pk, 0.1)]
+
+    selected = select_skills(
+        prompt="an unrelated wish", workspace=workspace, ranker=ranker, min_score=0.35
+    )
+
+    assert selected == []
+
+
+def test_select_skills_default_ranker_keeps_only_the_strong_match(monkeypatch, owner, workspace):
+    strong = create_skill(name="Alpha", workspace=workspace, created_by=owner)
+    weak = create_skill(name="Beta", workspace=workspace, created_by=owner)
+
+    def fake_embed(text):
+        return {
+            "an unrelated wish": [1.0, 0.0],
+            "Alpha": [1.0, 0.0],  # cosine 1.0 -> kept
+            "Beta": [0.3, 0.9539392],  # cosine 0.3 -> below the 0.35 default
+        }[text]
+
+    monkeypatch.setattr("embeddings.services.embed_text", fake_embed)
+
+    selected = select_skills(prompt="an unrelated wish", workspace=workspace)
+
+    selected_ids = [skill.pk for skill in selected]
+    assert selected_ids == [strong.pk]
+    assert weak.pk not in selected_ids
+
+
+def test_select_skills_legacy_id_ranker_ignores_threshold_but_respects_cap(owner, workspace):
+    first = create_skill(name="First", workspace=workspace, created_by=owner)
+    second = create_skill(name="Second", workspace=workspace, created_by=owner)
+
+    def ranker(*, prompt, candidates, limit):
+        return [first.pk, second.pk]
+
+    selected = select_skills(
+        prompt="an unrelated wish",
+        workspace=workspace,
+        ranker=ranker,
+        min_score=0.99,
+        max_skills=1,
+    )
+
+    assert [skill.pk for skill in selected] == [first.pk]
+
+
+def test_select_skills_manual_ids_ignore_threshold_and_cap(owner, workspace):
+    skills = [
+        create_skill(name=f"Manual{i}", workspace=workspace, created_by=owner) for i in range(4)
+    ]
+
+    selected = select_skills(
+        prompt="",
+        workspace=workspace,
+        manual_ids=[skill.pk for skill in skills],
+        min_score=0.99,
+        max_skills=1,
+        ranker=lambda **_kwargs: pytest.fail("ranker must not run for manual selection"),
+    )
+
+    assert [skill.pk for skill in selected] == [skill.pk for skill in skills]
+
+
+def test_select_skills_tag_matches_ignore_threshold_and_cap(owner, workspace):
+    tagged = [
+        create_skill(name=f"Tag{i}", tags=["cookie"], workspace=workspace, created_by=owner)
+        for i in range(4)
+    ]
+
+    selected = select_skills(
+        prompt="make a cookie cutter",
+        workspace=workspace,
+        min_score=0.99,
+        max_skills=1,
+        ranker=lambda **_kwargs: pytest.fail("ranker must not run for tag matches"),
+    )
+
+    assert [skill.pk for skill in selected] == [skill.pk for skill in tagged]

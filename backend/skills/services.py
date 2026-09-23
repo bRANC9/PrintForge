@@ -34,6 +34,8 @@ from .models import Skill, SkillKind
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_MAX_SKILLS",
+    "DEFAULT_MIN_SCORE",
     "create_skill",
     "delete_skill",
     "select_skills",
@@ -41,6 +43,13 @@ __all__ = [
     "skills_visible_to",
     "update_skill",
 ]
+
+#: Minimum cosine similarity for the embedding fallback to keep a skill.
+#: Below this a "match" is treated as noise and dropped from the Planner prompt.
+DEFAULT_MIN_SCORE = 0.35
+
+#: Hard cap on how many skills the embedding fallback may return, best first.
+DEFAULT_MAX_SKILLS = 3
 
 #: Scalar fields a caller may set/update through the service layer.
 _UPDATABLE_FIELDS = frozenset(
@@ -239,13 +248,18 @@ def _default_embedding_ranker(
     *,
     prompt: str,
     candidates: Sequence[Skill],
-    limit: int = 3,
-) -> list[int]:
+    limit: int = DEFAULT_MAX_SKILLS,
+) -> list[tuple[int, float]]:
     """Best-effort semantic rank via the shared embeddings service.
 
     Imported lazily so the sqlite fallback (no pgvector) never breaks the
     import, and any failure is swallowed by :func:`_select_by_embedding`.
-    Returns the matching skill primary keys, best first.
+    Returns ``(skill_pk, score)`` pairs, best first.
+
+    ``limit`` is accepted for compatibility with the injectable ranker seam but
+    is intentionally not applied here: :func:`_select_by_embedding` filters by
+    ``min_score`` first and only then caps at ``max_skills``, so truncating
+    before the threshold check could drop a genuine match.
     """
     from embeddings import services as embeddings  # lazy: pgvector is optional
 
@@ -259,36 +273,80 @@ def _default_embedding_ranker(
         if score > 0:
             scored.append((score, skill.pk))
     scored.sort(key=lambda item: (-item[0], item[1]))
-    return [pk for _score, pk in scored[:limit]]
+    return [(pk, score) for score, pk in scored]
+
+
+def _coerce_score(value: Any) -> float | None:
+    """Best-effort ``float`` for a ranker-provided score; ``None`` when unusable."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(score):
+        return None
+    return score
+
+
+def _normalize_ranked_items(ranked: Iterable[Any]) -> list[tuple[int, float | None]]:
+    """Normalise a ranker result into ``(skill_pk, score)`` pairs.
+
+    Both shapes are accepted so existing id-only rankers keep working:
+
+    * ``int`` -- legacy id-only item, score unknown (``None``).
+    * ``(id, score)`` -- score-aware item; the score drives the threshold.
+
+    Items that cannot be turned into an id are dropped.
+    """
+    normalized: list[tuple[int, float | None]] = []
+    for item in ranked:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            raw_id, raw_score = item[0], item[1]
+            score = _coerce_score(raw_score)
+        else:
+            raw_id, score = item, None
+        try:
+            skill_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        normalized.append((skill_id, score))
+    return normalized
 
 
 def _select_by_embedding(
     candidates: Sequence[Skill],
     *,
     prompt: str,
-    ranker: Callable[..., Sequence[int]] | None,
-    limit: int = 3,
+    ranker: Callable[..., Sequence[Any]] | None,
+    min_score: float = DEFAULT_MIN_SCORE,
+    max_skills: int = DEFAULT_MAX_SKILLS,
 ) -> list[Skill]:
-    """Run the (injected or default) ranker; never raise on embedding failure."""
-    if not prompt or not candidates:
+    """Run the (injected or default) ranker; never raise on embedding failure.
+
+    Keeps the best-first candidates whose score clears ``min_score`` and stops
+    after ``max_skills``. A ranker that returns plain ids (no scores) is treated
+    as an explicit, already-vetted ordering: its items bypass the threshold but
+    still count towards the cap.
+    """
+    if not prompt or not candidates or max_skills <= 0:
         return []
     selected = ranker or _default_embedding_ranker
     try:
-        ranked_ids = list(selected(prompt=prompt, candidates=list(candidates), limit=limit))
+        ranked = list(selected(prompt=prompt, candidates=list(candidates), limit=max_skills))
     except Exception:  # noqa: BLE001 - selection must never fail a generation
         logger.warning("Skill embedding selection failed", exc_info=True)
         return []
 
     by_id = {skill.pk: skill for skill in candidates}
     result: list[Skill] = []
-    for raw_id in ranked_ids:
-        try:
-            skill_id = int(raw_id)
-        except (TypeError, ValueError):
-            continue
+    for skill_id, score in _normalize_ranked_items(ranked):
         skill = by_id.get(skill_id)
-        if skill is not None and skill not in result:
-            result.append(skill)
+        if skill is None or skill in result:
+            continue
+        if score is not None and score < min_score:
+            continue
+        result.append(skill)
+        if len(result) >= max_skills:
+            break
     return result
 
 
@@ -298,18 +356,25 @@ def select_skills(
     object_kind: str = "",
     workspace: Workspace | None = None,
     manual_ids: Iterable[int] | None = None,
-    ranker: Callable[..., Sequence[int]] | None = None,
+    ranker: Callable[..., Sequence[Any]] | None = None,
+    min_score: float = DEFAULT_MIN_SCORE,
+    max_skills: int = DEFAULT_MAX_SKILLS,
 ) -> list[Skill]:
     """Choose the skills for a generation run (docs/skills.md 3.).
 
     Deterministic order:
 
     1. ``manual_ids`` (explicit user choice) win; only ids visible to the run
-       are returned, so a foreign/private id cannot leak in.
-    2. Otherwise an ``object_kind`` / tag / slug match against the prompt.
+       are returned, so a foreign/private id cannot leak in. Explicit choices
+       are never filtered or capped.
+    2. Otherwise an ``object_kind`` / tag / slug match against the prompt. These
+       deterministic matches are explicit too, so they are also left unfiltered.
     3. Only when that yields nothing does the embedding fallback run, through
        the injectable ``ranker`` seam (defaulting to the shared embeddings
-       service). Embedding failures degrade to no selection and never raise.
+       service). It keeps the best-first candidates scoring at least
+       ``min_score`` (cosine similarity) and returns at most ``max_skills`` --
+       an empty list when nothing clears the bar. Embedding failures degrade to
+       no selection and never raise.
     """
     candidates = _candidate_skills(workspace)
 
@@ -323,4 +388,10 @@ def select_skills(
     if matched:
         return matched
 
-    return _select_by_embedding(candidates, prompt=prompt, ranker=ranker)
+    return _select_by_embedding(
+        candidates,
+        prompt=prompt,
+        ranker=ranker,
+        min_score=min_score,
+        max_skills=max_skills,
+    )
