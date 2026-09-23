@@ -1,5 +1,6 @@
 import re
 
+from django.urls import NoReverseMatch, reverse
 from rest_framework import serializers
 
 from accounts.models import User
@@ -394,8 +395,8 @@ class VersionCreateSerializer(serializers.Serializer):
 
     ``skill_ids`` / ``auto_skill_selection`` are the per-run skill choice
     (docs/skills.md 3.): a manual id list wins, otherwise auto-selection picks
-    the skills from the prompt. Both are optional and only forwarded to the
-    agent workflow when it declares them (see ``api.views``).
+    the skills from the prompt. Both are optional and forwarded verbatim to the
+    agent workflow.
 
     ``clarify`` selects the Planner's clarification policy
     (docs/planner-clarification.md 5.): ``"assume"`` (default) lets it guess and
@@ -509,6 +510,8 @@ class PrintJobSerializer(serializers.ModelSerializer):
     filament_name = serializers.SerializerMethodField()
     project_name = serializers.SerializerMethodField()
     version = serializers.SerializerMethodField()
+    has_preview = serializers.SerializerMethodField()
+    preview_url = serializers.SerializerMethodField()
 
     class Meta:
         model = PrintJob
@@ -527,6 +530,8 @@ class PrintJobSerializer(serializers.ModelSerializer):
             "printer_profile",
             "status",
             "priority",
+            "has_preview",
+            "preview_url",
             "created_at",
             "updated_at",
         ]
@@ -543,6 +548,26 @@ class PrintJobSerializer(serializers.ModelSerializer):
 
     def get_version(self, obj: PrintJob) -> int | None:
         return obj.model_version.version if obj.model_version_id else None
+
+    @staticmethod
+    def _preview_path(obj: PrintJob) -> str:
+        """Relative storage path of the slicing preview, or ``""`` when absent."""
+        value = (obj.slicing_json or {}).get("preview")
+        if not isinstance(value, str):
+            return ""
+        return value.strip()
+
+    def get_has_preview(self, obj: PrintJob) -> bool:
+        return bool(self._preview_path(obj))
+
+    def get_preview_url(self, obj: PrintJob) -> str | None:
+        """URL of the preview endpoint, or ``None`` when there is no preview."""
+        if not self._preview_path(obj):
+            return None
+        try:
+            return reverse("print-job-preview", kwargs={"pk": obj.pk})
+        except NoReverseMatch:  # pragma: no cover - URLconf always provides this route
+            return None
 
 
 class PrintJobCreateSerializer(serializers.Serializer):

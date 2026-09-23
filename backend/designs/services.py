@@ -7,7 +7,6 @@ may depend on DRF or an HTTP request. Render jobs are *only* enqueued to Celery
 
 from __future__ import annotations
 
-import inspect
 from typing import TYPE_CHECKING, Any
 
 from django.db import transaction
@@ -145,30 +144,6 @@ def create_annotation_edit(
         raise RenderEnqueueError(message) from exc
 
 
-def _agent_workflow_accepts_regenerate() -> bool:
-    """Whether ``agents.tasks.run_agent_workflow`` declares a ``regenerate`` kwarg.
-
-    The ``regenerate=True`` parameter is being added by the held
-    agent-orchestrator workstream (docs/version-history-controls.md 2.). Until it
-    lands, passing the kwarg would raise ``TypeError`` *inside the worker* (the
-    ``.delay()`` call itself only serialises), so the capability is probed from
-    the task's underlying ``run`` function instead of blindly forwarded.
-
-    ``run_agent_workflow`` is a Celery ``Task`` instance, whose ``__call__`` is
-    ``(*args, **kwargs)``; inspecting ``.run`` reaches the real signature.
-    """
-    from agents.tasks import run_agent_workflow
-
-    target = getattr(run_agent_workflow, "run", run_agent_workflow)
-    try:
-        parameters = inspect.signature(target).parameters
-    except (TypeError, ValueError):  # pragma: no cover - exotic callables only
-        return False
-    if "regenerate" in parameters:
-        return True
-    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-
-
 def regenerate_version(
     *,
     base_version: ModelVersion,
@@ -215,12 +190,8 @@ def regenerate_version(
         "prompt": effective_prompt,
         "user_id": created_by.pk if created_by else None,
         "base_version_id": base_version.pk,
+        "regenerate": True,
     }
-    if _agent_workflow_accepts_regenerate():
-        kwargs["regenerate"] = True
-    # TODO(agent-orchestrator): drop the capability probe once
-    # ``run_agent_workflow`` declares ``regenerate``. Until then the task
-    # derives the same provenance from ``base_version_id`` + empty annotations.
     try:
         run_agent_workflow.delay(**kwargs)
     except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways

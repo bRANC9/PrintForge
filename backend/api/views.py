@@ -10,7 +10,6 @@ Object-level roles are enforced by :class:`api.permissions.WorkspaceScopePermiss
 """
 
 import hashlib
-import inspect
 import uuid
 from http import HTTPStatus
 
@@ -181,56 +180,6 @@ def _visitor_id(request) -> str:
     return value
 
 
-def _agent_workflow_declares(name: str) -> bool:
-    """Whether ``agents.tasks.run_agent_workflow`` declares parameter ``name``.
-
-    A Celery ``Task``'s ``__call__`` is ``(*args, **kwargs)``, so the real
-    signature is read from the task's underlying ``run`` function. A parameter is
-    considered supported when it is declared or the task accepts ``**kwargs``.
-    Forwarding an unsupported kwarg would not fail at ``.delay()`` (it only
-    serialises) but later, inside the worker, with a ``TypeError`` -- hence the
-    probe.
-    """
-    from agents.tasks import run_agent_workflow
-
-    target = getattr(run_agent_workflow, "run", run_agent_workflow)
-    try:
-        parameters = inspect.signature(target).parameters
-    except (TypeError, ValueError):  # pragma: no cover - exotic callables only
-        return False
-    if name in parameters:
-        return True
-    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-
-
-def _agent_workflow_skill_kwargs(data) -> dict:
-    """Skill kwargs ``agents.tasks.run_agent_workflow`` actually declares.
-
-    ``skill_ids`` / ``auto_skill_selection`` are forwarded only when the task
-    declares them (or accepts ``**kwargs``); see
-    :func:`_agent_workflow_declares`.
-    """
-    kwargs: dict = {}
-    if _agent_workflow_declares("skill_ids"):
-        kwargs["skill_ids"] = list(data.get("skill_ids") or [])
-    if _agent_workflow_declares("auto_skill_selection"):
-        kwargs["auto_skill_selection"] = bool(data.get("auto_skill_selection", False))
-    return kwargs
-
-
-def _agent_workflow_clarify_kwargs(data) -> dict:
-    """``clarify_policy`` kwarg, forwarded only when the task declares it.
-
-    ``clarify`` (``"ask"`` / ``"assume"``) is the user's per-run clarification
-    policy (docs/planner-clarification.md 5.). The kwarg now exists on
-    ``run_agent_workflow``; the probe keeps this safe against a task that has not
-    been updated yet (a legacy task simply falls back to its own default).
-    """
-    if not _agent_workflow_declares("clarify_policy"):
-        return {}
-    return {"clarify_policy": data.get("clarify", "assume")}
-
-
 def _store_reference_upload(project, uploaded) -> str:
     """Persist an uploaded reference photo and return its storage path.
 
@@ -377,12 +326,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
         kwargs = {
             "reference_image_name": reference_image_name,
             "reference_note": data.get("reference_note", ""),
+            # Per-run skill selection (docs/skills.md 3.).
+            "skill_ids": list(data.get("skill_ids") or []),
+            "auto_skill_selection": bool(data.get("auto_skill_selection", False)),
+            # Per-run clarification policy (docs/planner-clarification.md 5.).
+            "clarify_policy": data.get("clarify", "assume"),
         }
-        # Per-run skill selection (docs/skills.md 3.), forwarded only once the
-        # agent workflow declares the kwargs (see _agent_workflow_skill_kwargs).
-        kwargs.update(_agent_workflow_skill_kwargs(data))
-        # Per-run clarification policy (docs/planner-clarification.md 5.).
-        kwargs.update(_agent_workflow_clarify_kwargs(data))
         try:
             run_agent_workflow.delay(
                 project.pk,
@@ -768,13 +717,29 @@ class AgentRunViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(result, status=HTTPStatus.ACCEPTED)
 
 
+#: Content type of the slicing preview PNG (slicer-worker output).
+_PREVIEW_CONTENT_TYPE = "image/png"
+
+
+def _print_job_preview_path(job) -> str:
+    """Relative storage path of ``job``'s slicing preview, or ``""``.
+
+    The slicer worker records the PNG under ``slicing_json["preview"]``; any
+    missing, blank or non-string value means "no preview".
+    """
+    value = (job.slicing_json or {}).get("preview")
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
 class PrintJobViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     viewsets.GenericViewSet,
 ):
-    """Print queue: list / enqueue / transition / start / cancel.
+    """Print queue: list / enqueue / transition / start / cancel / preview.
 
     Reads use the workspace-scoped ``printers.services.jobs_for_user``; every
     control action passes ``user=request.user`` so the service layer enforces
@@ -813,6 +778,30 @@ class PrintJobViewSet(
         except QueueError as exc:
             return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         return Response(PrintJobSerializer(job).data, status=HTTPStatus.CREATED)
+
+    @action(detail=True, methods=["get"], url_path="preview")
+    def preview(self, request, pk=None):
+        """Stream the slicing preview PNG (VIEWER+), or 404 when absent.
+
+        The preview is produced by the slicer worker and its storage path is
+        recorded in ``PrintJob.slicing_json["preview"]``. It is read through the
+        configured storage backend and returned inline so the browser renders it.
+        """
+        job = self.get_object()
+        relative_path = _print_job_preview_path(job)
+        if not relative_path:
+            return Response({"detail": "Preview not found."}, status=HTTPStatus.NOT_FOUND)
+        storage = get_storage()
+        try:
+            if not storage.exists(relative_path):
+                return Response({"detail": "Preview not found."}, status=HTTPStatus.NOT_FOUND)
+            data = storage.read_bytes(relative_path)
+        except FileNotFoundError:
+            return Response({"detail": "Preview not found."}, status=HTTPStatus.NOT_FOUND)
+        response = HttpResponse(data, content_type=_PREVIEW_CONTENT_TYPE)
+        filename = relative_path.rsplit("/", 1)[-1]
+        response["Content-Disposition"] = f'inline; filename="{filename}"'
+        return response
 
     @action(
         detail=True,

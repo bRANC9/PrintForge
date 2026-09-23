@@ -91,9 +91,25 @@ def test_regenerate_without_spec_enqueues_agent_with_base(project, version, user
     assert call["prompt"] == "make a holder"
     assert call["user_id"] == user.pk
     assert call["base_version_id"] == version.pk
+    # ``run_agent_workflow`` declares ``regenerate``: the flag is forwarded
+    # unconditionally (no capability probe).
+    assert call["regenerate"] is True
     assert broker["render"] == []
     # The agent task creates the derived version; no placeholder row is created.
     assert project.versions.count() == 1
+
+
+def test_regenerate_flag_is_always_forwarded(version, user, broker, monkeypatch):
+    """No signature probe: even a task whose ``run`` lacks the kwarg gets it."""
+
+    def legacy_run(project_id, prompt, user_id=None, base_version_id=None):
+        return 1
+
+    monkeypatch.setattr(run_agent_workflow, "run", legacy_run)
+
+    regenerate_version(base_version=version, created_by=user)
+
+    assert broker["agent"][0]["regenerate"] is True
 
 
 def test_regenerate_with_edited_prompt_overrides_the_base(version, user, broker):
