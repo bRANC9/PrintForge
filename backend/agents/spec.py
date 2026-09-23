@@ -22,7 +22,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 # ---------------------------------------------------------------------------
 # Sane physical bounds (millimetres / degrees).
@@ -73,6 +80,22 @@ MAX_PRIMITIVE_LABEL = 120
 #: Maximum number of primitives in a single specification.
 MAX_PRIMITIVE_COUNT = 64
 
+# ---------------------------------------------------------------------------
+# Bounds for the 2D ``extrude`` primitive (docs/skills.md 5).
+# ---------------------------------------------------------------------------
+
+#: Minimum number of 2D profile points needed to describe a polygon.
+MIN_PROFILE_POINTS = 3
+#: Maximum number of 2D profile points accepted for one primitive (bounded payload).
+MAX_PROFILE_POINTS = 256
+#: Bounds for a 2D profile coordinate in the XZ plane (mm); shares the primitive
+#: position range so a profile cannot place geometry outside the build volume.
+MIN_PROFILE_COORD_MM = MIN_PRIMITIVE_POSITION_MM
+MAX_PROFILE_COORD_MM = MAX_PRIMITIVE_POSITION_MM
+#: Bounds for the optional top-edge rounding radius of an ``extrude`` primitive (mm).
+MIN_ROUND_RADIUS_MM = 0.0
+MAX_ROUND_RADIUS_MM = 100.0
+
 
 class Mounting(BaseModel):
     """How the part is fastened (terv.md 8.)."""
@@ -111,6 +134,20 @@ class Vec3(BaseModel):
     z: float
 
 
+class Vec2(BaseModel):
+    """A point of a 2D profile in the XZ plane, millimetres (docs/skills.md 5).
+
+    The ``extrude`` primitive renders its ``profile`` with
+    ``linear_extrude(height) polygon(points)``, so the outline is an inline
+    point list -- never a file, never ``import()``/``surface()``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float
+    y: float
+
+
 def _zero_vec3() -> Vec3:
     """Return a fresh origin vector (``Field(default_factory=...)`` helper)."""
     return Vec3(x=0.0, y=0.0, z=0.0)
@@ -119,6 +156,13 @@ def _zero_vec3() -> Vec3:
 def _check_vec3_range(name: str, value: Vec3, low: float, high: float) -> None:
     """Reject a :class:`Vec3` with any component outside ``[low, high]``."""
     for axis, component in (("x", value.x), ("y", value.y), ("z", value.z)):
+        if not low <= component <= high:
+            raise ValueError(f"{name}.{axis} must be between {low} and {high}, got {component}")
+
+
+def _check_vec2_range(name: str, value: Vec2, low: float, high: float) -> None:
+    """Reject a :class:`Vec2` with any component outside ``[low, high]``."""
+    for axis, component in (("x", value.x), ("y", value.y)):
         if not low <= component <= high:
             raise ValueError(f"{name}.{axis} must be between {low} and {high}, got {component}")
 
@@ -134,7 +178,7 @@ class Primitive(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    type: Literal["box", "cylinder", "sphere", "cone"] = Field(
+    type: Literal["box", "cylinder", "sphere", "cone", "extrude"] = Field(
         description="Primitive shape.",
     )
     role: Literal["add", "subtract"] = Field(
@@ -178,6 +222,29 @@ class Primitive(BaseModel):
             "Cylinder/sphere/cone diameter in mm (required for cylinder, sphere and cone)."
         ),
     )
+    profile: list[Vec2] = Field(
+        default_factory=list,
+        max_length=MAX_PROFILE_POINTS,
+        description=(
+            "2D outline points in the XZ plane, in mm (required for type extrude, "
+            "at least 3 points); the CAD backend extrudes it to height."
+        ),
+    )
+    wall_thickness: float | None = Field(
+        default=None,
+        ge=MIN_PRIMITIVE_MM,
+        le=MAX_WALL_MM,
+        description=(
+            "Hollow-wall thickness in mm for an extrude primitive; when set the "
+            "profile is offset inwards to create an outer shell."
+        ),
+    )
+    round_radius: float | None = Field(
+        default=None,
+        ge=MIN_ROUND_RADIUS_MM,
+        le=MAX_ROUND_RADIUS_MM,
+        description="Optional top-edge rounding radius in mm (extrude primitive).",
+    )
     label: str = Field(
         default="",
         max_length=MAX_PRIMITIVE_LABEL,
@@ -195,6 +262,29 @@ class Primitive(BaseModel):
     def _bound_rotation(cls, value: Vec3) -> Vec3:
         _check_vec3_range("rotation", value, MIN_PRIMITIVE_ROTATION_DEG, MAX_PRIMITIVE_ROTATION_DEG)
         return value
+
+    @field_validator("profile")
+    @classmethod
+    def _bound_profile(cls, value: list[Vec2]) -> list[Vec2]:
+        for index, point in enumerate(value):
+            _check_vec2_range(
+                f"profile[{index}]", point, MIN_PROFILE_COORD_MM, MAX_PROFILE_COORD_MM
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _require_profile_for_extrude(self) -> Primitive:
+        """An ``extrude`` primitive needs a polygon, so at least 3 profile points.
+
+        Other primitive types keep their existing, loose field requirements:
+        this validator deliberately does not constrain them.
+        """
+        if self.type == "extrude" and len(self.profile) < MIN_PROFILE_POINTS:
+            raise ValueError(
+                f"type 'extrude' requires at least {MIN_PROFILE_POINTS} profile points, "
+                f"got {len(self.profile)}"
+            )
+        return self
 
 
 class EditOperation(BaseModel):
@@ -339,6 +429,57 @@ class ModelSpecification(BaseModel):
                 "material": "PETG",
             }
         ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Planner clarification contract (docs/planner-clarification.md 1).
+# ---------------------------------------------------------------------------
+
+#: Maximum length of a clarification question.
+MAX_CLARIFICATION_QUESTION = 300
+#: Maximum length of the Planner's assumed answer (or the user's reply).
+MAX_CLARIFICATION_ANSWER = 600
+#: Maximum length of the dotted field path a clarification refers to.
+MAX_CLARIFICATION_FIELD = 120
+
+
+class Clarification(BaseModel):
+    """One question the Planner asked (or silently assumed) about the request.
+
+    ``kind="assumed"`` means the Planner filled ``answer`` with its own guess
+    and the run continues; ``kind="needs_user_input"`` means it deliberately
+    left ``answer`` empty and, under the ``ask`` policy, the run stops until the
+    user answers (docs/planner-clarification.md 1). ``field`` is an optional
+    dotted path such as ``"dimensions.width"``.
+
+    This is a Planner-only contract: it is part of ``PlannerPlan``, never of
+    :class:`ModelSpecification`, so it never reaches the CAD backend and the
+    strict LLM<->CAD contract (terv.md 8. fejezet) stays unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    question: str = Field(
+        max_length=MAX_CLARIFICATION_QUESTION,
+        description="The question put to the user (or the assumption made explicit).",
+    )
+    answer: str = Field(
+        default="",
+        max_length=MAX_CLARIFICATION_ANSWER,
+        description="The Planner's assumed answer; empty when the user must answer.",
+    )
+    kind: Literal["assumed", "needs_user_input"] = Field(
+        default="assumed",
+        description=(
+            "assumed means the Planner guessed an answer and the run continues; "
+            "needs_user_input means it must ask the user."
+        ),
+    )
+    field: str = Field(
+        default="",
+        max_length=MAX_CLARIFICATION_FIELD,
+        description='Optional dotted spec path the question is about, e.g. "dimensions.width".',
+    )
 
 
 # ---------------------------------------------------------------------------

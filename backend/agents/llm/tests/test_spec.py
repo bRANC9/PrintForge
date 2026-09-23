@@ -9,12 +9,14 @@ import pytest
 from pydantic import ValidationError
 
 from agents.spec import (
+    Clarification,
     Dimensions,
     EditOperation,
     ModelSpecification,
     Mounting,
     Primitive,
     ReviewResult,
+    Vec2,
     Vec3,
 )
 
@@ -399,6 +401,7 @@ def test_json_schema_exposes_bounded_primitive():
         "cylinder",
         "sphere",
         "cone",
+        "extrude",
     ]
     assert primitive_schema["properties"]["role"]["enum"] == ["add", "subtract"]
     # Optional numeric sizes are exposed as ``anyOf`` (number | null).
@@ -508,3 +511,250 @@ def test_review_to_json_schema_lists_all_fields():
 
 def test_review_model_json_schema_matches_helper():
     assert ReviewResult.model_json_schema() == ReviewResult.to_json_schema()
+
+
+# ---------------------------------------------------------------------------
+# 2D extrude primitive (docs/skills.md 5).
+# ---------------------------------------------------------------------------
+
+VALID_PROFILE: list[dict[str, float]] = [
+    {"x": 0.0, "y": 0.0},
+    {"x": 40.0, "y": 0.0},
+    {"x": 40.0, "y": 40.0},
+    {"x": 0.0, "y": 40.0},
+]
+
+VALID_EXTRUDE: dict[str, Any] = {
+    "type": "extrude",
+    "role": "add",
+    "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+    "height": 25.0,
+    "profile": VALID_PROFILE,
+    "wall_thickness": 1.2,
+    "round_radius": 1.0,
+    "label": "cookie cutter wall",
+}
+
+
+def test_valid_extrude_primitive_validates():
+    model = ModelSpecification.model_validate(spec(primitives=[VALID_EXTRUDE]))
+    primitive = model.primitives[0]
+    assert primitive.type == "extrude"
+    assert primitive.height == pytest.approx(25.0)
+    assert len(primitive.profile) == 4
+    assert primitive.profile[1].x == pytest.approx(40.0)
+    assert primitive.profile[1].y == pytest.approx(0.0)
+    assert primitive.wall_thickness == pytest.approx(1.2)
+    assert primitive.round_radius == pytest.approx(1.0)
+    # A non-empty primitive list is serialised for the CAD backend.
+    dumped = model.model_dump()
+    assert dumped["primitives"][0]["profile"][0] == {"x": 0.0, "y": 0.0}
+
+
+def test_extrude_defaults_have_empty_profile_and_optional_walls():
+    primitive = Primitive.model_validate({**VALID_EXTRUDE})
+    assert primitive.wall_thickness == pytest.approx(1.2)
+    sphere = Primitive.model_validate({"type": "sphere", "diameter": 10.0})
+    assert sphere.profile == []
+    assert sphere.wall_thickness is None
+    assert sphere.round_radius is None
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        [],
+        [{"x": 0.0, "y": 0.0}],
+        [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}],
+    ],
+)
+def test_extrude_requires_at_least_three_profile_points(profile):
+    with pytest.raises(ValidationError, match="at least 3 profile points"):
+        Primitive.model_validate({**VALID_EXTRUDE, "profile": profile})
+    with pytest.raises(ValidationError, match="at least 3 profile points"):
+        ModelSpecification.model_validate(spec(primitives=[{**VALID_EXTRUDE, "profile": profile}]))
+
+
+def test_extrude_with_exactly_three_points_is_accepted():
+    primitive = Primitive.model_validate(
+        {
+            **VALID_EXTRUDE,
+            "profile": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}],
+        }
+    )
+    assert len(primitive.profile) == 3
+
+
+def test_non_extrude_types_are_not_profile_constrained():
+    """Only ``extrude`` needs a profile; other types keep their loose shape."""
+    for shape in (
+        {"type": "box", "width": 1.0, "depth": 1.0, "height": 1.0},
+        {"type": "cylinder", "diameter": 1.0, "height": 1.0},
+        {"type": "sphere", "diameter": 1.0},
+        {"type": "cone", "diameter": 1.0, "height": 1.0},
+    ):
+        assert Primitive.model_validate(shape).profile == []
+
+
+def test_extrude_profile_too_many_points_is_rejected():
+    profile = [{"x": float(i), "y": 0.0} for i in range(257)]
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_EXTRUDE, "profile": profile})
+
+
+def test_extrude_profile_point_boundary_is_inclusive():
+    profile = [{"x": float(i), "y": 0.0} for i in range(256)]
+    assert len(Primitive.model_validate({**VALID_EXTRUDE, "profile": profile}).profile) == 256
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+@pytest.mark.parametrize("value", [-1000.1, 1000.1, 10_000.0])
+def test_extrude_profile_coordinates_are_bounded(axis, value):
+    profile = [*VALID_PROFILE, {**VALID_PROFILE[0], axis: value}]
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_EXTRUDE, "profile": profile})
+
+
+def test_extrude_profile_coordinate_bounds_are_inclusive():
+    profile = [{"x": -1000.0, "y": 1000.0}, *VALID_PROFILE]
+    primitive = Primitive.model_validate({**VALID_EXTRUDE, "profile": profile})
+    assert primitive.profile[0].x == pytest.approx(-1000.0)
+    assert primitive.profile[0].y == pytest.approx(1000.0)
+
+
+@pytest.mark.parametrize("value", [0.0, 0.3, 100.1, 10_000.0])
+def test_extrude_wall_thickness_out_of_bounds_is_rejected(value):
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_EXTRUDE, "wall_thickness": value})
+
+
+def test_extrude_wall_thickness_bounds_are_inclusive():
+    assert Primitive.model_validate(
+        {**VALID_EXTRUDE, "wall_thickness": 0.4}
+    ).wall_thickness == pytest.approx(0.4)
+    assert Primitive.model_validate(
+        {**VALID_EXTRUDE, "wall_thickness": 100.0}
+    ).wall_thickness == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize("value", [-0.1, 100.1, 10_000.0])
+def test_extrude_round_radius_out_of_bounds_is_rejected(value):
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_EXTRUDE, "round_radius": value})
+
+
+def test_extrude_round_radius_zero_is_allowed():
+    assert Primitive.model_validate({**VALID_EXTRUDE, "round_radius": 0.0}).round_radius == 0.0
+
+
+def test_vec2_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        Vec2.model_validate({"x": 0.0, "y": 0.0, "z": 0.0})
+
+
+def test_extrude_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        Primitive.model_validate({**VALID_EXTRUDE, "radius": 2.0})
+
+
+def test_json_schema_exposes_extrude_fields():
+    schema = ModelSpecification.to_json_schema()
+    primitive_schema = schema["$defs"]["Primitive"]
+    assert primitive_schema["properties"]["type"]["enum"] == [
+        "box",
+        "cylinder",
+        "sphere",
+        "cone",
+        "extrude",
+    ]
+    profile_schema = primitive_schema["properties"]["profile"]
+    assert profile_schema["maxItems"] == 256
+    assert profile_schema["items"]["$ref"].endswith("/Vec2")
+    assert "Vec2" in schema["$defs"]
+    wall_schema = primitive_schema["properties"]["wall_thickness"]["anyOf"][0]
+    assert wall_schema["minimum"] == 0.4
+    assert wall_schema["maximum"] == 100.0
+    round_schema = primitive_schema["properties"]["round_radius"]["anyOf"][0]
+    assert round_schema["minimum"] == 0.0
+    assert round_schema["maximum"] == 100.0
+
+
+def test_example_helper_is_unchanged_by_extrude_fields():
+    assert ModelSpecification.example() == VALID
+
+
+# ---------------------------------------------------------------------------
+# Planner clarification contract (docs/planner-clarification.md 1).
+# ---------------------------------------------------------------------------
+
+VALID_CLARIFICATION: dict[str, Any] = {
+    "question": "How thick should the wall be?",
+    "answer": "1.2",
+    "kind": "assumed",
+    "field": "wall_thickness",
+}
+
+
+def test_valid_clarification_round_trips():
+    clarification = Clarification.model_validate(VALID_CLARIFICATION)
+    assert clarification.question == "How thick should the wall be?"
+    assert clarification.answer == "1.2"
+    assert clarification.kind == "assumed"
+    assert clarification.field == "wall_thickness"
+    assert clarification.model_dump() == VALID_CLARIFICATION
+
+
+def test_clarification_defaults_are_empty_assumed():
+    clarification = Clarification.model_validate({"question": "Which material?"})
+    assert clarification.answer == ""
+    assert clarification.kind == "assumed"
+    assert clarification.field == ""
+
+
+def test_clarification_needs_user_input_kind_is_accepted():
+    clarification = Clarification.model_validate({"question": "Width?", "kind": "needs_user_input"})
+    assert clarification.kind == "needs_user_input"
+    assert clarification.answer == ""
+
+
+def test_clarification_strips_whitespace():
+    clarification = Clarification.model_validate({"question": "  q  ", "answer": "  a  "})
+    assert clarification.question == "q"
+    assert clarification.answer == "a"
+
+
+def test_clarification_bad_kind_is_rejected():
+    with pytest.raises(ValidationError):
+        Clarification.model_validate({**VALID_CLARIFICATION, "kind": "maybe"})
+
+
+def test_clarification_question_max_length_is_enforced():
+    with pytest.raises(ValidationError):
+        Clarification.model_validate({"question": "x" * 301})
+
+
+def test_clarification_answer_max_length_is_enforced():
+    with pytest.raises(ValidationError):
+        Clarification.model_validate({"question": "q", "answer": "x" * 601})
+
+
+def test_clarification_field_max_length_is_enforced():
+    with pytest.raises(ValidationError):
+        Clarification.model_validate({"question": "q", "field": "x" * 121})
+
+
+def test_clarification_forbids_extra_fields():
+    with pytest.raises(ValidationError):
+        Clarification.model_validate({**VALID_CLARIFICATION, "confidence": 0.9})
+
+
+def test_clarification_question_is_required():
+    with pytest.raises(ValidationError):
+        Clarification.model_validate({"answer": "1.2"})
+
+
+def test_clarification_is_not_part_of_the_cad_contract():
+    """Clarifications belong to the Planner, never to ModelSpecification."""
+    assert "clarifications" not in ModelSpecification.to_json_schema()["properties"]
+    with pytest.raises(ValidationError):
+        ModelSpecification.model_validate(spec(clarifications=[VALID_CLARIFICATION]))
