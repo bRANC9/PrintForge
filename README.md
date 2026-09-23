@@ -8,6 +8,34 @@ and printing.
 
 The full design lives in [`terv.md`](./terv.md).
 
+## Features
+
+- **Natural language → parametric CAD.** A prompt becomes a structured
+  specification; the OpenSCAD backend renders it as CSG primitives
+  (`box`/`cylinder`/`sphere`/`cone` plus a 2D `extrude` profile). Reusable
+  **skills** (guidance or template recipes) steer generation, and the planner
+  can ask clarifying questions or record auditable assumptions.
+- **Vision self-check.** After validation the pipeline renders a preview and,
+  when the chosen model is vision-capable, asks it to compare the result with
+  the request; a bounded retry can revise the specification.
+- **Visual-prompt editing.** Click the model in the viewer to annotate a point
+  or region with an instruction; the AI turns it into validated parametric
+  features as a new version.
+- **Version history.** Versions are immutable; regenerate or edit any history
+  entry into a new version with a `parent_version` chain.
+- **Workspace-first UI.** The home page is the workspace list; items (projects)
+  live inside a workspace.
+- **Community library.** Public models with sharing, search, tags, ratings,
+  downloads, licenses and optional AI-filled descriptions.
+- **Slicing & print queue.** PrusaSlicer CLI (single model or multi-object
+  build plates) with printer/filament/process profiles, time/filament
+  estimates, and a printer queue with Creality K2 (CFS), Moonraker and
+  OctoPrint backends.
+- **MCP tools.** The same `services.py` logic exposed over the official MCP SDK
+  (stdio / streamable HTTP), with the workspace-role gate enforced.
+- **Optional self-hosted web search.** A SearXNG-compatible JSON backend with
+  `trafilatura` page extraction, for the Research agent.
+
 ## Stack
 
 | Layer | Choice |
@@ -18,11 +46,13 @@ The full design lives in [`terv.md`](./terv.md).
 | Queue | Celery + Redis |
 | Frontend | Django Templates + Alpine.js + `fetch`/JSON (no HTMX) |
 | 3D viewer | Three.js |
-| AI | Ollama (Qwen3-Coder 30B-A3B; fallback Qwen2.5-Coder 7B) |
+| AI | Ollama (Qwen3-Coder 30B-A3B; fallback Qwen2.5-Coder 7B); optional OpenAI-compatible provider (`openai` SDK) |
 | Embedding | bge-m3 (fallback nomic-embed-text) |
-| CAD | OpenSCAD CLI (later CadQuery, build123d, FreeCAD) |
+| Web search | optional self-hosted SearXNG (JSON) + `trafilatura` |
+| CAD | OpenSCAD CLI (CSG primitives incl. 2D `extrude`; later CadQuery, build123d, FreeCAD) |
 | Slicing | PrusaSlicer CLI (MVP), OrcaSlicer later |
-| MCP | in-process, built on `services.py` |
+| Storage | local filesystem (default) or S3/MinIO via `django-storages` + `boto3` |
+| MCP | in-process, official `mcp` SDK (stdio / streamable HTTP) |
 | Deploy | Docker Compose, two variants (external / internal Ollama) |
 
 ## Quickstart (Docker)

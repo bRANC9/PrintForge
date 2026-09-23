@@ -65,6 +65,8 @@ A v0.1 célja:
 - Django REST Framework – JSON API (`/api/v1/...`) a frontendnek és az MCP-nek
 - PostgreSQL **+ pgvector** (vektoros kereséshez, RAG/Research agent)
 - Celery + Redis a háttérfeladatokhoz (queue, lásd 9. fejezet)
+- `mcp` (hivatalos Python SDK) – az in-process MCP tool registry
+  stdio / streamable-http transzportja (lásd 25., 37. fejezet)
 
 Megjegyzés: a vektoros tárolásra **külön vektor-DB nem kell** – a pgvector
 ugyanabban a Postgresben adja a hasonlósági keresést, így nincs új
@@ -115,11 +117,24 @@ Model adapter:
 ```text
 LLMProvider
 ├── OllamaProvider
-├── OpenAICompatibleProvider
+├── OpenAICompatibleProvider   # megvalósítva (openai SDK)
 └── AnthropicProvider (később)
 ```
 
+Az `OpenAICompatibleProvider` a hivatalos `openai` SDK-ra épül, és bármely
+OpenAI-kompatibilis gateway-jel működik (`LLM_PROVIDER=openai`,
+`OPENAI_BASE_URL`, `OPENAI_API_KEY`). Az Ollama marad az alapértelmezett.
 Így az alkalmazás ne legyen Ollama-specifikus.
+
+### Web research
+
+A Research agent a lokális RAG mellett opcionálisan egy **SearXNG-kompatibilis
+JSON API-t** kérdez (self-hosted, `SEARCH_BACKEND=searxng` +
+`SEARXNG_BASE_URL`), a találati oldalak fő szövegét pedig a **`trafilatura`**
+nyeri ki. A hívás best-effort: hálózati hiba vagy üres konfiguráció esetén
+üres találat, a generálás nem áll meg. Az oldalletöltés SSRF-védett (csak
+nyilvános http/https host), és a worker processzben fut, nem az OpenSCAD
+sandboxban (lásd 36. fejezet).
 
 ### Döntési modell – Laya (későbbi jelölt, ki kell értékelni)
 
@@ -163,6 +178,10 @@ Későbbi backends:
 - build123d
 - FreeCAD
 
+A generált geometria primitív-alapú CSG: `box`, `cylinder`, `sphere`, `cone`
+és a 2D **`extrude`** (`profile` pontsor + `wall_thickness` / `round_radius` /
+`height`), `role: add | subtract` (lásd 30., 39. fejezet).
+
 CAD interface:
 
 ```python
@@ -201,19 +220,20 @@ Később:
 
 ## Storage
 
-MVP:
+Alapértelmezett:
 
-- lokális filesystem vagy Docker volume
+- lokális filesystem vagy Docker volume (`STORAGE_BACKEND=local`)
 
-Később:
+Opcionális, már elérhető:
 
-- S3
-- MinIO (self-hosted, S3-kompatibilis objektumtár)
+- S3 / MinIO (self-hosted, S3-kompatibilis objektumtár) –
+  `STORAGE_BACKEND=s3`, `django-storages` + `boto3`, `AWS_*` env-ekkel
 
 Megjegyzés: a MinIO **nem adatbázis és nem vektoros tár**. Fájlok
 (STL/GLB/SCAD, preview képek) tárolására való, ugyanazzal az S3 API-val,
-amit a felhő is használ. Az MVP lokális volume-mal indul; a storage
-backend interface mögött van, így az átállás kódváltás nélkül megy.
+amit a felhő is használ. A storage backend interface mögött van, így a
+`local` ↔ `s3` átállás kódváltás nélkül megy. Az „S3 mint adatbázis”
+(relációs/vektoros adatok S3-ban) továbbra sem cél.
 
 ---
 
@@ -1054,92 +1074,92 @@ OWNER
 
 ## Phase 1 – Foundation
 
-- [ ] Repository
-- [ ] uv + pyproject.toml
-- [ ] Django
-- [ ] PostgreSQL + pgvector
-- [ ] Docker Compose
-- [ ] Teszt keretrendszer (pytest-django)
-- [ ] User authentication
-- [ ] Workspace
-- [ ] Project
-- [ ] Basic UI
+- [x] Repository
+- [x] uv + pyproject.toml
+- [x] Django
+- [x] PostgreSQL + pgvector
+- [x] Docker Compose
+- [x] Teszt keretrendszer (pytest-django)
+- [x] User authentication
+- [x] Workspace
+- [x] Project
+- [x] Basic UI
 
 ## Phase 2 – CAD
 
-- [ ] Ollama integration
-- [ ] Qwen3-Coder adapter
-- [ ] Prompt endpoint
-- [ ] OpenSCAD generation
-- [ ] OpenSCAD worker
-- [ ] STL generation
-- [ ] File storage
-- [ ] Embedding szolgáltatás + pgvector extension (csak infrastruktúra)
+- [x] Ollama integration
+- [x] Qwen3-Coder adapter
+- [x] Prompt endpoint
+- [x] OpenSCAD generation
+- [x] OpenSCAD worker
+- [x] STL generation
+- [x] File storage
+- [x] Embedding szolgáltatás + pgvector extension (csak infrastruktúra)
 
 ## Phase 3 – Viewer
 
-- [ ] Three.js
-- [ ] STL/GLB loading
-- [ ] rotate
-- [ ] zoom
-- [ ] pan
-- [ ] model information
-- [ ] download
+- [x] Three.js
+- [x] STL/GLB loading
+- [x] rotate
+- [x] zoom
+- [x] pan
+- [x] model information
+- [x] download
 
 ## Phase 4 – Agent
 
-- [ ] LangGraph
-- [ ] Planner
-- [ ] Research Agent
-- [ ] RAG retrieval a Research agenthez (pgvector + bge-m3)
-- [ ] Standard alkatrész tudásbázis ingest (csavarok, szabványok, méretek)
-- [ ] CAD Agent
-- [ ] Validator
-- [ ] Retry loop
-- [ ] AgentRun persistence
+- [x] LangGraph
+- [x] Planner
+- [x] Research Agent
+- [x] RAG retrieval a Research agenthez (pgvector + bge-m3)
+- [x] Standard alkatrész tudásbázis ingest (csavarok, szabványok, méretek)
+- [x] CAD Agent
+- [x] Validator
+- [x] Retry loop
+- [x] AgentRun persistence
 - [ ] Laya döntési modell kiértékelése (Planner/guardrail/triage)
-- [ ] Vision input: kép feltöltés és referencia-ként használat, ha a
+- [x] Vision input: kép feltöltés és referencia-ként használat, ha a
       modell vision-képes (lásd 27. fejezet)
 
 ## Phase 5 – Slicing
 
-- [ ] PrusaSlicer worker
-- [ ] printer profiles
-- [ ] filament profiles
-- [ ] process profiles
+- [x] PrusaSlicer worker
+- [x] printer profiles
+- [x] filament profiles
+- [x] process profiles
 - [ ] slicing preview
-- [ ] time/filament estimation
-- [ ] Build plate / multi-object slicing (később, lásd 28. fejezet)
+- [x] time/filament estimation
+- [x] Build plate / multi-object slicing (később, lásd 28. fejezet)
 
 ## Phase 6 – Printer
 
-- [ ] Printer abstraction
-- [ ] K2 Pro adapter
-- [ ] CFS status
-- [ ] printer status
-- [ ] print upload
-- [ ] print start
-- [ ] print status
-- [ ] print cancellation
+- [x] Printer abstraction
+- [x] K2 Pro adapter
+- [x] CFS status
+- [x] printer status
+- [x] print upload
+- [x] print start
+- [x] print status
+- [x] print cancellation
 
 ## Phase 7 – Multi-user
 
-- [ ] permissions
-- [ ] shared projects
-- [ ] shared printer queue
-- [ ] print history
-- [ ] notifications
+- [x] permissions
+- [x] shared projects
+- [x] shared printer queue
+- [x] print history
+- [x] notifications
 
 ## Phase 8 – Community
 
-- [ ] public models
-- [ ] model sharing
-- [ ] search
-- [ ] tags
-- [ ] ratings
-- [ ] downloads
-- [ ] model licenses
-- [ ] AI leírás/tag kitöltés („Description by AI" gomb, üres mezők,
+- [x] public models
+- [x] model sharing
+- [x] search
+- [x] tags
+- [x] ratings
+- [x] downloads
+- [x] model licenses
+- [x] AI leírás/tag kitöltés („Description by AI" gomb, üres mezők,
       no-overwrite – lásd 29. fejezet)
 
 ---
@@ -1236,7 +1256,7 @@ A végső cél:
 
 ---
 
-# 25. MCP integráció (később)
+# 25. MCP integráció
 
 Az MCP szerver **ugyanabban a Django processben** fut, nem külön
 szolgáltatás. Nem a frontendet és nem a REST nézeteket hívja, hanem
@@ -1266,14 +1286,28 @@ Alpine.js / fetch          MCP client (LLM)
                models / ORM / Celery
 ```
 
-## 25.3 MCP tool készlet (terv)
+## 25.3 MCP tool készlet
+
+A registry (`mcp.tools`) az élő igazságforrás; a transzport a hivatalos SDK-val
+fut (lásd 37. fejezet). A core toolok:
 
 ```text
+create_workspace
 create_project
+list_projects
 generate_model_from_prompt
 get_model_version
-list_projects
 export_model_stl
+edit_model_from_annotations
+publish_project / unpublish_project
+search_public_projects
+set_project_tags
+rate_project
+record_download
+mark_project_printed
+generate_project_description
+create_build_plate / add_plate_item
+enqueue_print_job
 ```
 
 Ezek mind `services.py` hívások, nem shell és nem HTTP.
@@ -1555,4 +1589,186 @@ review --(egyezik / nincs vision / kimerült)--> END
   (inline `image/png`).
 
 Részletek: [`docs/vision-self-check.md`](./docs/vision-self-check.md).
+
+---
+
+# 32. Skill-ek (újrahasznosítható generálási receptek)
+
+A **Skill** névvel ellátott, felhasználó által létrehozható recept egy
+tárgy-osztály generálásához (pl. „süti kinyomó”, „telefontartó”). Alapelv
+változatlan: a skill **strukturált adat + szöveges iránymutatás**, soha nem
+OpenSCAD kód; az LLM továbbra is `ModelSpecification`-t ad, a geometriát a CAD
+backend állítja elő.
+
+- Két fajta, egy sémán: `guidance` (iránymutatás + defaultok + gépi
+  ellenőrzések) és `template` (beégetett generátort nevez meg, pl. a meglévő
+  telefontartó). A mai beégetett sablon így egy `template` skill.
+- A `defaults_json` **javaslat** a promptnak; a `constraints_json`-t a
+  **Validator** kényszeríti (pl. `min_wall_mm`, `must_rest_on_plate`,
+  `require_primitives`) – a skill kikényszerített, nem „sugallt”.
+- Kiválasztás determinisztikusan: **manuális** (projektnél tartósan vagy
+  generálásnál egyszer) mindig elsőbbséget élvez; egyébként **auto** –
+  először tag/`object_kind` egyezés, majd `RAG_ENABLED` esetén szemantikus
+  illesztés.
+- Kapcsolódás: `Project.skills` M2M (tartós) + per-run `skill_ids` (egyszeri).
+  A használt skillek és a választás módja (`manual`/`auto`) a verzió
+  provenance-ába (`validation_json`) kerül.
+- REST: `skills` CRUD ViewSet; UI: `/skills/` szerkesztő. Seed skillek:
+  `phone_holder` (template), `cookie_cutter` (guidance).
+
+Részletek: [`docs/skills.md`](./docs/skills.md).
+
+---
+
+# 33. Planner visszakérdezés és feltételezések
+
+A Planner eddig minden hiányzó értéket csendben printable defaulttal pótolt.
+Mostantól a döntés auditálható:
+
+- `Clarification` (`question`, `answer`, `kind`, `field`) a `PlannerPlan`
+  része – **nem** a `ModelSpecification`-é, ezért soha nem jut el a CAD
+  backendhez (a strict LLM↔CAD szerződés változatlan).
+- `kind="assumed"`: a Planner tippelt (`answer` kitöltve), a run megy tovább.
+  `kind="needs_user_input"`: nem tippel, `clarify_policy="ask"` esetén a run
+  megáll `status="clarification"`-nel (nincs `ModelVersion`), a user válaszol,
+  és **új run** indul a válaszokkal.
+- Alapértelmezés `clarify_policy="assume"`: a generálás **sosem blokkol**
+  magától. Az assumed tippek a verzió `validation_json`-jába kerülnek
+  (`assumptions`, `review_required`), és a UI felülvizsgálatra jelöli őket.
+- API: `POST /api/v1/runs/{id}/clarifications/`; a generálás payload
+  opcionális `clarify` mezője.
+
+Részletek: [`docs/planner-clarification.md`](./docs/planner-clarification.md).
+
+---
+
+# 34. Verzió-history: újragenerálás és szerkesztés
+
+A verziók **immutable-ek** (11. fejezet): a szerkesztés sosem írja át a
+meglévő verziót, hanem új, a forrásból származó verziót hoz létre.
+
+- `ModelVersion` új mezői: `parent_version` (a származás) és `origin`
+  (`generate` | `annotation` | `regenerate` | `manual`).
+- `POST /api/v1/versions/{id}/regenerate/`:
+  - üres body → tiszta újragenerálás (ugyanaz a prompt),
+  - `prompt` → szerkesztett promptból újragenerálás,
+  - `specification_json` → kézzel adott spec manuális renderje.
+- Az újragenerált run ugyanazt a `run_agent_workflow`-t futtatja, ezért
+  örökli a Planner visszakérdezést/feltételezéseket (33. fejezet).
+
+Részletek: [`docs/version-history-controls.md`](./docs/version-history-controls.md).
+
+---
+
+# 35. Workspace-first navigáció
+
+A főoldal a **workspace-ek listája**; az elemek (projektek) egy workspace-en
+belül jönnek létre.
+
+```text
+/                        -> Workspace lista (főoldal)
+/workspaces/{id}/        -> Elemek (projektek) listája az adott workspace-ben
+/projects/{id}/          -> Elem részlete (viewer, verziók, history controls)
+/community/...           -> Változatlan
+```
+
+A modellben, route-ban és API-ban a `Project` név marad; csak a UI mondhat
+„elemet”. A projekt létrehozásakor a workspace a route-ból jön, nem
+választólistából; az API `?workspace=<id>` szűrőt kap.
+
+Részletek: [`docs/workspace-navigation.md`](./docs/workspace-navigation.md).
+
+---
+
+# 36. Web research (SearXNG + trafilatura)
+
+A Research agent a lokális RAG mellett opcionálisan egy **SearXNG-kompatibilis
+JSON API-t** kérdez:
+
+```text
+GET {SEARXNG_BASE_URL}/search?q=<query>&format=json
+```
+
+- Engedélyezés: `SEARCH_BACKEND=searxng` + `SEARXNG_BASE_URL` (a self-hosted
+  instance a `docker-compose.search.yml` override-dal indítható, belső
+  hálón, publikált port nélkül).
+- A legfelső találatok oldalának fő szövegét a **`trafilatura`** nyeri ki
+  (bounded: max ~3000 karakter találatonként).
+- **Best-effort:** kikapcsolt funkció, hiányzó URL, elérhetetlen instance
+  vagy használhatatlan JSON esetén üres találat + warning; a generálás nem
+  áll meg és nem bukik el.
+- Az oldalletöltés **SSRF-védett** (csak `http`/`https`, nyilvános IP-re
+  oldódó host), és a worker processzben fut, nem az OpenSCAD sandboxban.
+
+---
+
+# 37. MCP transzport (hivatalos SDK)
+
+A `mcp` app registryje (`mcp.tools`) az egyetlen igazságforrás; a
+`mcp/server.py` ebből épít `MCPServer`-t, és minden tool hívása a
+`mcp.tools.call` **egyetlen chokepointján** megy át – így az `authorize`
+workspace-role kapu és a `allow_shell` tiltása ugyanúgy érvényes, mint a
+webes felhasználónál.
+
+- Futtatás: `manage.py mcp_server --transport stdio|streamable-http`
+  (`--host` / `--port` / `--path`).
+- MCP-nek nincs Django `request.user`-je: az identitás a
+  `MCP_SERVICE_USER_ID` settingből / env-ből (illetve a
+  `mcp_service_user_id` runtime override-ból) jön. A kliens által küldött
+  `user_id`/`owner_id` paraméter eldobódik – nem lehet más felhasználót
+  megszemélyesíteni.
+- Tool készlet: `create_workspace`, `create_project`, `list_projects`,
+  `generate_model_from_prompt`, `get_model_version`, `export_model_stl`,
+  `edit_model_from_annotations`, `publish_project`, `unpublish_project`,
+  `search_public_projects`, `set_project_tags`, `rate_project`,
+  `record_download`, `mark_project_printed`, `generate_project_description`,
+  `create_build_plate`, `add_plate_item`, `enqueue_print_job`.
+
+Lásd még: 25. fejezet.
+
+---
+
+# 38. Creality K2 CFS a Moonraker `[box]` objektumból
+
+A Creality K2 sorozat stock Moonraker alatt fut, és a Creality `[box]` Klipper
+modul a standard object-query API-n keresztül adja a CFS állapotát:
+
+```text
+GET /printer/objects/query?box
+```
+
+- Ez az **elsődleges** CFS-forrás (dokumentált Klipper/Moonraker felület,
+  nincs reverse-engineered framing).
+- A `printers/k2_box.py` két, a vadon előforduló payload-alakot tolerál:
+  először a community „flat” `box["slots"]` listát, fallbackként a stock
+  Creality `T1..Tn` per-unit párhuzamos tömböket
+  (`material_type` / `color_value` / `vender`).
+- A parser szándékosan defenzív: parse-olhatatlan alak → `[]`, és a K2
+  transzport a `printers/k2_websocket` readerre esik vissza. A „nincs CFS” és
+  a „query hiba” megkülönböztethető.
+
+Részletek: `backend/printers/k2_box.py`.
+
+---
+
+# 39. 2D `extrude` primitív
+
+A 30. fejezet primitívjei (box/cylinder/sphere/cone) nem tudnak kifejezni
+vékony falú, 2D körvonalból húzott tárgyat (pl. *süti kinyomó*). Ezt a
+`extrude` primitív nyitja ki:
+
+- `Primitive.type` bővül: `"extrude"`; új mezők: `profile: list[Vec2]` (2D
+  körvonal pontok mm-ben, XZ sík), `wall_thickness`, `round_radius`, `height`.
+- Renderelés: `linear_extrude(height) polygon(points)`; fal esetén
+  `difference()` a belül eltolt (Pythonban számolt) körvonallal;
+  `round_radius` → `offset(r=...)` / `minkowski` (kicsi, korlátozott).
+- A `profile` **inline pontlista** – soha fájl, nincs `import()`/`surface()`
+  (a sandbox szabály sérülne); a meglévő `validate_scad_source` ellenőrzi.
+  Új bounds: pontszám (pl. ≤ 256), koordináta-tartomány a primitív boundokkal.
+- A skill-ekkel együtt készült el (a *süti kinyomó* és hasonlók enélkül nem
+  működnének), és a `docs/cad-primitives.md` „nem cél” listáját ez a pont
+  felülírja.
+
+Részletek: [`docs/skills.md`](./docs/skills.md) 5., valamint
+[`docs/cad-primitives.md`](./docs/cad-primitives.md).
 
