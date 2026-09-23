@@ -127,7 +127,13 @@ def test_member_can_write_projects_but_not_manage_the_workspace(workspace, monke
 
     ((args, kwargs),) = enqueued
     assert args == (created.json()["id"], "make it", member.id)
-    assert kwargs == {"reference_image_name": "", "reference_note": ""}
+    assert kwargs == {
+        "reference_image_name": "",
+        "reference_note": "",
+        "skill_ids": [],
+        "auto_skill_selection": False,
+        "clarify_policy": "assume",
+    }
 
     # Workspace management is ADMIN+.
     assert (

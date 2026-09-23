@@ -91,7 +91,13 @@ def test_prompt_only_json_enqueues_the_agent_without_a_reference(project, no_bro
 
     assert response.status_code == 202, response.content
     ((args, kwargs),) = no_broker["agent"]
-    assert kwargs == {"reference_image_name": "", "reference_note": ""}
+    assert kwargs == {
+        "reference_image_name": "",
+        "reference_note": "",
+        "skill_ids": [],
+        "auto_skill_selection": False,
+        "clarify_policy": "assume",
+    }
     assert not project.versions.exists()
 
 

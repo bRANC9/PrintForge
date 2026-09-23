@@ -527,15 +527,26 @@ def test_get_storage_honours_the_runtime_override(settings, tmp_path):
     assert isinstance(storage, LocalStorage)
     assert storage.root == tmp_path
 
-    # "s3" is not an allowed DB override (field choices), so it is rejected...
+    # "gcs" is not an allowed DB override (field choices), so it is rejected...
     with pytest.raises(ValueError, match="storage_backend"):
-        update_settings(storage_backend="s3")
+        update_settings(storage_backend="gcs")
 
-    # ...while an unknown backend from the static settings still surfaces as
-    # NotImplementedError (after clearing the DB override).
+    # ...while "s3" is an allowed override and, like the static setting, selects
+    # the S3/MinIO backend.
+    update_settings(storage_backend="s3")
+    from files.services import S3Storage
+
+    assert isinstance(get_storage(), S3Storage)
+
     update_settings(storage_backend=None)
     settings.STORAGE_BACKEND = "s3"
-    with pytest.raises(NotImplementedError, match="s3"):
+
+    assert isinstance(get_storage(), S3Storage)
+
+    # An unknown backend from the static settings still surfaces as
+    # NotImplementedError.
+    settings.STORAGE_BACKEND = "gcs"
+    with pytest.raises(NotImplementedError, match="gcs"):
         get_storage()
 
     settings.STORAGE_BACKEND = "local"
@@ -552,6 +563,6 @@ def test_get_storage_falls_back_when_the_settings_lookup_fails(settings, monkeyp
 
     assert isinstance(get_storage(), LocalStorage)
 
-    settings.STORAGE_BACKEND = "s3"
-    with pytest.raises(NotImplementedError, match="s3"):
+    settings.STORAGE_BACKEND = "gcs"
+    with pytest.raises(NotImplementedError, match="gcs"):
         get_storage()

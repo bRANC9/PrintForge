@@ -99,7 +99,19 @@ def test_get_storage_returns_local_backend(settings, tmp_path):
 
 
 def test_get_storage_rejects_unimplemented_backend(settings):
-    settings.STORAGE_BACKEND = "s3"
+    settings.STORAGE_BACKEND = "gcs"
 
-    with pytest.raises(NotImplementedError, match="s3"):
+    with pytest.raises(NotImplementedError, match="gcs"):
         get_storage()
+
+
+def test_get_storage_returns_s3_backend(settings):
+    settings.STORAGE_BACKEND = "s3"
+    settings.AWS_STORAGE_BUCKET_NAME = "printforge"
+
+    from files.services import S3Storage
+
+    storage = get_storage()
+
+    assert isinstance(storage, S3Storage)
+    assert storage.bucket == "printforge"
