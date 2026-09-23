@@ -386,7 +386,7 @@ class ModelSpecification(BaseModel):
         return value.strip().upper()
 
     @model_validator(mode="after")
-    def _fill_extrude_height(self) -> "ModelSpecification":
+    def _fill_extrude_height(self) -> ModelSpecification:
         """Default a missing ``extrude`` height to the object height.
 
         Small local models frequently emit an ``extrude`` primitive with
@@ -400,9 +400,7 @@ class ModelSpecification(BaseModel):
         for primitive in self.primitives:
             if primitive.type != "extrude" or primitive.height is not None:
                 continue
-            primitive.height = min(
-                max(self.dimensions.height, MIN_PRIMITIVE_MM), MAX_PRIMITIVE_MM
-            )
+            primitive.height = min(max(self.dimensions.height, MIN_PRIMITIVE_MM), MAX_PRIMITIVE_MM)
         return self
 
     @model_serializer(mode="wrap")
