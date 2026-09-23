@@ -681,6 +681,28 @@ ul.error-box {
     color: var(--muted);
 }
 
+/* Print job slicing preview (terv.md Phase 5) ------------------------------ */
+
+.job-preview {
+    display: inline-block;
+    line-height: 0;
+}
+
+.job-preview-thumb {
+    display: block;
+    width: 64px;
+    height: 64px;
+    object-fit: contain;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-2);
+}
+
+.job-preview:hover .job-preview-thumb,
+.job-preview:focus-visible .job-preview-thumb {
+    border-color: var(--accent);
+}
+
 
 /* Create forms (projects / workspaces) ------------------------------------ */
 

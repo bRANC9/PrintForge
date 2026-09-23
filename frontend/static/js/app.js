@@ -28,6 +28,9 @@
         printJobCancel: (jobId) => `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/cancel/`,
         printJobTransition: (jobId) =>
             `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/transition/`,
+        // Slicing preview PNG (terv.md Phase 5): read-only, served inline.
+        printJobPreview: (jobId) =>
+            `${API_BASE}/print-jobs/${encodeURIComponent(jobId)}/preview/`,
         // Printer registry + live status (terv.md 13.).
         printers: () => `${API_BASE}/printers/`,
         printer: (printerId) => `${API_BASE}/printers/${encodeURIComponent(printerId)}/`,
@@ -792,6 +795,24 @@
             },
             canRequeue(job) {
                 return REQUEUEABLE.includes(job.status);
+            },
+
+            /** True when the API reports a stored slicing preview for the job. */
+            hasPreview(job) {
+                if (!job) return false;
+                return Boolean(job.has_preview || job.preview_url);
+            },
+
+            /**
+             * Preview PNG URL. Prefers the serializer's ``preview_url`` and
+             * falls back to the read-only preview endpoint when only
+             * ``has_preview`` is present (older payloads).
+             */
+            previewUrl(job) {
+                if (!job) return "";
+                if (job.preview_url) return job.preview_url;
+                if (job.has_preview) return endpoints.printJobPreview(job.id);
+                return "";
             },
 
             replaceJob(updated) {

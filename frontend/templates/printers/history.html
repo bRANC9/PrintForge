@@ -26,6 +26,7 @@
                         <th>Verzió</th>
                         <th>Nyomtató</th>
                         <th>Filament</th>
+                        <th>Előnézet</th>
                         <th>Állapot</th>
                         <th>Prioritás</th>
                         <th>Létrehozva</th>
@@ -44,6 +45,21 @@
                             <td x-text="versionLabel(job)"></td>
                             <td x-text="displayName(job.printer_name, job.printer)"></td>
                             <td x-text="displayName(job.filament_name, job.filament)"></td>
+                            <td>
+                                <template x-if="hasPreview(job)">
+                                    <a class="job-preview"
+                                       :href="previewUrl(job)"
+                                       target="_blank"
+                                       rel="noopener"
+                                       :title="'#' + job.id + ' szeletelési előnézet megnyitása'">
+                                        <img class="job-preview-thumb"
+                                             :src="previewUrl(job)"
+                                             :alt="'#' + job.id + ' szeletelési előnézet'"
+                                             loading="lazy">
+                                    </a>
+                                </template>
+                                <span class="muted" x-show="!hasPreview(job)">—</span>
+                            </td>
                             <td>
                                 <span class="status-badge"
                                       :class="statusClass(job.status)"
