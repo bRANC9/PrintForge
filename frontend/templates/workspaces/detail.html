@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Elemek – PrintForge{% endblock %}
+{% block content %}
+    {# The project detail URL template (pk=0) is filled by `projectUrl()`. #}
+    <div data-workspace-detail
+         data-workspace-id="{{ workspace_id|default:'' }}"
+         data-project-detail-url="{% url 'projects:detail' pk=0 %}"
+         x-data="workspaceDetail">
+        <p class="breadcrumb">
+            <a href="{% url 'workspaces:list' %}">Workspaces</a>
+            <template x-if="workspace">
+                <span>· <span x-text="workspaceName"></span></span>
+            </template>
+        </p>
+        <header class="page-head">
+            <div>
+                <h1 x-text="workspaceName || 'Workspace'"></h1>
+                <p class="muted">Az elemek (projektek) ebben a workspace-ben.</p>
+            </div>
+            <div class="page-head-actions">
+                <input class="input"
+                       type="search"
+                       placeholder="Szűrés név szerint…"
+                       x-model="search">
+                {% if user.is_authenticated %}
+                    <button type="button"
+                            class="btn btn-primary"
+                            @click="showCreateForm = !showCreateForm">Új elem</button>
+                {% endif %}
+            </div>
+        </header>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        {% if user.is_authenticated %}
+            <section class="panel create-panel" x-show="showCreateForm" x-cloak>
+                <h2>Új elem</h2>
+                <form class="stack-form" @submit.prevent="createProject()">
+                    <label for="new-item-name">Név</label>
+                    <input id="new-item-name"
+                           class="input"
+                           type="text"
+                           maxlength="200"
+                           required
+                           placeholder="Pl. Telefontartó"
+                           x-model="form.name"
+                           :disabled="creating">
+                    <label for="new-item-description">Leírás</label>
+                    <textarea id="new-item-description"
+                              class="textarea"
+                              rows="3"
+                              placeholder="Mit modellezünk?"
+                              x-model="form.description"
+                              :disabled="creating"></textarea>
+                    <fieldset class="skill-picker">
+                        <legend>Skillek</legend>
+                        <label class="checkbox-inline">
+                            <input type="checkbox" x-model="autoSkillSelection" :disabled="creating">
+                            Automatikus skill-választás
+                        </label>
+                        <p class="muted field-hint">Kikapcsolva kézzel jelölheted ki a használni kívánt skilleket.</p>
+                        <p class="muted" x-show="skillsLoading">Skillek betöltése…</p>
+                        <p class="error-box" x-show="skillsError" x-cloak x-text="skillsError"></p>
+                        <p class="muted" x-show="!skillsLoading && !skills.length" x-cloak>Még nincs elérhető skill.</p>
+                        <ul class="skill-picker-list" x-show="skills.length">
+                            <template x-for="skill in skills" :key="skill.id">
+                                <li>
+                                    <label class="checkbox-inline">
+                                        <input type="checkbox"
+                                               :checked="isSkillSelected(skill.id)"
+                                               @change="toggleSkill(skill.id)"
+                                               :disabled="autoSkillSelection || creating">
+                                        <span x-text="skill.name"></span>
+                                        <span class="badge" x-text="skill.kind"></span>
+                                        <span class="badge" x-show="skill.is_builtin">Beépített</span>
+                                    </label>
+                                </li>
+                            </template>
+                        </ul>
+                    </fieldset>
+                    <p class="error-box" x-show="createError" x-cloak x-text="createError"></p>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="creating || !form.name.trim()"
+                                x-text="creating ? 'Létrehozás…' : 'Elem létrehozása'"></button>
+                        <button type="button" class="btn" @click="showCreateForm = false">Mégse</button>
+                    </div>
+                </form>
+            </section>
+        {% else %}
+            <p class="muted">
+                <a href="{% url 'login' %}">Jelentkezz be</a> elem létrehozásához.
+            </p>
+        {% endif %}
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted"
+           x-show="!loading && !error && !visibleProjects.length"
+           x-cloak>Még nincs elem ebben a workspace-ben.</p>
+        <div class="project-grid"
+             x-show="!loading && visibleProjects.length"
+             x-cloak>
+            <template x-for="project in visibleProjects" :key="project.id">
+                <a class="card project-card" :href="projectUrl(project.id)">
+                    <h2 x-text="project.name"></h2>
+                    <p class="muted" x-text="project.description || 'Nincs leírás.'"></p>
+                    <footer>
+                        <span class="badge" x-show="project.is_public" x-text="'Nyilvános'"></span>
+                        <time class="muted" x-text="formatDate(project.updated_at)"></time>
+                    </footer>
+                </a>
+            </template>
+        </div>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/skills.js' %}"></script>
+    <script src="{% static 'js/workspaces.js' %}"></script>
+{% endblock %}

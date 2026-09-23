@@ -39,6 +39,25 @@
     }
 
     const endpoints = {
+        // Workspace-first navigation (docs/workspace-navigation.md 4.).
+        workspace: (id) => `${API_BASE}/workspaces/${encodeURIComponent(id)}/`,
+        // The flat /projects/ list filtered to one workspace (the server-side
+        // `?workspace=` filter, docs/workspace-navigation.md 3.). The UI keeps a
+        // client-side filter as a safety net.
+        projectsByWorkspace: (workspaceId) =>
+            withQuery(`${API_BASE}/projects/`, { workspace: workspaceId }),
+        // Reusable generation recipes (docs/skills.md 6.).
+        skills: (params) => withQuery(`${API_BASE}/skills/`, params),
+        skill: (id) => `${API_BASE}/skills/${encodeURIComponent(id)}/`,
+        // Version history controls (docs/version-history-controls.md 3./4.).
+        regenerate: (versionId) =>
+            `${API_BASE}/versions/${encodeURIComponent(versionId)}/regenerate/`,
+        // Planner clarification (docs/planner-clarification.md 5.): answer the
+        // blocking questions of a run that stopped with `status="clarification"`.
+        // The run router is registered as `agent-runs`, so the action lives at
+        // `/agent-runs/{id}/clarifications/`.
+        runClarifications: (runId) =>
+            `${API_BASE}/agent-runs/${encodeURIComponent(runId)}/clarifications/`,
         // Phase 8 community library (AllowAny).
         communityProjects: (params) => withQuery(`${API_BASE}/community/projects/`, params),
         communityProject: (id) => `${API_BASE}/community/projects/${encodeURIComponent(id)}/`,
@@ -63,6 +82,11 @@
         plateItems: (id) => `${API_BASE}/build-plates/${encodeURIComponent(id)}/items/`,
         printJobs: () => `${API_BASE}/print-jobs/`,
     };
+
+    // `clarify` value on the generation payload (docs/planner-clarification.md
+    // 5.): "assume" (default) lets the Planner guess missing values, "ask" makes
+    // it stop with `status="clarification"` instead of guessing a risky value.
+    const CLARIFY_POLICIES = { ask: "ask", assume: "assume" };
 
     // Mirrors projects.models.ProjectLicense (no choices endpoint exists).
     const LICENSES = [
@@ -136,6 +160,7 @@
 
     window.PrintForgeExt = {
         endpoints,
+        CLARIFY_POLICIES,
         LICENSES,
         licenseLabel,
         withQuery,

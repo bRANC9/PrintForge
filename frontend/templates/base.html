@@ -14,7 +14,9 @@
         <header class="site-header">
             <a class="brand" href="{% url 'home' %}">PrintForge</a>
             <nav class="site-nav">
-                <a href="{% url 'projects:list' %}">Projektek</a>
+                {# Workspace-first: the workspace list is the primary entry point. #}
+                <a href="{% url 'workspaces:list' %}">Workspaces</a>
+                <a href="/skills/">Skillek</a>
                 <a href="{% url 'community-list' %}">Közösség</a>
                 <a href="{% url 'printers:list' %}">Nyomtatók</a>
                 <a href="{% url 'printers:history' %}">Nyomtatási előzmények</a>

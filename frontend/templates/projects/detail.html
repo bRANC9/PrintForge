@@ -17,13 +17,18 @@
     {# A projekt azonosítója a data-project-id-ból, ennek hiányában az URL-ből jön. #}
     <div data-project-detail
          data-project-id="{{ project_id|default:'' }}"
+         data-workspace-detail-url="{% url 'workspaces:detail' pk=0 %}"
          x-data="projectWorkspace"
          @viewer-state.document="handleViewerState($event)">
         <p class="breadcrumb">
-            <a href="{% url 'projects:list' %}">← Projektek</a>
-            {% if project_id %}
-                · <a href="{% url 'projects:plates' pk=project_id %}">Nyomtatási lapok</a>
-            {% endif %}
+            <a href="{% url 'workspaces:list' %}">Workspaces</a>
+            <template x-if="workspace">
+                <span>· <a :href="workspaceHref" x-text="workspaceName"></a></span>
+            </template>
+            <template x-if="project">
+                <span>· <span x-text="project.name"></span></span>
+            </template>
+            {% if project_id %}· <a href="{% url 'projects:plates' pk=project_id %}">Nyomtatási lapok</a>{% endif %}
         </p>
         <template x-if="error">
             <p class="error-box" x-text="error"></p>
@@ -88,6 +93,45 @@
                             <span class="badge"
                                   x-show="version.reference_image"
                                   title="Referenciaképpel rendelkezik">ref</span>
+                            <span class="badge version-origin-badge"
+                                  :class="originBadgeClass(version)"
+                                  x-text="originLabel(version)"></span>
+                            <span class="version-chain muted"
+                                  x-show="version.parent_version"
+                                  x-text="chainLabel(version)"></span>
+                            <div class="version-actions">
+                                <button type="button"
+                                        class="btn btn-small"
+                                        @click.stop="regenerateVersion(version)"
+                                        :disabled="regenerateBusyId === version.id"
+                                        x-text="regenerateBusyId === version.id ? 'Indítás…' : 'Újragenerálás'">
+                                </button>
+                                <button type="button"
+                                        class="btn btn-small"
+                                        @click.stop="startEditVersion(version)">Szerkesztés</button>
+                            </div>
+                            <template x-if="editingVersionId === version.id">
+                                <div class="version-edit" @click.stop @keydown.stop>
+                                    <label :for="'version-prompt-' + version.id">Prompt szerkesztése</label>
+                                    <textarea class="textarea"
+                                              rows="3"
+                                              :id="'version-prompt-' + version.id"
+                                              x-model="editPrompt"
+                                              :disabled="regenerateBusyId === version.id"></textarea>
+                                    <p class="error-box" x-show="editError" x-cloak x-text="editError"></p>
+                                    <div class="form-actions">
+                                        <button type="button"
+                                                class="btn btn-primary btn-small"
+                                                @click.stop="saveEditVersion(version)"
+                                                :disabled="regenerateBusyId === version.id || !editPrompt.trim()"
+                                                x-text="regenerateBusyId === version.id ? 'Generálás…' : 'Mentés és újragenerálás'">
+                                        </button>
+                                        <button type="button"
+                                                class="btn btn-small"
+                                                @click.stop="cancelEditVersion()">Mégse</button>
+                                    </div>
+                                </div>
+                            </template>
                         </li>
                     </template>
                 </ol>
@@ -100,6 +144,24 @@
                                     x-text="selectedVersion.reference_note"></figcaption>
                     </figure>
                 </template>
+                <section class="assumptions-panel" x-show="versionAssumptions.length" x-cloak>
+                    <h3>AI feltételezések – érdemes felülvizsgálni</h3>
+                    <p class="muted">
+                        A Planner ezeket az értékeket saját maga tippelte
+                        <span x-show="versionReviewRequired">(felülvizsgálat szükséges)</span>.
+                    </p>
+                    <ul class="assumption-list">
+                        <template x-for="(item, index) in versionAssumptions" :key="index">
+                            <li class="assumption-row">
+                                <code class="assumption-field" x-text="item.field || 'érték'"></code>
+                                <p class="assumption-question" x-text="item.question"></p>
+                                <p class="assumption-answer">
+                                    <strong x-text="item.answer || '—'"></strong>
+                                </p>
+                            </li>
+                        </template>
+                    </ul>
+                </section>
                 <form class="prompt-form"
                       enctype="multipart/form-data"
                       @submit.prevent="submitVersion()">
@@ -110,6 +172,32 @@
                               x-model="prompt"
                               :disabled="busy"
                               placeholder="Pl. M5 csavarhelyek hozzáadása a belső falhoz"></textarea>
+                    <fieldset class="skill-picker">
+                        <legend>Skillek</legend>
+                        <label class="checkbox-inline">
+                            <input type="checkbox" x-model="autoSkillSelection" :disabled="busy">
+                            Automatikus skill-választás
+                        </label>
+                        <p class="muted field-hint">Kikapcsolva kézzel jelölheted ki a használni kívánt skilleket.</p>
+                        <p class="muted" x-show="skillsLoading">Skillek betöltése…</p>
+                        <p class="error-box" x-show="skillsError" x-cloak x-text="skillsError"></p>
+                        <p class="muted" x-show="!skillsLoading && !skills.length" x-cloak>Még nincs elérhető skill.</p>
+                        <ul class="skill-picker-list" x-show="skills.length">
+                            <template x-for="skill in skills" :key="skill.id">
+                                <li>
+                                    <label class="checkbox-inline">
+                                        <input type="checkbox"
+                                               :checked="isSkillSelected(skill.id)"
+                                               @change="toggleSkill(skill.id)"
+                                               :disabled="autoSkillSelection || busy">
+                                        <span x-text="skill.name"></span>
+                                        <span class="badge" x-text="skill.kind"></span>
+                                        <span class="badge" x-show="skill.is_builtin">Beépített</span>
+                                    </label>
+                                </li>
+                            </template>
+                        </ul>
+                    </fieldset>
                     <label for="reference-image">Referenciakép (#27, opcionális)</label>
                     <input id="reference-image"
                            class="input"
@@ -135,6 +223,14 @@
                                     :disabled="busy">Eltávolítás</button>
                         </div>
                     </template>
+                    <label class="checkbox-inline">
+                        <input type="checkbox" x-model="clarifyAsk" :disabled="busy">
+                        Kérdezz vissza, ha bizonytalan
+                    </label>
+                    <p class="muted field-hint">
+                        Bekapcsolva a Planner megáll, ha egy kritikus értéket nem tud
+                        biztonsan megtippelni, és kérdéseket tesz fel a generálás előtt.
+                    </p>
                     <button type="submit"
                             class="btn btn-primary"
                             :disabled="busy || (!prompt.trim() && !referenceImage)"
@@ -151,6 +247,44 @@
                         </template>
                     </ul>
                 </template>
+                <section class="clarification-panel" x-show="showClarifications" x-cloak>
+                    <h3>Kérdések a folytatáshoz</h3>
+                    <p class="muted">
+                        A Planner bizonytalan néhány értékben, ezért nem tippelt. Válaszolj,
+                        és a generálás a válaszaiddal folytatódik.
+                    </p>
+                    <template x-for="(item, index) in clarificationQuestions" :key="index">
+                        <div class="form-row">
+                            <label :for="'clarification-' + index"
+                                   x-text="item.question || item.field || 'Kérdés'"></label>
+                            <input :id="'clarification-' + index"
+                                   class="input"
+                                   type="text"
+                                   x-model="item.answer"
+                                   :disabled="submittingClarifications">
+                            <p class="muted field-hint" x-show="item.field" x-text="item.field"></p>
+                        </div>
+                    </template>
+                    <p class="error-box"
+                       x-show="clarificationError"
+                       x-cloak
+                       x-text="clarificationError"></p>
+                    <div class="form-actions">
+                        <button type="button"
+                                class="btn btn-primary"
+                                @click="submitClarifications()"
+                                :disabled="submittingClarifications"
+                                x-text="submittingClarifications ? 'Küldés…' : 'Válaszok elküldése'"></button>
+                    </div>
+                </section>
+                <section class="used-skills" x-show="usedSkills.length" x-cloak>
+                    <h3>Használt skillek</h3>
+                    <p class="tag-row">
+                        <template x-for="(skill, index) in usedSkills" :key="index">
+                            <span class="badge" x-text="skillUsageLabel(skill)"></span>
+                        </template>
+                    </p>
+                </section>
             </section>
             {% include "designs/viewer.html" %}
         </div>
@@ -289,5 +423,6 @@
 {% endblock %}
 {% block extra_js %}
     <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/skills.js' %}"></script>
     <script src="{% static 'js/project.js' %}"></script>
 {% endblock %}

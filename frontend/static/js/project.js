@@ -11,6 +11,8 @@
 //   GET       /api/v1/tags/                                  (paginated)
 //   POST      /api/v1/versions/{id}/annotations/             (visual editing)
 //   GET       /api/v1/projects/{id}/versions/                (annotation poll)
+//   GET       /api/v1/agent-runs/                            (clarification/assumption provenance)
+//   POST      /api/v1/agent-runs/{id}/clarifications/        (answer blocking questions)
 //
 // Reuses the vendored Three.js viewer through `x-stl-viewer` (app.js) with the
 // same `stlUrl` / `viewerToken` contract as the original component, plus the
@@ -56,9 +58,10 @@
     }
 
     function projectWorkspaceComponent() {
-        return {
+        const component = {
             projectId: "",
             project: null,
+            workspace: null,
             versions: [],
             selectedVersionId: null,
             prompt: "",
@@ -100,6 +103,14 @@
             statusText: "",
             errors: [],
 
+            // Planner clarification / assumptions (docs/planner-clarification.md 6.).
+            agentRuns: [],
+            clarificationRun: null,
+            clarificationQuestions: [],
+            clarificationError: "",
+            submittingClarifications: false,
+            clarifyAsk: false,
+
             viewerState: "empty",
             viewerMessage: "",
             dimensions: "",
@@ -111,6 +122,18 @@
             sendingAnnotations: false,
             annotationPrompt: "",
             activeAnnotationId: null,
+
+            // Version history controls (docs/version-history-controls.md 4.).
+            editingVersionId: null,
+            editPrompt: "",
+            editError: "",
+            regenerateBusyId: null,
+            originLabels: {
+                generate: "generate",
+                annotation: "annotation",
+                regenerate: "regenerate",
+                manual: "manual",
+            },
 
             formatDate: PF.formatDate,
             formatError(value) {
@@ -146,6 +169,63 @@
                 const version = this.selectedVersion;
                 const stored = version ? version.annotations_json : null;
                 return Array.isArray(stored) ? stored : [];
+            },
+
+            /** Skills the selected version was built from (docs/skills.md 7.). */
+            get usedSkills() {
+                const version = this.selectedVersion;
+                const validation =
+                    version && version.validation_json ? version.validation_json : null;
+                const skills =
+                    validation && Array.isArray(validation.skills) ? validation.skills : [];
+                return skills;
+            },
+
+            /**
+             * Planner assumptions recorded on the selected version
+             * (docs/planner-clarification.md 4./6.). Prefers the read-only
+             * `assumptions` field and falls back to `validation_json` so the
+             * panel also works before api-dev lands the flat serializer field.
+             */
+            get versionAssumptions() {
+                const version = this.selectedVersion;
+                if (!version) return [];
+                if (Array.isArray(version.assumptions)) return version.assumptions;
+                const validation = version.validation_json;
+                if (validation && Array.isArray(validation.assumptions)) {
+                    return validation.assumptions;
+                }
+                return [];
+            },
+
+            /** Whether the version was flagged for human review. */
+            get versionReviewRequired() {
+                const version = this.selectedVersion;
+                if (!version) return false;
+                if (typeof version.review_required === "boolean") {
+                    return version.review_required;
+                }
+                const validation = version.validation_json;
+                return Boolean(validation && validation.review_required);
+            },
+
+            /** True while the latest run still has unanswered questions. */
+            get showClarifications() {
+                return this.clarificationQuestions.length > 0;
+            },
+
+            get workspaceName() {
+                return this.workspace ? this.workspace.name : "";
+            },
+
+            get workspaceDetailUrlTemplate() {
+                const root = this.$root;
+                return root && root.dataset ? root.dataset.workspaceDetailUrl || "" : "";
+            },
+
+            get workspaceHref() {
+                if (!this.workspace) return "/workspaces/";
+                return PF.fillPkTemplate(this.workspaceDetailUrlTemplate, this.workspace.id);
             },
 
             get stlUrl() {
@@ -192,6 +272,7 @@
                     return;
                 }
                 this.reload();
+                if (ext.skillPickerState) this.loadSkillCatalogue();
             },
 
             destroy() {
@@ -224,8 +305,10 @@
                 await this.loadTagCatalogue();
                 try {
                     this.applyProject(await PF.api.getProject(this.projectId));
+                    await this.loadWorkspace();
                     await this.loadPublicRating();
                     await this.loadVersions();
+                    await this.loadAgentRuns();
                     if (!this.selectedVersionId && this.versions.length) {
                         this.selectVersion(this.versions[0]);
                     }
@@ -281,6 +364,21 @@
 
             async loadVersions() {
                 this.versions = await PF.api.listVersions(this.projectId);
+            },
+
+            /** Workspace name for the breadcrumb (`project.workspace` is an id). */
+            async loadWorkspace() {
+                const workspaceId = this.project ? this.project.workspace : null;
+                if (!workspaceId || !ext.endpoints.workspace) {
+                    this.workspace = null;
+                    return;
+                }
+                try {
+                    this.workspace = await PF.request(ext.endpoints.workspace(workspaceId));
+                } catch (error) {
+                    // The breadcrumb simply omits the workspace on failure.
+                    this.workspace = null;
+                }
             },
 
             /**
@@ -675,6 +773,22 @@
                     if (this.referenceImage) {
                         formData.append("reference_image", this.referenceImage);
                     }
+                    // Skills (docs/skills.md): ignored by the current
+                    // VersionCreateSerializer until api-dev adds `skill_ids`.
+                    if (this.autoSkillSelection) {
+                        formData.append("auto_skill_selection", "true");
+                    }
+                    (this.selectedSkillIds || []).forEach((skillId) => {
+                        formData.append("skill_ids", skillId);
+                    });
+                    // Planner clarify policy (docs/planner-clarification.md 5.):
+                    // default "assume"; "ask" lets the Planner stop with questions.
+                    formData.append(
+                        "clarify",
+                        this.clarifyAsk
+                            ? ext.CLARIFY_POLICIES.ask
+                            : ext.CLARIFY_POLICIES.assume
+                    );
                     const created = await ext.requestForm(
                         PF.endpoints.versions(this.projectId),
                         formData
@@ -691,6 +805,13 @@
                         // showing the previous model as if it were the result.
                         const status = await this.pollAgentRun(baselineRunId);
                         await this.loadVersions();
+                        if (status === "clarification") {
+                            // The run stopped for user input: no version was
+                            // created, so the clarification panel now shows the
+                            // questions (docs/planner-clarification.md 6.).
+                            this.notice = "A Planner visszakérdezett – válaszolj a kérdésekre a folytatáshoz.";
+                            return;
+                        }
                         if (status !== "done") {
                             this.error = status === "failed"
                                 ? "A generálás nem sikerült: nem készült új verzió, a korábbi modell maradt kiválasztva."
@@ -753,6 +874,183 @@
                 }
             },
 
+            // -------------------------------------------------------------
+            // Planner clarification (docs/planner-clarification.md 6.)
+            // -------------------------------------------------------------
+
+            /**
+             * Blocking questions of a run. Prefers the documented flat
+             * `clarifications` field and falls back to `state_json`, which the
+             * current serializer already exposes.
+             */
+            runClarifications(run) {
+                if (!run) return [];
+                if (Array.isArray(run.clarifications)) return run.clarifications;
+                const state = run.state_json;
+                if (state && Array.isArray(state.clarifications)) return state.clarifications;
+                return [];
+            },
+
+            /**
+             * Show the clarification form only when the latest run stopped for
+             * user input and produced no version. Answering starts a new run,
+             * which supersedes the panel; it reappears only if that run also
+             * asks. A run with `state_json.version_id` did not stop for input.
+             */
+            refreshClarificationState(runs) {
+                const list = (runs || this.agentRuns || []).filter(
+                    (run) => Number(run.project) === Number(this.projectId)
+                );
+                const latest = list.reduce(
+                    (max, run) => (!max || run.id > max.id ? run : max),
+                    null
+                );
+                this.clarificationRun = null;
+                this.clarificationQuestions = [];
+                if (!latest) return;
+                const status = String(latest.status || "").toLowerCase();
+                // `clarification` is a terminal run state with no version; it is
+                // exactly the case the panel exists for (docs/planner-clarification.md 6.).
+                const visible = ["done", "completed", "complete", "clarification"];
+                if (status && !visible.includes(status)) {
+                    return;
+                }
+                const clarifications = this.runClarifications(latest);
+                if (!clarifications.length) return;
+                const state = latest.state_json || {};
+                if (state.version_id) return;
+                this.clarificationRun = latest;
+                this.clarificationQuestions = clarifications.map((item) => ({
+                    field: item.field || "",
+                    question: item.question || "",
+                    answer: "",
+                }));
+            },
+
+            async loadAgentRuns() {
+                try {
+                    this.agentRuns = await PF.api.listAgentRuns();
+                } catch (error) {
+                    this.agentRuns = [];
+                }
+                this.refreshClarificationState(this.agentRuns);
+            },
+
+            /** POST the answers, then poll for the follow-up run (new version). */
+            async submitClarifications() {
+                if (!this.clarificationRun || this.submittingClarifications) return;
+                const answers = this.clarificationQuestions.map((item) => ({
+                    field: item.field,
+                    answer: (item.answer || "").trim(),
+                }));
+                if (answers.some((item) => !item.answer)) {
+                    this.clarificationError = "Minden kérdésre adj választ.";
+                    return;
+                }
+                const runId = this.clarificationRun.id;
+                const baselineVersionId = this.newestVersionId();
+                this.submittingClarifications = true;
+                this.clarificationError = "";
+                this.error = "";
+                this.notice = "";
+                this.errors = [];
+                this.statusText = "Válaszok elküldése…";
+                try {
+                    await PF.request(ext.endpoints.runClarifications(runId), {
+                        method: "POST",
+                        body: { answers },
+                    });
+                    // The answers are consumed; the follow-up run supersedes this
+                    // panel. It reappears only if the new run also asks.
+                    this.clarificationRun = null;
+                    this.clarificationQuestions = [];
+                    const status = await this.pollClarificationRun(runId, baselineVersionId);
+                    if (status === "clarification") {
+                        this.notice = "A Planner további kérdéseket tett fel.";
+                    } else if (status === "done") {
+                        this.notice = "A válaszok alapján elkészült az új verzió.";
+                    }
+                } catch (error) {
+                    this.clarificationError = error.message || String(error);
+                } finally {
+                    this.submittingClarifications = false;
+                }
+            },
+
+            /**
+             * Poll the runs started by an answered clarification. Returns
+             * "done" | "clarification" | "failed" | "timeout". Only a genuinely
+             * newer version (id above the baseline) is ever selected.
+             */
+            async pollClarificationRun(parentRunId, baselineVersionId) {
+                this.polling = true;
+                const deadline = Date.now() + POLL_TIMEOUT_MS;
+                try {
+                    while (Date.now() < deadline) {
+                        await sleep(POLL_INTERVAL_MS);
+                        let runs = [];
+                        try {
+                            runs = await PF.api.listAgentRuns();
+                        } catch (error) {
+                            this.statusText = `Állapot lekérdezése sikertelen: ${error.message}`;
+                            continue;
+                        }
+                        this.agentRuns = runs;
+                        const mine = runs.filter(
+                            (run) =>
+                                Number(run.project) === Number(this.projectId)
+                                && run.id > parentRunId
+                        );
+                        if (!mine.length) {
+                            this.statusText = "A válaszok feldolgozása…";
+                            continue;
+                        }
+                        const run = mine.reduce((a, b) => (a.id > b.id ? a : b));
+                        const state = String(run.status || "").toLowerCase();
+                        this.statusText = `AI: ${run.status}`;
+                        if (state === "failed") {
+                            this.errors = run.error ? [run.error] : ["A generálás nem sikerült."];
+                            this.error = "A válaszok feldolgozása nem sikerült.";
+                            return "failed";
+                        }
+                        if (state !== "done" && state !== "completed" && state !== "complete") {
+                            continue;
+                        }
+                        if (this.runClarifications(run).length) {
+                            this.refreshClarificationState(runs);
+                            this.statusText = "A Planner további kérdéseket tett fel.";
+                            return "clarification";
+                        }
+                        const versionId = (run.state_json && run.state_json.version_id) || null;
+                        if (!versionId) {
+                            this.error = "A válaszok feldolgozása nem készített verziót.";
+                            this.errors = ["Nem készült új verzió."];
+                            return "failed";
+                        }
+                        await this.loadVersions();
+                        const newest = this.versions
+                            .filter((version) => Number(version.id) > Number(baselineVersionId))
+                            .reduce(
+                                (max, version) => (!max || version.id > max.id ? version : max),
+                                null
+                            );
+                        if (newest) {
+                            this.selectedVersionId = newest.id;
+                            this.viewerToken += 1;
+                            this.showStoredAnnotations(newest);
+                        }
+                        this.refreshClarificationState(runs);
+                        this.statusText = "A modell elkészült.";
+                        return "done";
+                    }
+                    this.statusText = "Időtúllépés a válaszok feldolgozása közben.";
+                    this.error = "Időtúllépés: a válaszok feldolgozása nem fejeződött be.";
+                    return "timeout";
+                } finally {
+                    this.polling = false;
+                }
+            },
+
             /**
              * Poll the AI run started by this submit until it is terminal.
              * Returns "done" | "failed" | "timeout" so the caller never has to
@@ -785,6 +1083,14 @@
                         const state = String(run.status || "").toLowerCase();
                         this.statusText = `AI: ${run.status}`;
                         if (state === "done") {
+                            this.agentRuns = runs;
+                            // A run can finish "done" without a version when the
+                            // Planner stopped for user input (docs/planner-clarification.md 4.).
+                            if (this.runClarifications(run).length) {
+                                this.refreshClarificationState(runs);
+                                this.statusText = "A Planner visszakérdezett.";
+                                return "clarification";
+                            }
                             this.statusText = "A modell elkészült.";
                             return "done";
                         }
@@ -979,7 +1285,10 @@
                         : baseVersionId;
 
                     this.statusText = "Az AI feldolgozza a jelöléseket…";
-                    const created = await this.pollAnnotationVersion(parentId);
+                    const created = await this.pollDerivedVersion(
+                        parentId,
+                        "Az AI dolgozik a szerkesztésen…"
+                    );
                     if (!created) return;
 
                     this.annotations = [];
@@ -1000,8 +1309,13 @@
                 }
             },
 
-            /** Wait for the derived version (`parent_version == base`). */
-            async pollAnnotationVersion(parentId) {
+            /**
+             * Wait for a derived version (`parent_version == base`), shared by
+             * the annotation edit and the history regenerate/edit flows. Only a
+             * genuinely newer version is ever returned, so a failed run cannot
+             * silently reuse the previous model.
+             */
+            async pollDerivedVersion(parentId, pendingMessage) {
                 this.polling = true;
                 const deadline = Date.now() + POLL_TIMEOUT_MS;
                 try {
@@ -1018,7 +1332,7 @@
                             (version) => Number(version.parent_version) === Number(parentId)
                         );
                         if (!derived.length) {
-                            this.statusText = "Az AI dolgozik a szerkesztésen…";
+                            this.statusText = pendingMessage || "Az AI dolgozik…";
                             continue;
                         }
                         const created = derived.reduce((a, b) => (a.id > b.id ? a : b));
@@ -1045,6 +1359,131 @@
                 }
             },
 
+            // -------------------------------------------------------------
+            // Version history controls (docs/version-history-controls.md 4.)
+            // -------------------------------------------------------------
+
+            /** Explicit `origin`, or an inference for older serializer rows. */
+            originLabel(version) {
+                if (!version) return "";
+                const origin = version.origin;
+                if (origin && this.originLabels[origin]) return this.originLabels[origin];
+                const annotations = Array.isArray(version.annotations_json)
+                    ? version.annotations_json
+                    : [];
+                if (annotations.length) return this.originLabels.annotation;
+                if (version.parent_version) return this.originLabels.regenerate;
+                return this.originLabels.generate;
+            },
+
+            /** e.g. `v3 ← v2 (regenerate)`; plain `v1` for a root version. */
+            chainLabel(version) {
+                if (!version) return "";
+                const base = `v${version.version}`;
+                const parentId = version.parent_version;
+                if (!parentId) return base;
+                const parent = this.versions.find(
+                    (item) => Number(item.id) === Number(parentId)
+                );
+                const parentTag = parent ? ` ← v${parent.version}` : ` ← #${parentId}`;
+                return `${base}${parentTag} (${this.originLabel(version)})`;
+            },
+
+            originBadgeClass(version) {
+                if (!version) return "";
+                const origin = version.origin || "";
+                if (origin === "regenerate") return "is-active";
+                if (origin === "annotation") return "is-ok";
+                if (origin === "manual") return "is-danger";
+                return "";
+            },
+
+            /** `Újragenerálás`: same prompt, derived version, then poll. */
+            async regenerateVersion(version) {
+                if (!version || this.regenerateBusyId) return;
+                this.regenerateBusyId = version.id;
+                this.error = "";
+                this.notice = "";
+                this.errors = [];
+                this.statusText = `v${version.version} újragenerálása…`;
+                try {
+                    // Empty body: reuse the base version's own prompt.
+                    await PF.request(ext.endpoints.regenerate(version.id), { method: "POST" });
+                    const created = await this.pollDerivedVersion(
+                        version.id,
+                        `v${version.version} újragenerálása…`
+                    );
+                    if (!created) return;
+                    await this.loadVersions();
+                    this.selectedVersionId = created.id;
+                    this.viewerToken += 1;
+                    this.showStoredAnnotations(created);
+                    this.notice = `Az új verzió elkészült (${this.chainLabel(created)}).`;
+                } catch (error) {
+                    this.error = error.message || String(error);
+                } finally {
+                    this.regenerateBusyId = null;
+                }
+            },
+
+            startEditVersion(version) {
+                if (!version) return;
+                this.editingVersionId = version.id;
+                this.editPrompt = version.prompt || "";
+                this.editError = "";
+                this.notice = "";
+            },
+
+            cancelEditVersion() {
+                this.editingVersionId = null;
+                this.editPrompt = "";
+                this.editError = "";
+            },
+
+            /** `Szerkesztés`: prompt edit then derived regenerate, then poll. */
+            async saveEditVersion(version) {
+                if (!version || this.regenerateBusyId) return;
+                const prompt = this.editPrompt.trim();
+                if (!prompt) {
+                    this.editError = "A prompt nem lehet üres.";
+                    return;
+                }
+                this.regenerateBusyId = version.id;
+                this.error = "";
+                this.notice = "";
+                this.editError = "";
+                this.statusText = `v${version.version} szerkesztett promptjának generálása…`;
+                try {
+                    await PF.request(ext.endpoints.regenerate(version.id), {
+                        method: "POST",
+                        body: { prompt },
+                    });
+                    const created = await this.pollDerivedVersion(
+                        version.id,
+                        `v${version.version} szerkesztett promptjának generálása…`
+                    );
+                    if (!created) return;
+                    this.editingVersionId = null;
+                    this.editPrompt = "";
+                    await this.loadVersions();
+                    this.selectedVersionId = created.id;
+                    this.viewerToken += 1;
+                    this.showStoredAnnotations(created);
+                    this.notice = `Az új verzió elkészült (${this.chainLabel(created)}).`;
+                } catch (error) {
+                    this.editError = error.message || String(error);
+                } finally {
+                    this.regenerateBusyId = null;
+                }
+            },
+
+            /** "Használt skillek: Süti kinyomó (auto)" (docs/skills.md 7.). */
+            skillUsageLabel(skill) {
+                if (!skill) return "";
+                const name = skill.name || skill.slug || `#${skill.id}`;
+                return skill.selection ? `${name} (${skill.selection})` : name;
+            },
+
             handleViewerState(event) {
                 const detail = event.detail || {};
                 this.viewerState = detail.state || "empty";
@@ -1054,6 +1493,10 @@
                     : "";
             },
         };
+        // Skill picker (docs/skills.md 6.). `Object.assign` copies only the
+        // mixin's plain properties, so the accessors above stay live.
+        if (ext.skillPickerState) Object.assign(component, ext.skillPickerState());
+        return component;
     }
 
     document.addEventListener("alpine:init", () => {

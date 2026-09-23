@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Skillek – PrintForge{% endblock %}
+{% block content %}
+    <div data-skills-page x-data="skillsPage">
+        <header class="page-head">
+            <div>
+                <h1>Skillek</h1>
+                <p class="muted">Újrahasznosítható generálási receptek (guidance / template). A beépített skillek csak olvashatók.</p>
+            </div>
+            <div class="page-head-actions">
+                <input class="input"
+                       type="search"
+                       placeholder="Keresés név / leírás szerint…"
+                       x-model="search">
+                {% if user.is_authenticated %}
+                    <button type="button" class="btn btn-primary" @click="startCreate()">Új skill</button>
+                {% endif %}
+            </div>
+        </header>
+        <section class="panel filter-panel">
+            <div class="form-row">
+                <label for="skill-workspace-filter">Workspace</label>
+                <select id="skill-workspace-filter" class="input" x-model="workspaceFilter">
+                    <option value="">Minden</option>
+                    <option value="builtin">Beépített</option>
+                    <option value="global">Globális</option>
+                    <option value="public">Nyilvános</option>
+                    <template x-for="workspace in workspaces" :key="workspace.id">
+                        <option :value="String(workspace.id)" x-text="workspace.name"></option>
+                    </template>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="skill-kind-filter">Típus</label>
+                <select id="skill-kind-filter" class="input" x-model="kindFilter">
+                    <option value="">Minden típus</option>
+                    <template x-for="item in kinds" :key="item.value">
+                        <option :value="item.value" x-text="item.label"></option>
+                    </template>
+                </select>
+            </div>
+        </section>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted"
+           x-show="!loading && !error && !filteredSkills.length"
+           x-cloak>Nincs a szűrőknek megfelelő skill.</p>
+        <div class="skill-grid" x-show="!loading && filteredSkills.length" x-cloak>
+            <template x-for="skill in filteredSkills" :key="skill.id">
+                <article class="card skill-card">
+                    <header class="skill-card-head">
+                        <h2 x-text="skill.name"></h2>
+                        <span class="badge" x-text="kindLabel(skill.kind)"></span>
+                    </header>
+                    <p class="muted" x-text="skill.description || 'Nincs leírás.'"></p>
+                    <p class="tag-row">
+                        <span class="badge" x-show="skill.is_builtin">Beépített</span>
+                        <span class="badge is-ok" x-show="skill.is_public">Nyilvános</span>
+                        <span class="badge"
+                              x-show="skill.object_kind"
+                              x-text="'Típus: ' + skill.object_kind"></span>
+                        <span class="badge"
+                              x-show="skill.template_key"
+                              x-text="'Sablon: ' + skill.template_key"></span>
+                    </p>
+                    <p class="tag-row">
+                        <template x-for="tag in skillTags(skill)" :key="tag">
+                            <span class="badge tag-chip" x-text="tag"></span>
+                        </template>
+                    </p>
+                    <footer>
+                        <span class="muted" x-text="workspaceLabel(skill)"></span>
+                        <span class="muted" x-text="formatDate(skill.updated_at)"></span>
+                        <span class="row-actions">
+                            <button type="button"
+                                    class="btn btn-small"
+                                    x-show="canEdit(skill)"
+                                    @click="startEdit(skill)">Szerkesztés</button>
+                            <button type="button"
+                                    class="btn btn-danger btn-small"
+                                    x-show="canEdit(skill)"
+                                    @click="remove(skill)">Törlés</button>
+                        </span>
+                    </footer>
+                </article>
+            </template>
+        </div>
+        {% if user.is_authenticated %}
+            <section class="panel create-panel skill-editor" x-show="showForm" x-cloak>
+                <h2 x-text="editingId ? 'Skill szerkesztése' : 'Új skill'"></h2>
+                <p class="warning-box"
+                   x-show="isEditingBuiltin"
+                   x-cloak>A beépített skillek csak olvashatók, nem szerkeszthetők.</p>
+                <form class="stack-form" @submit.prevent="save()">
+                    <label for="skill-name">Név</label>
+                    <input id="skill-name"
+                           class="input"
+                           type="text"
+                           maxlength="120"
+                           required
+                           x-model="form.name"
+                           :disabled="saving">
+                    <label for="skill-description">Leírás</label>
+                    <textarea id="skill-description"
+                              class="textarea"
+                              rows="3"
+                              x-model="form.description"
+                              :disabled="saving"></textarea>
+                    <label for="skill-kind">Típus</label>
+                    <select id="skill-kind" class="input" x-model="form.kind" :disabled="saving">
+                        <template x-for="item in kinds" :key="item.value">
+                            <option :value="item.value" x-text="item.label"></option>
+                        </template>
+                    </select>
+                    <label for="skill-object-kind">Tárgy-osztály (object_kind)</label>
+                    <input id="skill-object-kind"
+                           class="input"
+                           type="text"
+                           maxlength="64"
+                           placeholder="Pl. cookie_cutter"
+                           x-model="form.object_kind"
+                           :disabled="saving">
+                    <template x-if="form.kind === 'template'">
+                        <div class="form-row">
+                            <label for="skill-template-key">Sablon kulcs (template_key)</label>
+                            <input id="skill-template-key"
+                                   class="input"
+                                   type="text"
+                                   maxlength="64"
+                                   placeholder="Pl. phone_holder"
+                                   x-model="form.template_key"
+                                   :disabled="saving">
+                        </div>
+                    </template>
+                    <label for="skill-guidance">Iránymutatás (guidance)</label>
+                    <textarea id="skill-guidance"
+                              class="textarea"
+                              rows="4"
+                              x-model="form.guidance"
+                              :disabled="saving"></textarea>
+                    <label for="skill-defaults">Default-ok (JSON)</label>
+                    <textarea id="skill-defaults"
+                              class="textarea code-area"
+                              rows="4"
+                              x-model="form.defaults_text"
+                              :disabled="saving"></textarea>
+                    <label for="skill-constraints">Megszorítások (JSON)</label>
+                    <textarea id="skill-constraints"
+                              class="textarea code-area"
+                              rows="4"
+                              x-model="form.constraints_text"
+                              :disabled="saving"></textarea>
+                    <label for="skill-tag-input">Címkék</label>
+                    <p class="tag-row">
+                        <template x-for="(tag, index) in form.tagNames" :key="tag + index">
+                            <span class="badge tag-chip">
+                                <span x-text="tag"></span>
+                                <button type="button"
+                                        class="link-btn"
+                                        @click="removeTag(index)"
+                                        aria-label="Címke törlése">×</button>
+                            </span>
+                        </template>
+                        <span class="muted" x-show="!form.tagNames.length">Nincs címke.</span>
+                    </p>
+                    <input id="skill-tag-input"
+                           class="input"
+                           type="text"
+                           list="skill-tag-options"
+                           placeholder="Címke, majd Enter"
+                           x-model="form.tagInput"
+                           @keydown.enter.prevent="addTag()"
+                           :disabled="saving">
+                    <datalist id="skill-tag-options">
+                        <template x-for="item in tags" :key="item.id">
+                            <option :value="item.name"></option>
+                        </template>
+                    </datalist>
+                    <label for="skill-workspace">Workspace</label>
+                    <select id="skill-workspace"
+                            class="input"
+                            x-model="form.workspace"
+                            :disabled="saving">
+                        <option value="">Globális (workspace nélkül)</option>
+                        <template x-for="workspace in workspaces" :key="workspace.id">
+                            <option :value="String(workspace.id)" x-text="workspace.name"></option>
+                        </template>
+                    </select>
+                    <label class="checkbox-inline">
+                        <input type="checkbox" x-model="form.is_public" :disabled="saving">
+                        Nyilvános megosztás
+                    </label>
+                    <p class="error-box" x-show="formError" x-cloak x-text="formError"></p>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="saving || !form.name.trim()"
+                                x-text="saving ? 'Mentés…' : 'Skill mentése'"></button>
+                        <button type="button" class="btn" @click="cancelForm()">Mégse</button>
+                    </div>
+                </form>
+            </section>
+        {% else %}
+            <p class="muted">
+                <a href="{% url 'login' %}">Jelentkezz be</a> saját skill létrehozásához.
+            </p>
+        {% endif %}
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/skills.js' %}"></script>
+{% endblock %}

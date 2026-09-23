@@ -1361,3 +1361,222 @@ ul.error-box {
     background: var(--border);
     color: var(--text);
 }
+
+/* Phase 9: workspace-first navigation (docs/workspace-navigation.md) ------ */
+
+.workspace-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 1rem;
+}
+
+.workspace-card h2 {
+    margin: 0 0 0.9rem;
+    font-size: 1.1rem;
+}
+
+.workspace-card footer {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+}
+
+/* Phase 9: skills UI (docs/skills.md 6.) ---------------------------------- */
+
+.skill-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1rem;
+}
+
+.skill-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.skill-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.6rem;
+}
+
+.skill-card-head h2 {
+    margin: 0;
+    font-size: 1.05rem;
+}
+
+.skill-card p {
+    margin: 0;
+}
+
+.skill-card footer {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: auto;
+    padding-top: 0.4rem;
+    font-size: 0.8rem;
+}
+
+.skill-editor .stack-form {
+    max-width: 720px;
+}
+
+.code-area {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem;
+}
+
+.skill-picker {
+    margin: 0.4rem 0 0;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.skill-picker legend {
+    padding: 0 0.35rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.skill-picker-list {
+    list-style: none;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+/* Phase 9: version history controls (docs/version-history-controls.md) ---- */
+
+.version-origin-badge {
+    grid-column: 1 / -1;
+    justify-self: start;
+}
+
+.version-chain {
+    grid-column: 1 / -1;
+    font-size: 0.76rem;
+}
+
+.version-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.version-edit {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.35rem;
+    padding: 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+}
+
+.version-edit label {
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.version-edit .form-actions {
+    margin-top: 0.3rem;
+}
+
+.used-skills {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--border);
+}
+
+.used-skills h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+}
+
+/* Phase 9: planner clarification + assumptions ----------------------------- */
+
+.clarification-panel {
+    margin-top: 1rem;
+    padding: 0.85rem;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: rgba(76, 141, 255, 0.08);
+}
+
+.clarification-panel h3 {
+    margin: 0 0 0.35rem;
+    font-size: 0.95rem;
+}
+
+.clarification-panel .form-row {
+    margin-bottom: 0.6rem;
+}
+
+.clarification-panel .form-row .input {
+    max-width: none;
+}
+
+.clarification-panel .form-actions {
+    margin-top: 0.5rem;
+}
+
+/* Amber "review me" panel: the Planner guessed a value it could not ask for. */
+.assumptions-panel {
+    margin: 0 0 1rem;
+    padding: 0.85rem;
+    border: 1px solid #d9a441;
+    border-radius: 8px;
+    background: rgba(217, 164, 65, 0.08);
+}
+
+.assumptions-panel h3 {
+    margin: 0 0 0.35rem;
+    color: #e6b95c;
+    font-size: 0.95rem;
+}
+
+.assumption-list {
+    list-style: none;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.assumption-row {
+    padding: 0.5rem 0.6rem;
+    border: 1px solid rgba(217, 164, 65, 0.35);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.12);
+}
+
+.assumption-field {
+    font-size: 0.78rem;
+    color: #e6b95c;
+}
+
+.assumption-question {
+    margin: 0.25rem 0;
+    font-size: 0.88rem;
+}
+
+.assumption-answer {
+    margin: 0;
+    font-size: 0.88rem;
+}

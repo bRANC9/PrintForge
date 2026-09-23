@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Workspaces – PrintForge{% endblock %}
+{% block content %}
+    {# The detail URL template (pk=0) is filled client-side by `workspaceUrl()`. #}
+    <div data-workspace-list
+         data-workspace-detail-url="{% url 'workspaces:detail' pk=0 %}"
+         x-data="workspaceList">
+        <header class="page-head">
+            <div>
+                <h1>Workspaces</h1>
+                <p class="muted">Válassz egy workspace-t, és készíts benne elemeket.</p>
+            </div>
+            <div class="page-head-actions">
+                <input class="input"
+                       type="search"
+                       placeholder="Szűrés név szerint…"
+                       x-model="search">
+                {% if user.is_authenticated %}
+                    <button type="button"
+                            class="btn btn-primary"
+                            @click="showCreateForm = !showCreateForm">Új workspace</button>
+                {% endif %}
+            </div>
+        </header>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        {% if user.is_authenticated %}
+            <section class="panel create-panel" x-show="showCreateForm" x-cloak>
+                <h2>Új workspace</h2>
+                <form class="stack-form" @submit.prevent="createWorkspace()">
+                    <label for="new-workspace-name">Név</label>
+                    <input id="new-workspace-name"
+                           class="input"
+                           type="text"
+                           maxlength="200"
+                           required
+                           placeholder="Pl. Műhely"
+                           x-model="form.name"
+                           :disabled="creating">
+                    <p class="error-box" x-show="createError" x-cloak x-text="createError"></p>
+                    <div class="form-actions">
+                        <button type="submit"
+                                class="btn btn-primary"
+                                :disabled="creating || !form.name.trim()"
+                                x-text="creating ? 'Létrehozás…' : 'Workspace létrehozása'"></button>
+                        <button type="button" class="btn" @click="showCreateForm = false">Mégse</button>
+                    </div>
+                </form>
+            </section>
+        {% else %}
+            <p class="muted">
+                <a href="{% url 'login' %}">Jelentkezz be</a> workspace létrehozásához.
+            </p>
+        {% endif %}
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <p class="muted"
+           x-show="!loading && !error && !visibleWorkspaces.length"
+           x-cloak>Hozz létre egy workspace-t, és kezdj el elemeket készíteni.</p>
+        <div class="workspace-grid"
+             x-show="!loading && visibleWorkspaces.length"
+             x-cloak>
+            <template x-for="workspace in visibleWorkspaces" :key="workspace.id">
+                <a class="card workspace-card" :href="workspaceUrl(workspace.id)">
+                    <h2 x-text="workspace.name"></h2>
+                    <footer>
+                        <span class="badge" x-text="memberCount(workspace) + ' tag'"></span>
+                        <span class="badge" x-text="projectCount(workspace.id) + ' elem'"></span>
+                        <time class="muted" x-text="formatDate(workspace.updated_at)"></time>
+                    </footer>
+                </a>
+            </template>
+        </div>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/api-extras.js' %}"></script>
+    <script src="{% static 'js/workspaces.js' %}"></script>
+{% endblock %}
