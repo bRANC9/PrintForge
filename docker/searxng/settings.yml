@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# PrintForge – minimal SearXNG config (only used by docker-compose.search.yml).
+#
+# Merges on top of the image defaults (engines, plugins, ...). The two things
+# that matter here are the JSON API (the app talks to SearXNG programmatically)
+# and the disabled rate limiter (a single internal consumer).
+#
+# CHANGE_ME: set a real random secret before exposing the service. Generate one
+# in one place with:  openssl rand -hex 32
+# ---------------------------------------------------------------------------
+use_default_settings: true
+
+server:
+    secret_key: "CHANGE_ME"
+    # No per-client rate limiting: the app is the only consumer, on the
+    # internal network. The base stack never publishes SearXNG's port.
+    limiter: false
+
+search:
+    # `json` is required for the Research agent's API calls; `html` keeps the
+    # normal web UI usable for debugging.
+    formats:
+        - html
+        - json

@@ -108,8 +108,8 @@ jobs:
               print(f"vector extension ready on {dbname}")
           PY
 
-      - name: Run pytest
-        run: uv run pytest
+      - name: Run pytest (parallel, one test DB per xdist worker)
+        run: uv run pytest -n auto --dist loadscope -p no:cacheprovider
 
   compose:
     name: Compose config validation
@@ -123,3 +123,6 @@ jobs:
 
       - name: Validate internal-Ollama override
         run: docker compose -f docker-compose.yml -f docker-compose.ollama.yml config --quiet
+
+      - name: Validate optional SearXNG override
+        run: docker compose -f docker-compose.yml -f docker-compose.search.yml config --quiet

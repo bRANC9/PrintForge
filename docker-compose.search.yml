@@ -1,0 +1,31 @@
+# Override: run a self-hosted SearXNG instance for the Research agent's web
+# search. Optional and additive – the base stack runs without it.
+#
+#   Base stack:  docker compose -f docker-compose.yml -f docker-compose.search.yml up -d
+#   Prod stack:  docker compose -f docker-compose.prod.yml -f docker-compose.search.yml up -d
+#
+# SearXNG stays on the internal compose network (no published port); `web` and
+# `worker` reach it as http://searxng:8080. JSON output is enabled by
+# docker/searxng/settings.yml, which is mounted read-only.
+#
+# Before the first `up`, set a real server.secret_key in that file. The image
+# tag is intentionally unpinned, like the Ollama override.
+
+name: printforge
+
+services:
+    searxng:
+        image: searxng/searxng:latest
+        volumes:
+            - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+        restart: unless-stopped
+
+    web:
+        environment:
+            SEARCH_BACKEND: ${SEARCH_BACKEND:-searxng}
+            SEARXNG_BASE_URL: http://searxng:8080
+
+    worker:
+        environment:
+            SEARCH_BACKEND: ${SEARCH_BACKEND:-searxng}
+            SEARXNG_BASE_URL: http://searxng:8080

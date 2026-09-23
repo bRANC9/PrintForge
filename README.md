@@ -42,6 +42,31 @@ docker compose exec web python manage.py createsuperuser
 
 Web UI: <http://localhost:8080> · API: <http://localhost:8080/api/v1/health/>
 
+### Optional add-ons
+
+All of these are opt-in; the base stack runs without them. Set the matching
+variables from `.env.example`.
+
+- **Self-hosted web search (SearXNG)** — for the Research agent:
+
+  ```bash
+  # set server.secret_key in docker/searxng/settings.yml first
+  docker compose -f docker-compose.yml -f docker-compose.search.yml up -d
+  ```
+
+  The override adds a `searxng` service on the internal network only (no
+  published port) and sets `SEARCH_BACKEND=searxng` /
+  `SEARXNG_BASE_URL=http://searxng:8080` for `web` and `worker`. Swap
+  `docker-compose.yml` for `docker-compose.prod.yml` to use it with the
+  production stack. A bare `docker compose up -d` never starts it.
+- **S3 / MinIO storage** — set `STORAGE_BACKEND=s3` and the `AWS_*` variables
+  (`AWS_STORAGE_BUCKET_NAME`, `AWS_S3_ENDPOINT_URL`, `AWS_S3_REGION_NAME`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`). The default
+  `STORAGE_BACKEND=local` keeps files on disk and is unchanged.
+- **OpenAI-compatible LLM provider** — set `LLM_PROVIDER=openai` plus
+  `OPENAI_BASE_URL` and `OPENAI_API_KEY`. This works for hosted OpenAI or any
+  OpenAI-compatible gateway; Ollama stays the default (`LLM_PROVIDER=ollama`).
+
 ### TrueNAS SCALE 25.10 (Goldeye)
 
 - Native Docker + `docker compose` is available; the GPU can be passed to
