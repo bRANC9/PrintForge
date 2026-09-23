@@ -59,10 +59,18 @@ OPERATION_DIMENSIONS_PROMPT = (
 PRIMITIVE_DIMENSIONS_PROMPT = (
     "Every 'primitives' entry MUST carry the sizes its type needs: 'box' "
     "requires 'width', 'depth' and 'height'; 'cylinder' and 'cone' require "
-    "'diameter' and 'height'; 'sphere' requires 'diameter'. 'position' is the "
+    "'diameter' and 'height'; 'sphere' requires 'diameter'; 'extrude' requires "
+    "'profile' (at least 3 {'x','y'} points in mm forming the 2D outline in the "
+    "XZ plane) and 'height' (the extrusion height), and its optional "
+    "'wall_thickness' makes a hollow wall (e.g. a cookie cutter) while "
+    "'round_radius' rounds the outline. 'position' is the "
     "primitive centre in mm and the part must rest on the build plate "
     "(min Z = 0); always give every listed size as a concrete number and never "
-    "leave a required size missing or null. "
+    "leave a required size missing or null. Example cookie-cutter primitive: "
+    "{'type': 'extrude', 'role': 'add', 'position': {'x': 0, 'y': 0, 'z': 0}, "
+    "'profile': [{'x': -30, 'y': -30}, {'x': 30, 'y': -30}, {'x': 30, 'y': 30}, "
+    "{'x': -30, 'y': 30}], 'height': 25, 'wall_thickness': 1.2} - never leave "
+    "'height' null for an 'extrude' primitive. "
 )
 
 #: Shared instruction teaching the Planner/Editor how to record missing values
@@ -93,7 +101,7 @@ PLANNER_SYSTEM_PROMPT = (
     "looked up first, and a concise lookup query if so. "
     "Describe the real geometry with the specification's 'primitives' list: "
     "build the object from one or more primitives in millimetres, each one a "
-    "'box', 'cylinder', 'sphere' or 'cone' placed by its 'position' - the "
+    "'box', 'cylinder', 'sphere', 'cone' or 'extrude' placed by its 'position' - the "
     "primitive centre in mm - with an optional 'rotation' in degrees. "
     "Use role 'add' for material and role 'subtract' for holes and cutouts. "
     "The part must rest on the build plate (min Z = 0) and use sensible, "

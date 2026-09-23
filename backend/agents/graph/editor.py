@@ -58,7 +58,7 @@ EDITOR_SYSTEM_PROMPT = (
     "ModelSpecification) plus 'needs_research'/'research_query'. "
     "The specification describes real geometry with its 'primitives' list: "
     "one or more primitives in millimetres, each one a 'box', 'cylinder', "
-    "'sphere' or 'cone' placed by its 'position' - the primitive centre in mm - "
+    "'sphere', 'cone' or 'extrude' placed by its 'position' - the primitive centre in mm - "
     "with an optional 'rotation' in degrees. Use role 'add' for material and "
     "role 'subtract' for holes and cutouts; the part must rest on the build "
     "plate (min Z = 0) and use sensible, printable sizes. "

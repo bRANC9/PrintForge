@@ -313,17 +313,21 @@ def skill_constraint_errors(
             elif key == "must_rest_on_plate":
                 if not value or not primitives:
                     continue
-                for index, primitive in enumerate(primitives):
-                    if _text(primitive.get("role") or "add") != "add":
-                        continue
-                    min_z = _primitive_min_z(primitive)
-                    if min_z is None:
-                        continue
-                    if abs(min_z) > PLATE_TOLERANCE_MM:
-                        problems.append(
-                            f"skill:{label}: primitives[{index}] does not rest on the plate "
-                            f"(min Z = {min_z:.2f} mm, expected 0 ± {PLATE_TOLERANCE_MM} mm)"
-                        )
+                mins = [
+                    min_z
+                    for primitive in primitives
+                    if _text(primitive.get("role") or "add") == "add"
+                    for min_z in [_primitive_min_z(primitive)]
+                    if min_z is not None
+                ]
+                if not mins:
+                    continue
+                lowest = min(mins)
+                if abs(lowest) > PLATE_TOLERANCE_MM:
+                    problems.append(
+                        f"skill:{label}: the part does not rest on the plate "
+                        f"(lowest min Z = {lowest:.2f} mm, expected 0 ± {PLATE_TOLERANCE_MM} mm)"
+                    )
             elif key == "require_primitives":
                 if value is True:
                     if not primitives:
