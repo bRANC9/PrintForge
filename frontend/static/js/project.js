@@ -720,8 +720,9 @@
 
             async copyToken(share) {
                 if (!share || !share.token) return;
+                const url = `${window.location.origin}/share/${share.token}/`;
                 try {
-                    await navigator.clipboard.writeText(share.token);
+                    await navigator.clipboard.writeText(url);
                     this.copiedShareId = share.id;
                     window.setTimeout(() => {
                         this.copiedShareId = null;

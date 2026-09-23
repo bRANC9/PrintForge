@@ -407,7 +407,7 @@
                                         class="btn-small"
                                         x-show="share.token"
                                         @click="copyToken(share)"
-                                        x-text="copiedShareId === share.id ? 'Másolva' : 'Token másolása'"></button>
+                                        x-text="copiedShareId === share.id ? 'Másolva' : 'Link másolása'"></button>
                                 <button type="button"
                                         class="btn btn-danger btn-small"
                                         @click="revokeShare(share)"
@@ -415,7 +415,7 @@
                             </li>
                         </template>
                     </ul>
-                    <p class="muted field-hint">A tokenes linkhez jelenleg nincs nyilvános megnyitó útvonal; a tokent kézzel kell megosztani.</p>
+                    <p class="muted field-hint">A „Link másolása" a teljes nyilvános linket másolja a vágólapra; a cím bejelentkezés nélkül megnyitható.</p>
                 </section>
             </div>
         </template>

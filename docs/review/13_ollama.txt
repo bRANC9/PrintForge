@@ -1,0 +1,269 @@
+PrintForge
+Workspaces
+Skillek
+Közösség
+Nyomtatók
+Nyomtatási előzmények
+Beállítások
+Ollama modellek
+Értesítések
+branc9.kb@gmail.com
+Kilépés
+Ollama modellek
+http://host.docker.internal:11434 · verzió 0.34.3
+Beállítások
+Frissítés
+Modell letöltése
+Modell neve
+Letöltés
+Telepített modellek
+13
+NÉV MÉRET MÓDOSÍTVA PARAMÉTEREK MŰVELETEK
+mistral-nemo:12b 6.6 GB 2026. 09. 23. 08:26 llama · 12.2B · Q4_0
+Használat
+Törlés
+qwen2.5-coder:7b aktív 4.4 GB 2026. 09. 23. 08:25 qwen2 · 7.6B · Q4_K_M
+Aktív
+Törlés
+llava:7b 4.4 GB 2026. 09. 22. 16:58 llama · 7B · Q4_0
+Használat
+Törlés
+bge-m3:latest 1.1 GB 2026. 09. 22. 16:58 bert · 566.70M · F16
+Használat
+Törlés
+qwen2.5-coder:1.5b 940.4 MB 2026. 09. 22. 07:29 qwen2 · 1.5B · Q4_K_M
+Használat
+Törlés
+hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ3_XXS 11.7 GB 2026. 09. 17. 08:09 gemma4 · 25.2B · IQ3_XXS
+Használat
+Törlés
+hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ3_XXS 13.1 GB 2026. 09. 17. 08:03 qwen35moe · 34.7B · IQ3_XXS
+Használat
+Törlés
+ornith-1.5:9b 6.1 GB 2026. 09. 15. 16:09 qwen35 · 9.0B · Q4_K_M
+Használat
+Törlés
+granite4.2:8b 5.0 GB 2026. 09. 15. 16:05 granite · 8.8B · Q4_K_M
+Használat
+Törlés
+qwen3.5:9b 6.1 GB 2026. 09. 15. 15:58 qwen35 · 9.7B · Q4_K_M
+Használat
+Törlés
+deepseek-r1:8b 4.9 GB 2026. 09. 15. 15:48 qwen3 · 8.2B · Q4_K_M
+Használat
+Törlés
+gemma4:e4b 8.9 GB 2026. 09. 15. 08:33 gemma4 · 8.0B · Q4_K_M
+Használat
+Törlés
+qwen3:30b 17.3 GB 2026. 09. 15. 00:47 qwen3moe · 30.5B · Q4_K_M
+Használat
+Törlés
+Letöltések
+5
+mistral-nemo:12b
+DONE
+Elrejtés
+100%
+30 B / 486 B
+success
+qwen2.5-coder:7b
+DONE
+Elrejtés
+100%
+11.1 KB / 487 B
+success
+bge-m3
+DONE
+Elrejtés
+100%
+1.1 GB / 337 B
+success
+llava:7b
+DONE
+Elrejtés
+100%
+592.6 MB / 564 B
+success
+qwen2.5-coder:1.5b
+DONE
+Elrejtés
+100%
+939.9 MB / 487 B
+success
+Modell ajánló
+Add meg a GPU VRAM méretét. A becslés a modellsúlyokból, a KV-cache-ből és egy runtime pufferből számol (konzervatív).
+VRAM (GB)
+4 GB
+6 GB
+8 GB
+10 GB
+12 GB
+16 GB
+20 GB
+24 GB
+32 GB
+48 GB
+64 GB
+Kontextus
+                    4k
+8k
+16k
+32k
+                 Kategória
+                    Mind
+Kód
+Chat
+Reasoning
+Vision
+Embedding
+                 MODELL KATEGÓRIA PARAM JAVASOLT KVANTÁLÁS BECSÜLT MEMÓRIA
+mistral-nemo:12b telepítve elfér chat 12B Q4_K_M ~7.9 GB
+Telepítve
+gemma3:12b elfér chatvision 12B Q4_K_M ~7.9 GB
+Letöltés
+llama3.2-vision:11b elfér visionchat 11B Q4_K_M ~7.3 GB
+Letöltés
+llama3.1:8b elfér chat 8B Q6_K ~7.6 GB
+Letöltés
+qwen2.5-coder:7b telepítve elfér codingchat 7B Q6_K ~6.8 GB
+Telepítve
+codellama:7b elfér codingchat 7B Q6_K ~6.8 GB
+Letöltés
+mistral:7b elfér chat 7B Q6_K ~6.8 GB
+Letöltés
+qwen2.5:7b elfér chatcoding 7B Q6_K ~6.8 GB
+Letöltés
+deepseek-r1:7b elfér reasoningchat 7B Q6_K ~6.8 GB
+Letöltés
+llava:7b telepítve elfér visionchat 7B Q6_K ~6.8 GB
+Telepítve
+qwen2.5vl:7b elfér visionchat 7B Q6_K ~6.8 GB
+Letöltés
+gemma3:4b elfér chatvision 4B Q8_0 ~5 GB
+Letöltés
+phi3:mini elfér chat 3.8B Q8_0 ~4.8 GB
+Letöltés
+llama3.2:3b elfér chat 3B F16 ~6.8 GB
+Letöltés
+qwen2.5-coder:1.5b telepítve elfér codingchat 1.5B F16 ~3.7 GB
+Telepítve
+llama3.2:1b elfér chat 1B F16 ~2.7 GB
+Letöltés
+bge-m3 elfér embedding 0.6B F16 ~1.8 GB
+Letöltés
+mxbai-embed-large elfér embedding 0.34B F16 ~1.3 GB
+Letöltés
+nomic-embed-text elfér embedding 0.14B F16 ~0.9 GB
+Letöltés
+all-minilm elfér embedding 0.02B F16 ~0.6 GB
+Letöltés
+bge-m3:latest telepítve elfér installed — F16 ~1.1 GB
+Telepítve
+deepseek-r1:8b telepítve elfér installed — Q4_K_M ~4.9 GB
+Telepítve
+granite4.2:8b telepítve elfér installed — Q4_K_M ~5 GB
+Telepítve
+ornith-1.5:9b telepítve elfér installed — Q4_K_M ~6.1 GB
+Telepítve
+qwen3.5:9b telepítve elfér installed — Q4_K_M ~6.1 GB
+Telepítve
+deepseek-coder-v2:16b elfér codingchat 16B Q2_K ~7 GB
+Letöltés
+qwen2.5-coder:14b elfér codingchat 14B Q3_K_M ~7.3 GB
+Letöltés
+phi4:14b elfér chatreasoning 14B Q3_K_M ~7.3 GB
+Letöltés
+qwen2.5:14b elfér chatcoding 14B Q3_K_M ~7.3 GB
+Letöltés
+deepseek-r1:14b elfér reasoningchat 14B Q3_K_M ~7.3 GB
+Letöltés
+llava:13b elfér visionchat 13B Q4_0 ~7.9 GB
+Letöltés
+gemma4:e4b telepítve nem fér el installed — Q4_K_M ~8.9 GB
+Telepítve
+gemma3:27b nem fér el chatvision 27B Q2_K ~11.4 GB
+Letöltés
+hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ3_XXS telepítve nem fér el installed — IQ3_XXS ~11.7 GB
+Telepítve
+qwen3-coder:30b nem fér el codingchat 30B Q2_K ~12.6 GB
+Letöltés
+hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ3_XXS telepítve nem fér el installed — IQ3_XXS ~13.1 GB
+Telepítve
+qwen2.5-coder:32b nem fér el codingchat 32B Q2_K ~13.4 GB
+Letöltés
+qwen2.5:32b nem fér el chatcoding 32B Q2_K ~13.4 GB
+Letöltés
+deepseek-r1:32b nem fér el reasoningchat 32B Q2_K ~13.4 GB
+Letöltés
+qwen3:30b telepítve nem fér el installed — Q4_K_M ~17.3 GB
+Telepítve
+llama3.1:70b nem fér el chat 70B Q2_K ~28.6 GB
+Letöltés
+Ajánlás VRAM szintek szerint
+4 GB
+gemma3:4b · Q5_K_M · ~3.6 GB
+6 GB
+llama3.1:8b · Q4_K_M · ~5.5 GB
+8 GB
+mistral-nemo:12b · Q4_K_M · ~7.9 GB
+10 GB
+qwen2.5-coder:14b · Q4_K_M · ~9.1 GB
+12 GB
+deepseek-coder-v2:16b · Q4_K_M · ~10.4 GB
+16 GB
+deepseek-coder-v2:16b · Q6_K · ~14.7 GB
+20 GB
+qwen3-coder:30b · Q4_K_M · ~18.9 GB
+24 GB
+qwen2.5-coder:32b · Q4_K_M · ~20.1 GB
+32 GB
+qwen2.5-coder:32b · Q6_K · ~28.8 GB
+48 GB
+llama3.1:70b · Q4_K_M · ~43.3 GB
+64 GB
+llama3.1:70b · Q6_K · ~62.2 GB
+Elérhető modellek
+Külső katalógusok. Az ollama.com a hivatalos (főleg cloud) lista; a Hugging Face GGUF modellek hf.co/<repo> néven húzhatók.
+ollama.com
+Hugging Face
+MODELL MÉRET
+glm-5.3-flash 305.7 GB
+Letöltés
+kimi-k2.7-code 554.3 GB
+Letöltés
+gpt-oss:120b 60.8 GB
+Letöltés
+minimax-m2.7 447.8 GB
+Letöltés
+deepseek-v4.1-flash 453.3 GB
+Letöltés
+glm-5.2 0 B
+Letöltés
+deepseek-v4-flash:0731 155.4 GB
+Letöltés
+mistral-large-3:675b 635.2 GB
+Letöltés
+gemma4:31b 58.3 GB
+Letöltés
+nemotron-3-super 214.7 GB
+Letöltés
+glm-5.3 703.6 GB
+Letöltés
+kimi-k3 1.4 TB
+Letöltés
+minimax-m3 0 B
+Letöltés
+glm-5.1 1.4 TB
+Letöltés
+kimi-k2.6 554.3 GB
+Letöltés
+nemotron-3-nano:30b 30.4 GB
+Letöltés
+gpt-oss:20b 12.8 GB
+Letöltés
+qwen3.5:397b 369.7 GB
+Letöltés
+deepseek-v4-pro:0813 831.4 GB
+Letöltés
+nemotron-3-ultra 0 B
+Letöltés

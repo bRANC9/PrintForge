@@ -4,7 +4,12 @@ from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
-from projects.views import CommunityDetailView, CommunityListView
+from projects.views import (
+    CommunityDetailView,
+    CommunityListView,
+    SharedProjectDownloadView,
+    SharedProjectView,
+)
 from workspaces.views import WorkspaceListView
 
 urlpatterns = [
@@ -15,6 +20,9 @@ urlpatterns = [
     path("workspaces/", include("workspaces.urls")),
     path("community/", CommunityListView.as_view(), name="community-list"),
     path("community/<int:pk>/", CommunityDetailView.as_view(), name="community-detail"),
+    # Public token share links (Phase 7): read-only, no login required.
+    path("share/<str:token>/", SharedProjectView.as_view(), name="share-detail"),
+    path("share/<str:token>/stl/", SharedProjectDownloadView.as_view(), name="share-download"),
     path("projects/", include("projects.urls")),
     # Skill authoring UI (docs/skills.md 6.); the JSON CRUD lives at
     # /api/v1/skills/.

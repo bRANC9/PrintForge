@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="PrintForge">
+  <rect width="64" height="64" rx="12" fill="#101418"/>
+  <g fill="none" stroke="#4c8dff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 40h24v12H20z"/>
+    <path d="M16 40h32V24a4 4 0 0 0-4-4h-4"/>
+    <path d="M16 24a4 4 0 0 1 4-4h6"/>
+    <path d="M30 12v16"/>
+  </g>
+  <path d="M30 8l5 8h-10z" fill="#4c8dff"/>
+</svg>

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} – PrintForge{% endblock %}
+{% block content %}
+    <p class="breadcrumb">
+        <span class="muted">Megosztott modell</span>
+    </p>
+    <header class="page-head">
+        <div>
+            <h1>{{ project.name }}</h1>
+            <p class="badge-row">
+                <span class="badge">Megosztott link</span>
+                {% if license_display %}<span class="badge">{{ license_display }}</span>{% endif %}
+                {% if project.is_public %}<span class="badge is-ok">Nyilvános</span>{% endif %}
+            </p>
+        </div>
+        <div class="page-head-actions">
+            {% if has_stl %}
+                <a class="btn btn-primary" href="{% url 'share-download' token=token %}">STL letöltése</a>
+            {% else %}
+                <span class="muted">Ehhez a projekthez még nincs letölthető STL.</span>
+            {% endif %}
+        </div>
+    </header>
+    <section class="panel">
+        <h2>Leírás</h2>
+        <p>{{ project.description|default:"Nincs leírás." }}</p>
+        <h2>Címkék</h2>
+        <p class="tag-row">
+            {% for name in tag_names %}
+                <span class="badge tag-chip">{{ name }}</span>
+            {% empty %}
+                <span class="muted">Nincs címke.</span>
+            {% endfor %}
+        </p>
+    </section>
+{% endblock %}

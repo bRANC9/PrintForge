@@ -1,0 +1,62 @@
+PrintForge
+Workspaces
+Skillek
+Közösség
+Nyomtatók
+Nyomtatási előzmények
+Beállítások
+Ollama modellek
+Értesítések
+branc9.kb@gmail.com
+Kilépés
+Beállítások
+Runtime beállítások. A mentett értékek felülírják a környezeti változókat, üresen hagyva visszaáll a környezeti érték.
+Ollama modellek
+Kapcsolat teszt
+Mentés
+Utolsó módosítás: 2026. 09. 23. 10:04
+AI
+Ollama base URL
+env
+Ollama modell
+db
+Modellek frissítése
+Vision modell
+db
+Üresen hagyva ugyanaz, mint a fő Ollama modell (a review a fő modellt használja).
+Embedding modell
+db
+RAG engedélyezve
+db
+CAD (OpenSCAD)
+Mód
+db
+                        (nincs felülírás)
+                        local
+                        docker
+                     Timeout (mp)
+env
+Memória limit
+env
+CPU limit
+env
+Slicing
+Mód
+db
+                        (nincs felülírás)
+                        local
+                        docker
+                     Timeout (mp)
+default
+Tárolás
+Storage backend
+env
+                        (nincs felülírás)
+                        local
+                     Csak olvasható
+embedding_dim
+env
+read-only
+Megváltoztatása a pgvector séma és az összes embedding újragenerálását igényli.
+Mentés
+Visszaállítás

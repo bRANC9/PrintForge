@@ -253,6 +253,54 @@ a {
     min-height: 90px;
 }
 
+/* Auth (login) ------------------------------------------------------------ */
+/* ``form.as_p`` emits bare <input> elements (no ``.input`` class), so the
+   login form needs its own styling to match the dark theme. */
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 360px;
+    margin-top: 0.5rem;
+}
+
+.auth-form p {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin: 0;
+}
+
+.auth-form label {
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.auth-form input {
+    width: 100%;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+}
+
+.auth-form .errorlist {
+    margin: 0;
+    padding-left: 1.1rem;
+    color: var(--danger);
+    font-size: 0.85rem;
+}
+
+.btn:focus-visible,
+.input:focus-visible,
+.textarea:focus-visible,
+.auth-form input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
 .prompt-form {
     display: flex;
     flex-direction: column;

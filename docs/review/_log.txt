@@ -1,0 +1,73 @@
+VISIT http://192.168.1.250:42069/login/ -> Belépés – PrintForge
+  JS-ERR http://192.168.1.250:42069/login/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. Se
+  JS-ERR http://192.168.1.250:42069/favicon.ico - Failed to load resource: the server responded with a status of 404 (Not Found)
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\00_login.png
+LOGGED IN -> http://192.168.1.250:42069/
+VISIT http://192.168.1.250:42069/ -> Workspaces – PrintForge
+  JS-ERR http://192.168.1.250:42069/login/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. Se
+  JS-ERR http://192.168.1.250:42069/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. See http
+  JS-ERR http://192.168.1.250:42069/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. See http
+  JS-ERR http://192.168.1.250:42069/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. See http
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\01_home_workspaces.png
+VISIT http://192.168.1.250:42069/skills/ -> Skillek – PrintForge
+  JS-ERR http://192.168.1.250:42069/skills/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. S
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\07_skills.png
+VISIT http://192.168.1.250:42069/community/ -> Közösség – PrintForge
+  JS-ERR http://192.168.1.250:42069/community/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\08_community.png
+VISIT http://192.168.1.250:42069/printers/ -> Nyomtatók – PrintForge
+  JS-ERR http://192.168.1.250:42069/printers/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead.
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\10_printers.png
+VISIT http://192.168.1.250:42069/printers/history/ -> Nyomtatási előzmények – PrintForge
+  JS-ERR http://192.168.1.250:42069/printers/history/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin 
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\11_print_history.png
+VISIT http://192.168.1.250:42069/settings/ -> Beállítások – PrintForge
+  JS-ERR http://192.168.1.250:42069/settings/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead.
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\12_settings.png
+VISIT http://192.168.1.250:42069/settings/ollama/ -> Ollama modellek – PrintForge
+  JS-ERR http://192.168.1.250:42069/settings/ollama/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin i
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\13_ollama.png
+VISIT http://192.168.1.250:42069/ -> Workspaces – PrintForge
+  JS-ERR http://192.168.1.250:42069/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead. See http
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\01_home_workspaces.png
+workspaces: ['http://192.168.1.250:42069/workspaces/1/', 'http://192.168.1.250:42069/workspaces/2/']
+VISIT http://192.168.1.250:42069/workspaces/1/ -> Elemek – PrintForge
+  JS-ERR http://192.168.1.250:42069/workspaces/1/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin inst
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\02_workspace_1.png
+VISIT http://192.168.1.250:42069/projects/1/ -> Projekt – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/1/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instea
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\03_project_1_1.png
+VISIT http://192.168.1.250:42069/projects/1/plates/ -> Nyomtatási lapok – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/1/plates/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\04_project_1_1_plates.png
+VISIT http://192.168.1.250:42069/projects/2/ -> Projekt – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/2/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instea
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\03_project_1_2.png
+VISIT http://192.168.1.250:42069/projects/2/plates/ -> Nyomtatási lapok – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/2/plates/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\04_project_1_2_plates.png
+VISIT http://192.168.1.250:42069/workspaces/2/ -> Elemek – PrintForge
+  JS-ERR http://192.168.1.250:42069/workspaces/2/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin inst
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\02_workspace_2.png
+VISIT http://192.168.1.250:42069/projects/1/ -> Projekt – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/1/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instea
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\03_project_2_1.png
+VISIT http://192.168.1.250:42069/projects/1/plates/ -> Nyomtatási lapok – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/1/plates/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\04_project_2_1_plates.png
+VISIT http://192.168.1.250:42069/projects/2/ -> Projekt – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/2/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instea
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\03_project_2_2.png
+VISIT http://192.168.1.250:42069/projects/2/plates/ -> Nyomtatási lapok – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/2/plates/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\04_project_2_2_plates.png
+VISIT http://192.168.1.250:42069/projects/3/ -> Projekt – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/3/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instea
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\03_project_2_3.png
+VISIT http://192.168.1.250:42069/projects/3/plates/ -> Nyomtatási lapok – PrintForge
+  JS-ERR http://192.168.1.250:42069/projects/3/plates/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\04_project_2_3_plates.png
+VISIT http://192.168.1.250:42069/community/ -> Közösség – PrintForge
+  JS-ERR http://192.168.1.250:42069/community/ 0 The Cross-Origin-Opener-Policy header has been ignored, because the URL's origin was untrustworthy. It was defined either in the final response or a redirect. Please deliver the response using the HTTPS protocol. You can also use the 'localhost' origin instead
+  saved C:\Users\branc\AppData\Local\Temp\opencode\printforge-shots\08_community.png
+community: []

@@ -1,0 +1,17 @@
+PrintForge
+Workspaces
+Skillek
+Közösség
+Nyomtatók
+Nyomtatási előzmények
+Beállítások
+Ollama modellek
+Értesítések
+branc9.kb@gmail.com
+Kilépés
+Nyomtatók
+Regisztrált nyomtatók élő állapota és CFS tálcái (#13).
+Automatikus frissítés
+Frissítés
+Új nyomtató
+Nincs regisztrált nyomtató. Vedd fel az „Új nyomtató" gombbal.
