@@ -78,6 +78,12 @@ PRIMITIVE_DIMENSIONS_PROMPT = (
 #: ``clarifications`` is Planner-only data: it is part of ``PlannerPlan`` and
 #: therefore never reaches the CAD backend (the strict terv.md 8. contract is
 #: unchanged).
+#:
+#: Two short few-shot examples pin the exact JSON shape: small local models
+#: (e.g. qwen2.5-coder:7b, mistral-nemo:12b) otherwise skip ``clarifications``
+#: entirely and silently assume a generic part for an ambiguous request such as
+#: "Keszits egy telefontartot." The examples stay bounded (one entry each) and
+#: keep every existing rule intact.
 CLARIFICATION_PROMPT = (
     "If the user did not give a value that could change the function of the "
     "part, do one of two things: (a) choose a realistic, printable default and "
@@ -89,6 +95,14 @@ CLARIFICATION_PROMPT = (
     "entries; use an empty list when nothing was missing. 'clarifications' is "
     "Planner-only data: never put it inside the specification and never send it "
     "to the CAD backend. "
+    'Example A - ambiguous request with a critical missing dimension ("Make a '
+    'phone stand."): do NOT guess; add one top-level "clarifications" entry: '
+    '{"question": "Which phone model or width in mm should the stand fit?", '
+    '"answer": "", "kind": "needs_user_input", "field": "dimensions"}. '
+    'Example B - a safe missing value ("Make a 120 mm cable clip for a 6 mm '
+    'cable."): assume a printable wall and add one entry: {"question": "No '
+    'wall thickness given; assuming a printable 3 mm wall.", "answer": "3", '
+    '"kind": "assumed", "field": "wall_thickness"}. '
 )
 
 PLANNER_SYSTEM_PROMPT = (

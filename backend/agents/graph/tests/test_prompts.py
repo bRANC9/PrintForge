@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from agents.graph.editor import EDITOR_SYSTEM_PROMPT
-from agents.graph.planner import PLANNER_SYSTEM_PROMPT
+from agents.graph.planner import CLARIFICATION_PROMPT, PLANNER_SYSTEM_PROMPT
 from agents.graph.reviser import REVISER_SYSTEM_PROMPT
 
 PRIMITIVE_TYPES = ("box", "cylinder", "sphere", "cone")
@@ -137,3 +137,50 @@ def test_editor_keeps_base_primitives_and_annotation_anchoring() -> None:
     # Research decision is preserved on the edit path too.
     assert "needs_research" in prompt
     assert "research_query" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Clarification few-shot contract (docs/planner-clarification.md 2.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name, prompt", PROMPTS.items())
+def test_prompt_embeds_the_shared_clarification_contract(name: str, prompt: str) -> None:
+    """The Editor must reuse the Planner's clarification block verbatim.
+
+    A hardcoded copy would drift; asserting the shared constant is a substring
+    keeps the two prompts in lock-step for free.
+    """
+    assert CLARIFICATION_PROMPT in prompt
+
+
+@pytest.mark.parametrize("name, prompt", PROMPTS.items())
+def test_prompt_carries_clarification_few_shot_examples(name: str, prompt: str) -> None:
+    """Weak local models need a concrete JSON example to emit clarifications.
+
+    Without it they silently assume a generic part (e.g. a generic phone for
+    "Keszits egy telefontartot.") instead of asking or recording an assumption.
+    """
+    # Example A: an ambiguous request with a critical missing dimension -> ask.
+    assert "Example A" in prompt
+    assert '"kind": "needs_user_input"' in prompt
+    assert '"answer": ""' in prompt
+    assert '"field": "dimensions"' in prompt
+    # Example B: a safe missing value -> a concrete, printable assumption.
+    assert "Example B" in prompt
+    assert '"kind": "assumed"' in prompt
+    assert '"answer": "3"' in prompt
+    assert '"field": "wall_thickness"' in prompt
+
+
+@pytest.mark.parametrize("name, prompt", PROMPTS.items())
+def test_prompt_still_states_the_clarification_contract(name: str, prompt: str) -> None:
+    """The bounded, Planner-only clarification rules survive the examples."""
+    # The bound and both kinds stay stated.
+    assert "Return at most 8 'clarifications' entries" in prompt
+    assert "'assumed'" in prompt
+    assert "'needs_user_input'" in prompt
+    # It stays Planner-only data and never leaks into the specification.
+    assert "Planner-only data" in prompt
+    assert "never put it inside the specification" in prompt
+    assert "never send it to the CAD backend" in prompt
