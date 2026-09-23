@@ -5,15 +5,20 @@ from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
 from projects.views import CommunityDetailView, CommunityListView
-
-from .views import HomeView
+from workspaces.views import WorkspaceListView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("", HomeView.as_view(), name="home"),
+    # Workspace-first navigation (docs/workspace-navigation.md): the home page
+    # is the workspace list; items live under /workspaces/<id>/.
+    path("", WorkspaceListView.as_view(), name="home"),
+    path("workspaces/", include("workspaces.urls")),
     path("community/", CommunityListView.as_view(), name="community-list"),
     path("community/<int:pk>/", CommunityDetailView.as_view(), name="community-detail"),
     path("projects/", include("projects.urls")),
+    # Skill authoring UI (docs/skills.md 6.); the JSON CRUD lives at
+    # /api/v1/skills/.
+    path("skills/", include("skills.urls")),
     path("printers/", include("printers.urls")),
     path("settings/", include("configuration.urls")),
     path("login/", auth_views.LoginView.as_view(template_name="accounts/login.html"), name="login"),

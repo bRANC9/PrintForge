@@ -16,10 +16,6 @@ from printers.models import Printer
 from slicers.models import FilamentProfile, PrinterProfile
 
 
-class ProjectListView(TemplateView):
-    template_name = "projects/list.html"
-
-
 class ProjectDetailView(TemplateView):
     template_name = "projects/detail.html"
 

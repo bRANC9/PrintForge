@@ -18,6 +18,7 @@ from .views import (
     PrintJobViewSet,
     ProjectViewSet,
     SettingsAPIView,
+    SkillViewSet,
     TagViewSet,
     TestOllamaView,
     WorkspaceViewSet,
@@ -29,6 +30,7 @@ router.register("workspaces", WorkspaceViewSet, basename="workspace")
 router.register("projects", ProjectViewSet, basename="project")
 router.register("community/projects", CommunityProjectViewSet, basename="community-project")
 router.register("tags", TagViewSet, basename="tag")
+router.register("skills", SkillViewSet, basename="skill")
 router.register("build-plates", BuildPlateViewSet, basename="build-plate")
 router.register("versions", ModelVersionViewSet, basename="version")
 router.register("agent-runs", AgentRunViewSet, basename="agent-run")

@@ -7,7 +7,8 @@ may depend on DRF or an HTTP request. Render jobs are *only* enqueued to Celery
 
 from __future__ import annotations
 
-from typing import Any
+import inspect
+from typing import TYPE_CHECKING, Any
 
 from django.db import transaction
 from django.utils import timezone
@@ -16,18 +17,24 @@ from accounts.models import User
 from files.services import get_storage
 from projects.models import Project
 
-from .models import ModelVersion
+from .models import ModelVersion, ModelVersionOrigin
 from .tasks import render_model_stl
+
+if TYPE_CHECKING:  # pragma: no cover - import only for type hints
+    from agents.models import AgentRun
 
 __all__ = [
     "ARTIFACT_CONTENT_TYPES",
     "ARTIFACT_KINDS",
+    "ClarificationError",
     "RenderEnqueueError",
+    "answer_clarifications",
     "artifact_path",
     "create_annotation_edit",
     "create_next_version",
     "latest_version",
     "read_artifact",
+    "regenerate_version",
     "start_render",
     "version_status",
     "versions_accessible_to",
@@ -52,6 +59,17 @@ class RenderEnqueueError(RuntimeError):
     """
 
 
+class ClarificationError(RuntimeError):
+    """A clarification run cannot be answered.
+
+    Raised when the target :class:`~agents.models.AgentRun` is not actually
+    waiting for user input (no ``status == "clarification"`` / no persisted
+    ``clarifications``) or the supplied answers cannot form a usable follow-up
+    prompt. The API maps it to ``409 Conflict`` (docs/planner-clarification.md
+    4-5.).
+    """
+
+
 @transaction.atomic
 def create_next_version(
     *,
@@ -61,12 +79,19 @@ def create_next_version(
     specification: dict | None = None,
     reference_note: str = "",
     reference_image=None,
+    parent_version: ModelVersion | None = None,
+    origin: str = ModelVersionOrigin.GENERATE,
 ) -> ModelVersion:
     """Create the next version for a project (v1, v2, ...).
 
     ``reference_note``/``reference_image`` are the optional reference photo and
     note attached to the prompt (terv.md 27. fejezet); both are stored on the
     version so the generation stays reproducible.
+
+    ``parent_version``/``origin`` record the provenance of a *derived* version
+    (regeneration or manual specification, docs/version-history-controls.md):
+    the source version and how this one came to be. A fresh generation leaves
+    ``parent_version`` empty and ``origin`` at ``"generate"``.
     """
     last = project.versions.order_by("-version").first()
     next_version = (last.version + 1) if last else 1
@@ -78,6 +103,8 @@ def create_next_version(
         created_by=created_by,
         reference_note=reference_note or "",
         reference_image=reference_image,
+        parent_version=parent_version,
+        origin=origin,
     )
 
 
@@ -116,6 +143,212 @@ def create_annotation_edit(
             "The edit queue is unavailable, the model could not be queued. Please try again later."
         )
         raise RenderEnqueueError(message) from exc
+
+
+def _agent_workflow_accepts_regenerate() -> bool:
+    """Whether ``agents.tasks.run_agent_workflow`` declares a ``regenerate`` kwarg.
+
+    The ``regenerate=True`` parameter is being added by the held
+    agent-orchestrator workstream (docs/version-history-controls.md 2.). Until it
+    lands, passing the kwarg would raise ``TypeError`` *inside the worker* (the
+    ``.delay()`` call itself only serialises), so the capability is probed from
+    the task's underlying ``run`` function instead of blindly forwarded.
+
+    ``run_agent_workflow`` is a Celery ``Task`` instance, whose ``__call__`` is
+    ``(*args, **kwargs)``; inspecting ``.run`` reaches the real signature.
+    """
+    from agents.tasks import run_agent_workflow
+
+    target = getattr(run_agent_workflow, "run", run_agent_workflow)
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables only
+        return False
+    if "regenerate" in parameters:
+        return True
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def regenerate_version(
+    *,
+    base_version: ModelVersion,
+    prompt: str | None = None,
+    specification: dict | None = None,
+    created_by: User | None = None,
+) -> None:
+    """Regenerate (or edit) ``base_version`` into a new, derived version.
+
+    Two paths (docs/version-history-controls.md 2.):
+
+    * ``specification is None`` -- enqueue the agent workflow with the base
+      prompt (or the caller's edited ``prompt``) and ``base_version_id``. The
+      task creates the derived version itself and records
+      ``parent_version=base_version`` / ``origin="regenerate"``, so no
+      placeholder row is created here.
+    * ``specification`` given -- render that specification directly as a
+      ``manual`` derived version, reusing the manual render path
+      (:func:`create_next_version` + :func:`start_render`).
+
+    Raises :class:`RenderEnqueueError` when the Celery broker is unavailable so
+    the API can translate it into a retryable ``503``.
+    """
+    effective_prompt = prompt or base_version.prompt
+
+    if specification is not None:
+        version = create_next_version(
+            project=base_version.project,
+            prompt=effective_prompt,
+            specification=specification,
+            created_by=created_by,
+            parent_version=base_version,
+            origin=ModelVersionOrigin.MANUAL,
+        )
+        start_render(version)
+        return
+
+    # Imported lazily: ``agents.tasks`` imports ``designs.services`` at module
+    # load time, so a top-level import would create an import cycle.
+    from agents.tasks import run_agent_workflow
+
+    kwargs: dict[str, Any] = {
+        "project_id": base_version.project_id,
+        "prompt": effective_prompt,
+        "user_id": created_by.pk if created_by else None,
+        "base_version_id": base_version.pk,
+    }
+    if _agent_workflow_accepts_regenerate():
+        kwargs["regenerate"] = True
+    # TODO(agent-orchestrator): drop the capability probe once
+    # ``run_agent_workflow`` declares ``regenerate``. Until then the task
+    # derives the same provenance from ``base_version_id`` + empty annotations.
+    try:
+        run_agent_workflow.delay(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways
+        message = (
+            "The regeneration queue is unavailable, the model could not be queued. "
+            "Please try again later."
+        )
+        raise RenderEnqueueError(message) from exc
+
+
+#: Hard bound on how many clarification answers are folded into the follow-up
+#: prompt; extra entries are dropped deterministically (docs/planner-clarification.md 4.).
+_MAX_CLARIFICATION_ANSWERS = 16
+#: Length caps mirroring ``agents.spec`` so the augmented prompt stays bounded.
+_MAX_CLARIFICATION_ANSWER_CHARS = 600
+_MAX_CLARIFICATION_FIELD_CHARS = 120
+_MAX_CLARIFICATION_QUESTION_CHARS = 300
+#: Cap on the original prompt copied into the follow-up run.
+_MAX_CLARIFICATION_PROMPT_CHARS = 8000
+
+#: Heading of the deterministic answer block appended to the original prompt.
+_CLARIFICATION_ANSWERS_HEADING = "Felhasználói válaszok:"
+
+
+def _clarification_answer_block(
+    answers: list[dict[str, Any]],
+    clarifications: list[dict[str, Any]],
+) -> str:
+    """Build the bounded, deterministic „Felhasználói válaszok” block.
+
+    Each answer is paired with the question the Planner asked for the same
+    ``field`` (when it is known), so the follow-up run sees *what* was answered,
+    not just the raw value. Order follows the request payload; every string is
+    length-bounded and the block is capped at
+    :data:`_MAX_CLARIFICATION_ANSWERS` entries. Returns ``""`` when no usable
+    answer remains (the caller turns that into :class:`ClarificationError`).
+    """
+    questions: dict[str, str] = {}
+    for item in clarifications:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or "").strip()
+        if field:
+            questions[field] = str(item.get("question") or "").strip()
+
+    lines: list[str] = []
+    for index, item in enumerate(list(answers or [])[:_MAX_CLARIFICATION_ANSWERS], start=1):
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or "").strip()[:_MAX_CLARIFICATION_FIELD_CHARS]
+        answer = str(item.get("answer") or "").strip()[:_MAX_CLARIFICATION_ANSWER_CHARS]
+        if not answer:
+            continue
+        question = questions.get(field, "")[:_MAX_CLARIFICATION_QUESTION_CHARS]
+        label = question or field or f"kerdes {index}"
+        lines.append(f"- {label}: {answer}")
+    if not lines:
+        return ""
+    return "\n".join([_CLARIFICATION_ANSWERS_HEADING, *lines])
+
+
+def _build_clarification_prompt(
+    original_prompt: str,
+    answers: list[dict[str, Any]],
+    clarifications: list[dict[str, Any]],
+) -> str:
+    """Return the original prompt with the answers block appended.
+
+    Raises :class:`ClarificationError` when the answers contain no usable reply
+    (all blank / non-dict), so the caller never enqueues an answer-less run.
+    """
+    base = str(original_prompt or "").strip()[:_MAX_CLARIFICATION_PROMPT_CHARS]
+    block = _clarification_answer_block(answers, clarifications)
+    if not block:
+        raise ClarificationError("The answers did not contain any usable reply.")
+    return f"{base}\n\n{block}" if base else block
+
+
+def answer_clarifications(
+    *,
+    run: AgentRun,
+    answers: list[dict[str, Any]],
+    created_by: User | None = None,
+) -> dict[str, Any]:
+    """Start a follow-up run from the user's answers to a stopped Planner run.
+
+    The Planner run that stopped with ``status == "clarification"`` is
+    immutable (docs/planner-clarification.md 3-4.): answering it enqueues a
+    **new** agent run whose prompt is the original prompt augmented with a
+    deterministic, bounded „Felhasználói válaszok” block, and forces
+    ``clarify_policy="assume"`` so the follow-up actually generates a model.
+    The original ``clarifications``/``assumptions`` live in
+    ``run.state_json`` (see ``agents.tasks._summarise_state``).
+
+    Returns ``{"queued": True, "parent_run": run.pk}``.
+
+    Raises :class:`ClarificationError` when the run has no pending questions (or
+    the answers are unusable) and :class:`RenderEnqueueError` when the Celery
+    broker is unavailable, so the API can answer ``409`` / ``503`` respectively.
+    """
+    state = dict(run.state_json or {})
+    clarifications = list(state.get("clarifications") or [])
+    if state.get("status") != "clarification" or not clarifications:
+        raise ClarificationError("This run is not waiting for clarification answers.")
+
+    # The prompt is stored on the run row; ``state_json`` may also carry it, so
+    # prefer the explicit state value and fall back to the model field.
+    original_prompt = str(state.get("prompt") or run.user_prompt or "")
+    prompt = _build_clarification_prompt(original_prompt, list(answers or []), clarifications)
+
+    # Imported lazily: ``agents.tasks`` imports ``designs.services`` at module
+    # load time, so a top-level import would create an import cycle.
+    from agents.tasks import run_agent_workflow
+
+    try:
+        run_agent_workflow.delay(
+            project_id=run.project_id,
+            prompt=prompt,
+            user_id=created_by.pk if created_by else None,
+            clarify_policy="assume",
+        )
+    except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways
+        message = (
+            "The clarification queue is unavailable, the follow-up model could not be "
+            "queued. Please try again later."
+        )
+        raise RenderEnqueueError(message) from exc
+    return {"queued": True, "parent_run": run.pk}
 
 
 def latest_version(project: Project) -> ModelVersion | None:

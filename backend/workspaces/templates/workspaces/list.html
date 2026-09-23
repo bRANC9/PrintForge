@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}PrintForge – Workspaces{% endblock %}
+{% block content %}
+    <h1>Workspaces</h1>
+    <p>Válassz workspace-t, és kezdj el elemeket készíteni.</p>
+    <div id="workspace-list" data-api-url="{% url 'workspace-list' %}">
+        <p class="muted">Betöltés…</p>
+    </div>
+{% endblock %}

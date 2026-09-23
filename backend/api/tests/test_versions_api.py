@@ -116,6 +116,9 @@ def test_prompt_only_version_enqueues_the_agent(client, project, user, no_broker
             {
                 "reference_image_name": "",
                 "reference_note": "",
+                "skill_ids": [],
+                "auto_skill_selection": False,
+                "clarify_policy": "assume",
             },
         )
     ]

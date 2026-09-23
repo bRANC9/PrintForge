@@ -58,6 +58,7 @@ __all__ = [
     "revoke_share",
     "search_public_projects",
     "set_project_description",
+    "set_project_skills",
     "set_project_tags",
     "unpublish_project",
     "unrate_project",
@@ -151,7 +152,7 @@ def search_public_projects(
     """
     queryset = (
         Project.objects.filter(is_public=True)
-        .prefetch_related("tags")
+        .prefetch_related("tags", "skills")
         .annotate(
             average_rating=Avg("ratings__score"),
             rating_count=Count("ratings", distinct=True),
@@ -277,6 +278,18 @@ def set_project_tags(project: Project, names: Iterable[str]) -> list[Tag]:
         project.tags_source = ContentSource.MANUAL
         project.save(update_fields=["tags_source", "updated_at"])
     return list(project.tags.all())
+
+
+def set_project_skills(project: Project, skills: Iterable[Any] | None) -> list[Any]:
+    """Replace the project's skills with ``skills`` (docs/skills.md 2.).
+
+    ``skills`` is an iterable of :class:`~skills.models.Skill` instances (what
+    the API serializer yields) or primary keys. The caller is responsible for
+    scoping the selection to skills it may see; the API serializer already
+    validates against :func:`skills.services.skills_visible_to`.
+    """
+    project.skills.set(list(skills or []))
+    return list(project.skills.all())
 
 
 def set_project_description(project: Project, description: str) -> Project:

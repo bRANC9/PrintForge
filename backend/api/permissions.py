@@ -177,6 +177,22 @@ class WorkspaceScopePermission(permissions.BasePermission):
         return None
 
 
+class BuiltinReadOnly(permissions.BasePermission):
+    """Deny writes to built-in (seeded) rows; reads stay open.
+
+    Used for the skills API: built-in seed skills are global and ADMIN-managed
+    (docs/skills.md 6.), so they must never be edited or deleted through the
+    ordinary CRUD endpoints.
+    """
+
+    message = "Built-in skills are read-only."
+
+    def has_object_permission(self, request, view, obj) -> bool:
+        if request.method in SAFE_METHODS:
+            return True
+        return not getattr(obj, "is_builtin", False)
+
+
 class IsStaff(permissions.BasePermission):
     """Allow only authenticated staff users.
 

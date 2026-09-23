@@ -10,6 +10,7 @@ Object-level roles are enforced by :class:`api.permissions.WorkspaceScopePermiss
 """
 
 import hashlib
+import inspect
 import uuid
 from http import HTTPStatus
 
@@ -47,10 +48,13 @@ from configuration.services import (
 from designs.models import ModelVersion
 from designs.services import (
     ARTIFACT_CONTENT_TYPES,
+    ClarificationError,
     RenderEnqueueError,
+    answer_clarifications,
     create_annotation_edit,
     create_next_version,
     read_artifact,
+    regenerate_version,
     start_render,
     version_status,
     versions_accessible_to,
@@ -94,19 +98,27 @@ from projects.services import (
     remove_plate_item,
     search_public_projects,
     set_project_description,
+    set_project_skills,
     set_project_tags,
     unpublish_project,
     unrate_project,
 )
 from projects.services import revoke_share as revoke_project_share
+from skills.services import (
+    create_skill,
+    delete_skill,
+    skills_visible_to,
+    update_skill,
+)
 from workspaces.models import Workspace, WorkspaceRole
 from workspaces.services import create_workspace, workspaces_for_user
 
-from .permissions import IsStaff, WorkspaceScopePermission
+from .permissions import BuiltinReadOnly, IsStaff, WorkspaceScopePermission
 from .serializers import (
     AgentRunSerializer,
     AnnotationEditSerializer,
     BuildPlateSerializer,
+    ClarificationAnswersSerializer,
     CommunityProjectSerializer,
     ModelVersionSerializer,
     NotificationSerializer,
@@ -123,8 +135,10 @@ from .serializers import (
     ProjectShareSerializer,
     RatingWriteSerializer,
     SettingsUpdateSerializer,
+    SkillSerializer,
     TagSerializer,
     VersionCreateSerializer,
+    VersionRegenerateSerializer,
     WorkspaceSerializer,
 )
 
@@ -164,6 +178,56 @@ def _visitor_id(request) -> str:
     if not value or len(value) > _VISITOR_ID_MAX_LENGTH:
         return ""
     return value
+
+
+def _agent_workflow_declares(name: str) -> bool:
+    """Whether ``agents.tasks.run_agent_workflow`` declares parameter ``name``.
+
+    A Celery ``Task``'s ``__call__`` is ``(*args, **kwargs)``, so the real
+    signature is read from the task's underlying ``run`` function. A parameter is
+    considered supported when it is declared or the task accepts ``**kwargs``.
+    Forwarding an unsupported kwarg would not fail at ``.delay()`` (it only
+    serialises) but later, inside the worker, with a ``TypeError`` -- hence the
+    probe.
+    """
+    from agents.tasks import run_agent_workflow
+
+    target = getattr(run_agent_workflow, "run", run_agent_workflow)
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables only
+        return False
+    if name in parameters:
+        return True
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def _agent_workflow_skill_kwargs(data) -> dict:
+    """Skill kwargs ``agents.tasks.run_agent_workflow`` actually declares.
+
+    ``skill_ids`` / ``auto_skill_selection`` are forwarded only when the task
+    declares them (or accepts ``**kwargs``); see
+    :func:`_agent_workflow_declares`.
+    """
+    kwargs: dict = {}
+    if _agent_workflow_declares("skill_ids"):
+        kwargs["skill_ids"] = list(data.get("skill_ids") or [])
+    if _agent_workflow_declares("auto_skill_selection"):
+        kwargs["auto_skill_selection"] = bool(data.get("auto_skill_selection", False))
+    return kwargs
+
+
+def _agent_workflow_clarify_kwargs(data) -> dict:
+    """``clarify_policy`` kwarg, forwarded only when the task declares it.
+
+    ``clarify`` (``"ask"`` / ``"assume"``) is the user's per-run clarification
+    policy (docs/planner-clarification.md 5.). The kwarg now exists on
+    ``run_agent_workflow``; the probe keeps this safe against a task that has not
+    been updated yet (a legacy task simply falls back to its own default).
+    """
+    if not _agent_workflow_declares("clarify_policy"):
+        return {}
+    return {"clarify_policy": data.get("clarify", "assume")}
 
 
 def _store_reference_upload(project, uploaded) -> str:
@@ -210,12 +274,22 @@ class ProjectViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not user.is_authenticated:
             return Project.objects.none()
-        return (
+        queryset = (
             Project.objects.filter(workspace__members__user=user)
             .select_related("workspace", "created_by")
-            .prefetch_related("tags")
+            .prefetch_related("tags", "skills")
             .distinct()
         )
+        # Workspace-first navigation (docs/workspace-navigation.md 3.): the
+        # membership scope is always applied first, then narrowed by workspace.
+        workspace_id = self.request.query_params.get("workspace")
+        if workspace_id:
+            try:
+                workspace_id = int(workspace_id)
+            except (TypeError, ValueError):
+                return Project.objects.none()
+            queryset = queryset.filter(workspace_id=workspace_id)
+        return queryset
 
     def perform_create(self, serializer):
         data = serializer.validated_data
@@ -230,6 +304,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
             project.save(update_fields=["license", "updated_at"])
         if "tags" in data:
             set_project_tags(project, data["tags"])
+        if data.get("skills"):
+            set_project_skills(project, data["skills"])
         serializer.instance = project
 
     def perform_update(self, serializer):
@@ -237,13 +313,18 @@ class ProjectViewSet(viewsets.ModelViewSet):
         # applied through the service layer (never by DRF's default ``tags.set()``,
         # which would expect primary keys, or a bare field write, which would
         # leave ``description_source`` stale and let the AI overwrite user text).
+        # Skills are persisted through the service too, keeping the M2M write in
+        # one place for the API and the MCP tools.
         tags = serializer.validated_data.pop("tags", None)
         description = serializer.validated_data.pop("description", None)
+        skills = serializer.validated_data.pop("skills", None)
         instance = serializer.save()
         if description is not None:
             set_project_description(instance, description)
         if tags is not None:
             set_project_tags(instance, tags)
+        if skills is not None:
+            set_project_skills(instance, skills)
 
     @action(detail=True, methods=["get", "post"], url_path="versions")
     def versions(self, request, pk=None):
@@ -292,13 +373,21 @@ class ProjectViewSet(viewsets.ModelViewSet):
         reference_image_name = ""
         if reference_image is not None:
             reference_image_name = _store_reference_upload(project, reference_image)
+        kwargs = {
+            "reference_image_name": reference_image_name,
+            "reference_note": data.get("reference_note", ""),
+        }
+        # Per-run skill selection (docs/skills.md 3.), forwarded only once the
+        # agent workflow declares the kwargs (see _agent_workflow_skill_kwargs).
+        kwargs.update(_agent_workflow_skill_kwargs(data))
+        # Per-run clarification policy (docs/planner-clarification.md 5.).
+        kwargs.update(_agent_workflow_clarify_kwargs(data))
         try:
             run_agent_workflow.delay(
                 project.pk,
                 data.get("prompt", ""),
                 request.user.pk,
-                reference_image_name=reference_image_name,
-                reference_note=data.get("reference_note", ""),
+                **kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways
             return Response(
@@ -433,6 +522,44 @@ class TagViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Tag.objects.all()
 
 
+class SkillViewSet(viewsets.ModelViewSet):
+    """Skill CRUD (docs/skills.md 6.).
+
+    Visible skills are the caller's workspace skills plus the global built-ins
+    and public skills. Built-ins are read-only (:class:`api.permissions.BuiltinReadOnly`);
+    creating a skill inside a workspace requires MEMBER there, enforced from the
+    payload by :class:`api.permissions.WorkspaceScopePermission`.
+    """
+
+    serializer_class = SkillSerializer
+    permission_classes = [WorkspaceScopePermission, BuiltinReadOnly]
+
+    def get_queryset(self):
+        params = self.request.query_params
+        return skills_visible_to(
+            self.request.user,
+            kind=params.get("kind", ""),
+            q=params.get("q", ""),
+        )
+
+    def perform_create(self, serializer):
+        data = dict(serializer.validated_data)
+        tags = data.pop("tags", None)
+        serializer.instance = create_skill(
+            **data,
+            created_by=self.request.user,
+            tags=tags,
+        )
+
+    def perform_update(self, serializer):
+        data = dict(serializer.validated_data)
+        tags = data.pop("tags", None)
+        serializer.instance = update_skill(serializer.instance, tags=tags, **data)
+
+    def perform_destroy(self, instance):
+        delete_skill(instance)
+
+
 class CommunityProjectViewSet(viewsets.ReadOnlyModelViewSet):
     """Public community library: list/retrieve only, readable anonymously.
 
@@ -557,6 +684,34 @@ class ModelVersionViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             status=HTTPStatus.ACCEPTED,
         )
 
+    @action(detail=True, methods=["post"], url_path="regenerate")
+    def regenerate(self, request, pk=None):
+        """Regenerate (or manually edit) this version into a derived one (MEMBER+).
+
+        ``specification_json`` renders directly; otherwise the agent workflow is
+        enqueued with ``base_version_id`` and the UI polls the project's version
+        list for the version whose ``parent_version`` is this one
+        (docs/version-history-controls.md 3.).
+        """
+        version = self.get_object()
+        payload = VersionRegenerateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        try:
+            regenerate_version(
+                base_version=version,
+                prompt=data.get("prompt") or None,
+                specification=data.get("specification_json"),
+                created_by=request.user,
+            )
+        except RenderEnqueueError as exc:
+            # Broker down: 503 (retryable) instead of a 500.
+            return Response({"detail": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+        return Response(
+            {"queued": True, "parent_version": version.pk},
+            status=HTTPStatus.ACCEPTED,
+        )
+
     @action(detail=True, methods=["get"], url_path=r"artifact/(?P<kind>[^/.]+)")
     def artifact(self, request, pk=None, kind=None):
         version = self.get_object()
@@ -585,6 +740,31 @@ class AgentRunViewSet(viewsets.ReadOnlyModelViewSet):
         if not user.is_authenticated:
             return AgentRun.objects.none()
         return runs_accessible_to(user).select_related("project")
+
+    @action(detail=True, methods=["post"], url_path="clarifications")
+    def clarifications(self, request, pk=None):
+        """Answer a Planner run that stopped for clarification (MEMBER+).
+
+        The stopped run is immutable: the answers are folded into a deterministic
+        prompt block and a **new** run is enqueued (docs/planner-clarification.md
+        3-5.). ``409`` when the run is not waiting for answers, ``503`` when the
+        Celery broker is unavailable.
+        """
+        run = self.get_object()
+        payload = ClarificationAnswersSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            result = answer_clarifications(
+                run=run,
+                answers=payload.validated_data["answers"],
+                created_by=request.user,
+            )
+        except ClarificationError as exc:
+            return Response({"detail": str(exc)}, status=HTTPStatus.CONFLICT)
+        except RenderEnqueueError as exc:
+            # Broker down: 503 (retryable) instead of a 500.
+            return Response({"detail": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+        return Response(result, status=HTTPStatus.ACCEPTED)
 
 
 class PrintJobViewSet(
@@ -785,11 +965,47 @@ class NotificationViewSet(
         return Response({"updated": updated, "unread": unread_count(request.user)})
 
 
+#: Sentinel returned instead of a secret setting's real value.
+MASKED_SETTING_VALUE = "***"
+#: Runtime settings whose value must never be echoed back in cleartext.
+#: ``configuration.models.AppSettings`` has no dedicated secret field, so the
+#: API owns the (name-based) classification until one lands.
+_SECRET_SETTING_NAMES = frozenset({"openai_api_key"})
+_SECRET_SETTING_SUFFIXES = ("_api_key", "_secret", "_token", "_password")
+
+
+def _is_secret_setting(name: str) -> bool:
+    """Whether the runtime setting ``name`` holds a credential."""
+    return name in _SECRET_SETTING_NAMES or name.endswith(_SECRET_SETTING_SUFFIXES)
+
+
+def _mask_secret_settings(payload: dict) -> dict:
+    """Replace secret values in an ``effective_settings`` payload with ``***``.
+
+    Only ``effective`` and ``overrides`` carry values. ``effective`` keeps the
+    empty string for an unset secret so the UI can still show "not configured";
+    ``overrides`` is masked whenever a DB override exists (never revealing
+    whether it differs from the env/default value). ``sources`` is left intact.
+    """
+    for name in list(payload.get("effective", {})):
+        if not _is_secret_setting(name):
+            continue
+        if payload["effective"].get(name):
+            payload["effective"][name] = MASKED_SETTING_VALUE
+        else:
+            payload["effective"][name] = ""
+        if payload.get("overrides", {}).get(name) is not None:
+            payload["overrides"][name] = MASKED_SETTING_VALUE
+    return payload
+
+
 def _settings_payload() -> dict:
     """Shared response shape for ``GET``/``PATCH /api/v1/settings/``.
 
     ``effective_settings()`` plus the read-only ``embedding_dim`` (baked into
     the pgvector column, so never editable at runtime) and ``updated_at``.
+    Secret values are masked (:func:`_mask_secret_settings`) before the payload
+    leaves the API.
     """
     payload = effective_settings()
     payload["effective"]["embedding_dim"] = settings.EMBEDDING_DIM
@@ -798,7 +1014,7 @@ def _settings_payload() -> dict:
     payload["read_only"] = ["embedding_dim"]
     obj = get_settings()
     payload["updated_at"] = obj.updated_at.isoformat() if obj.updated_at else None
-    return payload
+    return _mask_secret_settings(payload)
 
 
 class SettingsAPIView(APIView):
@@ -812,8 +1028,14 @@ class SettingsAPIView(APIView):
     def patch(self, request):
         serializer = SettingsUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        # A masked secret echoed back by the UI ("***") must not overwrite the
+        # stored credential; a real value (or "" to clear it) still goes through.
+        for name in list(data):
+            if _is_secret_setting(name) and data[name] == MASKED_SETTING_VALUE:
+                data.pop(name)
         try:
-            update_settings(user=request.user, **serializer.validated_data)
+            update_settings(user=request.user, **data)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         return Response(_settings_payload())

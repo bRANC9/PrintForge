@@ -170,7 +170,13 @@ def test_member_can_create_projects_and_versions(workspace, monkeypatch):
 
     ((args, kwargs),) = enqueued
     assert args == (created.json()["id"], "make it", member.pk)
-    assert kwargs == {"reference_image_name": "", "reference_note": ""}
+    assert kwargs == {
+        "reference_image_name": "",
+        "reference_note": "",
+        "skill_ids": [],
+        "auto_skill_selection": False,
+        "clarify_policy": "assume",
+    }
 
 
 def test_only_admin_can_update_a_workspace(workspace):

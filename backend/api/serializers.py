@@ -10,6 +10,8 @@ from designs.models import ModelVersion
 from notifications.models import Notification
 from printers.models import Printer, PrintJob, PrintJobStatus
 from projects.models import Project, ProjectShare, Rating, Tag
+from skills.models import Skill, SkillKind
+from skills.services import skills_visible_to
 from slicers.models import (
     BuildPlate,
     FilamentProfile,
@@ -63,6 +65,13 @@ class TagNameListField(serializers.Field):
 
 class ProjectSerializer(serializers.ModelSerializer):
     tags = TagNameListField(required=False)
+    # Persistent skill assignment (docs/skills.md 2.). The queryset is scoped to
+    # the caller's visible skills per request in ``get_fields`` below.
+    skills = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Skill.objects.all(),
+        required=False,
+    )
 
     class Meta:
         model = Project
@@ -74,6 +83,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             "is_public",
             "license",
             "tags",
+            "skills",
             "download_count",
             "print_count",
             "description_source",
@@ -92,6 +102,27 @@ class ProjectSerializer(serializers.ModelSerializer):
             "description_source",
             "tags_source",
         ]
+
+    def get_fields(self):
+        """Scope the writable ``skills`` picker to what the caller can see.
+
+        ``PrimaryKeyRelatedField`` validates against a fixed queryset, so the
+        declared all-skills queryset would let a caller attach a private skill
+        from a workspace they are not a member of. The field is therefore
+        rebuilt per request from
+        :func:`skills.services.skills_visible_to` (built-ins + public + the
+        caller's workspace skills).
+        """
+        fields = super().get_fields()
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request is not None else None
+        if user is not None and getattr(user, "is_authenticated", False):
+            fields["skills"] = serializers.PrimaryKeyRelatedField(
+                many=True,
+                queryset=skills_visible_to(user),
+                required=False,
+            )
+        return fields
 
 
 class CommunityProjectSerializer(ProjectSerializer):
@@ -117,6 +148,55 @@ class TagSerializer(serializers.ModelSerializer):
         model = Tag
         fields = ["id", "name", "slug", "created_at"]
         read_only_fields = fields
+
+
+class SkillSerializer(serializers.ModelSerializer):
+    """Skill CRUD projection (docs/skills.md 6.).
+
+    ``tags`` uses the same name-based M2M field as projects; the view hands the
+    names to ``skills.services`` (never a raw ``tags.set()``). ``slug`` is
+    derived by the model and ``is_builtin`` / ``created_by`` are server-owned.
+    """
+
+    tags = TagNameListField(required=False)
+    kind_display = serializers.CharField(source="get_kind_display", read_only=True)
+
+    class Meta:
+        model = Skill
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "description",
+            "kind",
+            "kind_display",
+            "template_key",
+            "object_kind",
+            "guidance",
+            "defaults_json",
+            "constraints_json",
+            "tags",
+            "workspace",
+            "is_builtin",
+            "is_public",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "slug",
+            "kind_display",
+            "is_builtin",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate_kind(self, value):
+        if value not in SkillKind.values:
+            raise serializers.ValidationError("Unknown skill kind.")
+        return value
 
 
 class PrinterSerializer(serializers.ModelSerializer):
@@ -202,6 +282,11 @@ class ModelVersionSerializer(serializers.ModelSerializer):
     """Read-only representation of a :class:`designs.ModelVersion`."""
 
     status = serializers.SerializerMethodField()
+    # Planner provenance (docs/planner-clarification.md 4-5.): the assumptions a
+    # run made on the user's behalf and whether the result needs review. Both
+    # live in ``validation_json``, so they are exposed read-only.
+    assumptions = serializers.SerializerMethodField()
+    review_required = serializers.SerializerMethodField()
     # The edit-chain parent is exposed as the raw id (docs/visual-editing.md
     # 3.4); the FK relation itself is never writable through the API.
     parent_version = serializers.IntegerField(
@@ -217,7 +302,10 @@ class ModelVersionSerializer(serializers.ModelSerializer):
             "prompt",
             "specification_json",
             "validation_json",
+            "assumptions",
+            "review_required",
             "parent_version",
+            "origin",
             "annotations_json",
             "scad_file",
             "stl_file",
@@ -236,7 +324,10 @@ class ModelVersionSerializer(serializers.ModelSerializer):
             "prompt",
             "specification_json",
             "validation_json",
+            "assumptions",
+            "review_required",
             "parent_version",
+            "origin",
             "annotations_json",
             "scad_file",
             "stl_file",
@@ -251,6 +342,12 @@ class ModelVersionSerializer(serializers.ModelSerializer):
 
     def get_status(self, obj: ModelVersion) -> str:
         return (obj.validation_json or {}).get("status") or "pending"
+
+    def get_assumptions(self, obj: ModelVersion) -> list:
+        return list((obj.validation_json or {}).get("assumptions") or [])
+
+    def get_review_required(self, obj: ModelVersion) -> bool:
+        return bool((obj.validation_json or {}).get("review_required", False))
 
 
 class AnnotationSerializer(serializers.Serializer):
@@ -294,15 +391,88 @@ class VersionCreateSerializer(serializers.Serializer):
 
     Accepts JSON or multipart (for the optional ``reference_image`` upload,
     terv.md 27. fejezet).
+
+    ``skill_ids`` / ``auto_skill_selection`` are the per-run skill choice
+    (docs/skills.md 3.): a manual id list wins, otherwise auto-selection picks
+    the skills from the prompt. Both are optional and only forwarded to the
+    agent workflow when it declares them (see ``api.views``).
+
+    ``clarify`` selects the Planner's clarification policy
+    (docs/planner-clarification.md 5.): ``"assume"`` (default) lets it guess and
+    record assumptions, ``"ask"`` stops the run for user input when a critical
+    value is missing. It is forwarded as the workflow's ``clarify_policy``.
     """
 
     prompt = serializers.CharField(required=False, allow_blank=True, default="")
     specification_json = serializers.JSONField(required=False)
     reference_note = serializers.CharField(required=False, allow_blank=True, default="")
     reference_image = serializers.ImageField(required=False, allow_null=True)
+    # ``ListField`` accepts both a JSON array and repeated multipart keys
+    # (``skill_ids=1&skill_ids=2``), which is how the UI submits the form.
+    skill_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        default=list,
+    )
+    auto_skill_selection = serializers.BooleanField(required=False, default=False)
+    clarify = serializers.ChoiceField(
+        choices=["ask", "assume"],
+        required=False,
+        default="assume",
+    )
+
+
+class VersionRegenerateSerializer(serializers.Serializer):
+    """Write payload for ``POST /api/v1/versions/{id}/regenerate/``.
+
+    Both fields are optional (docs/version-history-controls.md 3.):
+
+    * no body -> plain regeneration of the base prompt;
+    * ``prompt`` -> edited prompt, regenerated;
+    * ``specification_json`` -> render that specification as a manual, derived
+      version (the prompt becomes the version's label).
+    """
+
+    prompt = serializers.CharField(required=False, allow_blank=True, default="")
+    specification_json = serializers.JSONField(required=False)
+
+
+class ClarificationAnswerSerializer(serializers.Serializer):
+    """One user answer to a Planner clarification (docs/planner-clarification.md 5.).
+
+    ``field`` matches the dotted path of the original question (may be empty for
+    questions without one); ``answer`` is the user's reply and is bounded to the
+    same length the Planner contract allows (``agents.spec``).
+    """
+
+    field = serializers.CharField(required=False, allow_blank=True, default="", max_length=120)
+    answer = serializers.CharField(max_length=600)
+
+
+class ClarificationAnswersSerializer(serializers.Serializer):
+    """Write payload for ``POST /api/v1/agent-runs/{id}/clarifications/``.
+
+    At least one answer is required and at most 16 are accepted, matching the
+    Planner's per-plan clarification bound (docs/planner-clarification.md 1.).
+    """
+
+    answers = ClarificationAnswerSerializer(many=True, allow_empty=False, max_length=16)
 
 
 class AgentRunSerializer(serializers.ModelSerializer):
+    """Read-only agent-run projection (docs/planner-clarification.md 5.).
+
+    ``status`` surfaces the Planner's terminal ``"clarification"`` state, which
+    the DB status alone cannot express: such a run is ``DONE`` (no version) with
+    ``state_json["status"] == "clarification"``. ``clarifications`` (the pending
+    questions) and ``assumptions`` (the Planner's own guesses) are read from
+    ``state_json``.
+    """
+
+    status = serializers.SerializerMethodField()
+    clarifications = serializers.SerializerMethodField()
+    assumptions = serializers.SerializerMethodField()
+
     class Meta:
         model = AgentRun
         fields = [
@@ -311,12 +481,25 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "status",
             "user_prompt",
             "state_json",
+            "clarifications",
+            "assumptions",
             "started_at",
             "completed_at",
             "error",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_status(self, obj: AgentRun) -> str:
+        if (obj.state_json or {}).get("status") == "clarification":
+            return "clarification"
+        return obj.status
+
+    def get_clarifications(self, obj: AgentRun) -> list:
+        return list((obj.state_json or {}).get("clarifications") or [])
+
+    def get_assumptions(self, obj: AgentRun) -> list:
+        return list((obj.state_json or {}).get("assumptions") or [])
 
 
 class PrintJobSerializer(serializers.ModelSerializer):
