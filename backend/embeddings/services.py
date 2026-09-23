@@ -26,20 +26,33 @@ Design constraints
   a restart. ``EMBEDDING_DIM`` deliberately stays a Django/env setting because
   it is baked into the pgvector column.
 
-The public API is re-exported by :mod:`agents.rag` for agent code.
+* **Best-effort text similarity.** :func:`rank_texts` and
+  :func:`cosine_similarity` rank plain strings for the skill auto-selection
+  fallback. They never raise, do no database work and no caching, and return
+  ``[]`` when RAG is off or the model is unreachable. Import them from this
+  module directly (e.g. ``from embeddings.services import rank_texts``); they
+  take plain strings so the ``embeddings`` app stays independent of consumers.
+
+The storage/retrieval public API is re-exported by :mod:`agents.rag` for agent
+code; the pure similarity helpers are imported from this module directly.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import math
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 
 from configuration.services import get_setting
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids sqlite import issues
     from embeddings.models import KnowledgeDocument
@@ -191,6 +204,93 @@ def _validate_dimension(vector: list[float]) -> None:
             f"Embedding has {len(vector)} dimensions but EMBEDDING_DIM={expected}. "
             "Change EMBEDDING_DIM or re-embed the knowledge base."
         )
+
+
+# ---------------------------------------------------------------------------
+# Text similarity (embedding fallback, e.g. skill auto-selection)
+# ---------------------------------------------------------------------------
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    """Return the cosine similarity of two vectors in ``[-1.0, 1.0]``.
+
+    This is a *best-effort* pure helper: it never raises. Unusable inputs
+    (empty vectors, mismatched dimensions, a zero vector) return ``0.0`` so
+    callers can keep ranking instead of aborting.
+    """
+    if not left or not right or len(left) != len(right):
+        return 0.0
+
+    dot = 0.0
+    norm_left = 0.0
+    norm_right = 0.0
+    for left_value, right_value in zip(left, right, strict=False):
+        dot += left_value * right_value
+        norm_left += left_value * left_value
+        norm_right += right_value * right_value
+
+    if norm_left <= 0.0 or norm_right <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(norm_left) * math.sqrt(norm_right))
+
+
+def rank_texts(
+    query: str,
+    texts: list[str],
+    *,
+    limit: int | None = None,
+    embedder: Callable[[str], list[float]] | None = None,
+) -> list[tuple[int, float]]:
+    """Rank *texts* by cosine similarity to *query* using the embedding provider.
+
+    Returns ``[(original_index, score), ...]`` sorted best-first (descending
+    score, ties broken by ascending index). Blank candidates are skipped but
+    keep their original index, so the caller can map a score back to its input.
+    Pass *limit* to cap the number of results.
+
+    Graceful-degradation contract (mirrors :func:`retrieve`): this function
+    never raises. When RAG is disabled (``RAG_ENABLED=false``), the query or the
+    candidate list is empty, the embedding model is missing, or Ollama is
+    unreachable, it logs at debug/warning level and returns ``[]``. It performs
+    no database access and no caching, and it is a pure function over the
+    provider seam: *embedder* defaults to :func:`embed_text` (which tests can
+    monkeypatch) and may be injected with a fake for unit tests.
+
+    The helper takes plain strings so the ``embeddings`` app stays independent
+    of any consumer (e.g. the ``skills`` app); callers pass their own texts.
+    """
+    if not rag_enabled():
+        logger.debug("rank_texts() skipped: RAG is disabled (RAG_ENABLED=false)")
+        return []
+    if not isinstance(query, str) or not query.strip():
+        return []
+    if not texts:
+        return []
+    if limit is not None and limit <= 0:
+        return []
+
+    embed = embedder or embed_text
+    try:
+        query_vector = embed(query)
+    except Exception as exc:  # noqa: BLE001 - best-effort contract, must never raise
+        logger.warning("rank_texts() could not embed the query: %s", exc)
+        return []
+
+    ranked: list[tuple[int, float]] = []
+    for index, text in enumerate(texts):
+        if not isinstance(text, str) or not text.strip():
+            continue
+        try:
+            vector = embed(text)
+        except Exception as exc:  # noqa: BLE001 - skip an unembeddable candidate
+            logger.warning("rank_texts() could not embed text #%d: %s", index, exc)
+            continue
+        ranked.append((index, cosine_similarity(query_vector, vector)))
+
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    if limit is not None:
+        ranked = ranked[:limit]
+    return ranked
 
 
 # ---------------------------------------------------------------------------
