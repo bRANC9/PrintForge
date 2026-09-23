@@ -20,6 +20,7 @@ from typing import Any
 
 from designs.cad.base import CADBackend, GeneratedModel
 
+from .skills import skill_constraint_errors
 from .state import WorkflowState, append_history, structured_error
 
 __all__ = ["make_validate_node"]
@@ -45,6 +46,15 @@ def make_validate_node(
         except Exception as exc:  # noqa: BLE001 - surface any backend bug as a problem
             problems = [f"{type(exc).__name__}: {exc}"]
 
+        # Skills are enforced, not merely prompted (docs/skills.md 4.): every
+        # active skill's constraints_json becomes a blocking problem through the
+        # same channel as the backend's own validation errors.
+        constraint_problems, warnings = skill_constraint_errors(
+            specification,
+            state.get("skills"),
+        )
+        problems = [*problems, *constraint_problems]
+
         stl_bytes: bytes | None = None
         if not problems:
             try:
@@ -62,7 +72,7 @@ def make_validate_node(
                     "attempt": attempt,
                     "max_attempts": max_attempts,
                     "errors": [],
-                    "warnings": [],
+                    "warnings": warnings,
                 },
                 "status": "done",
                 "error": None,
@@ -75,7 +85,7 @@ def make_validate_node(
             "attempt": attempt,
             "max_attempts": max_attempts,
             "errors": problems,
-            "warnings": [],
+            "warnings": warnings,
         }
 
         if exhausted:

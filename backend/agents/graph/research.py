@@ -41,14 +41,45 @@ RESEARCH_SYSTEM_PROMPT = (
 
 
 def _source_of(document: dict[str, Any]) -> dict[str, Any]:
-    """Reduce a retrieval hit to the provenance fields the workflow keeps."""
+    """Reduce a RAG retrieval hit to the provenance fields the workflow keeps."""
     return {
         "title": document.get("title") or "",
         "source_url": document.get("source_url") or "",
         "chunk_id": document.get("chunk_id"),
         "document_id": document.get("document_id"),
         "score": document.get("score"),
+        "kind": "rag",
     }
+
+
+def _web_source_of(result: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a web-search hit to the provenance fields the workflow keeps."""
+    return {
+        "title": str(result.get("title") or ""),
+        "source_url": str(result.get("url") or ""),
+        "snippet": str(result.get("snippet") or ""),
+        "kind": "web",
+    }
+
+
+def _web_context(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape web hits like RAG documents so both share one context formatter.
+
+    The fetched main text (``content``) is preferred; otherwise the snippet is
+    used. Nothing is fetched here -- the search backend has already done that
+    (best-effort, docs/planner-clarification.md references terv.md 7. fejezet).
+    """
+    context: list[dict[str, Any]] = []
+    for result in results:
+        content = str(result.get("content") or result.get("snippet") or "").strip()
+        context.append(
+            {
+                "title": result.get("title") or result.get("url") or "web result",
+                "source_url": result.get("url") or "",
+                "content": content,
+            }
+        )
+    return context
 
 
 def _format_context(documents: list[dict[str, Any]]) -> str:
@@ -78,6 +109,8 @@ def make_research_node(
     provider: LLMProvider,
     retrieve_fn: Callable[..., list[dict[str, Any]]],
     limit: int = 5,
+    search_fn: Callable[..., list[dict[str, Any]]] | None = None,
+    web_limit: int = 5,
 ) -> Callable[[WorkflowState], dict[str, Any]]:
     """Build the ``research`` graph node.
 
@@ -86,11 +119,21 @@ def make_research_node(
         retrieve_fn: RAG entry point with the ``retrieve(query, limit, company_id)``
             signature. Injected so tests never touch pgvector or Ollama.
         limit: Maximum number of chunks to retrieve.
+        search_fn: Optional web-search entry point with the ``search(query,
+            limit=...)`` signature (``agents.search.WebSearchBackend.search``).
+            ``None`` disables web search, preserving the RAG-only behaviour.
+        web_limit: Maximum number of web results to feed into the context.
+
+    Both retrieval paths are best-effort: an unreachable search backend, an
+    empty result set or a disabled feature all just leave the Planner's
+    specification untouched and let the workflow continue. The Research agent
+    still never writes OpenSCAD or STL data -- it only returns structured data.
     """
 
     def research_node(state: WorkflowState) -> dict[str, Any]:
         query = (state.get("research_query") or state.get("prompt") or "").strip()
         documents: list[dict[str, Any]] = []
+        web_results: list[dict[str, Any]] = []
 
         if query:
             try:
@@ -107,13 +150,27 @@ def make_research_node(
                 logger.warning("Research retrieval failed: %s", exc)
                 documents = []
 
+            if search_fn is not None:
+                try:
+                    web_results = [
+                        result
+                        for result in search_fn(query, limit=web_limit)
+                        if isinstance(result, dict)
+                    ]
+                except Exception as exc:  # noqa: BLE001 - web search is best-effort
+                    logger.warning("Web search failed: %s", exc)
+                    web_results = []
+
+        context_documents = [*documents, *_web_context(web_results)]
         sources = [_source_of(document) for document in documents]
+        sources.extend(_web_source_of(result) for result in web_results)
+
         specification = dict(state.get("specification") or {})
         used = False
         image_used = False
         image_warning: str | None = None
 
-        if documents:
+        if context_documents:
             try:
                 # The reference image (terv.md 27.) is offered to Research as
                 # well; the helper degrades to a text-only call on any vision
@@ -123,7 +180,7 @@ def make_research_node(
                     _research_prompt(
                         reference_prompt_for(provider, state),
                         specification,
-                        _format_context(documents),
+                        _format_context(context_documents),
                     ),
                     ModelSpecification,
                     system=RESEARCH_SYSTEM_PROMPT,
@@ -139,11 +196,14 @@ def make_research_node(
         any_image_used = bool(state.get("reference_image_used")) or image_used
         warning = state.get("reference_image_warning") or image_warning
 
-        entry = f"research: {len(sources)} source(s), enriched={used}"
+        entry = (
+            f"research: {len(documents)} rag + {len(web_results)} web source(s), enriched={used}"
+        )
         return {
             "specification": specification,
             "research_sources": sources,
             "research_used": used,
+            "research_web_used": bool(web_results),
             "reference_image_used": any_image_used,
             "reference_image_warning": warning,
             "status": "researched",

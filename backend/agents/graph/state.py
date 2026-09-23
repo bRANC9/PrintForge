@@ -60,9 +60,28 @@ class WorkflowState(TypedDict, total=False):
     #: Lookup query the Planner produced for the Research agent.
     research_query: str | None
     #: Retrieved documents / sources kept for provenance (terv.md 7. fejezet).
+    #: Each entry carries a ``kind`` (``"rag"`` or ``"web"``) so the origin of
+    #: every fact is auditable.
     research_sources: list[dict[str, Any]]
     #: Whether RAG returned any context during this run.
     research_used: bool
+    #: Whether the web-search backend contributed context (terv.md 7. fejezet).
+    research_web_used: bool
+    #: Clarification policy: ``"ask"`` stops the run and asks the user when the
+    #: Planner flagged a critical missing value, ``"assume"`` (default) lets the
+    #: Planner guess and records the guess as an auditable assumption
+    #: (docs/planner-clarification.md 2-3).
+    clarify_policy: str
+    #: Blocking questions (``kind == "needs_user_input"``) when the run stopped
+    #: with ``status == "clarification"``; JSON-safe dicts, never raw bytes.
+    clarifications: list[dict[str, Any]]
+    #: The Planner's own guesses (``kind == "assumed"``): question + answer +
+    #: optional dotted ``field``. Kept for provenance and review.
+    assumptions: list[dict[str, Any]]
+    #: Active skills selected for this run, as JSON-safe dicts (docs/skills.md 3).
+    skills: list[dict[str, Any]]
+    #: How the skills were chosen: ``"manual"``, ``"auto"`` or ``""`` (none).
+    skill_selection: str
     #: OpenSCAD source produced by the CAD agent (never a mesh).
     scad_source: str
     #: STL bytes produced by the Validator after a successful validation.

@@ -57,6 +57,7 @@ from .editor import make_editor_node
 from .planner import make_planner_node
 from .research import make_research_node
 from .review import make_review_node
+from .skills import resolve_skill_selection
 from .state import WorkflowState
 from .validator import make_validate_node
 
@@ -105,6 +106,18 @@ class WorkflowDeps:
     #: Defaults to the import-light headless renderer; tests inject a fake so no
     #: real mesh/trimesh/Pillow work is needed.
     preview_renderer: Callable[..., bytes] = render_stl_preview
+    #: Optional web-search entry point for the Research agent:
+    #: ``search(query, limit=...) -> list[dict]`` (docs/planner-clarification.md,
+    #: terv.md 7. fejezet). ``None`` disables web search, keeping the RAG-only
+    #: behaviour; tests inject a fake so no network is touched.
+    search_fn: Callable[..., list[dict[str, Any]]] | None = None
+    #: Maximum number of web results handed to the Research agent.
+    web_limit: int = 5
+    #: Skill selector seam: ``select_skills(prompt, object_kind, workspace,
+    #: manual_ids)`` (docs/skills.md 3.). ``None`` means the real
+    #: :func:`skills.services.select_skills`, imported lazily only when a
+    #: selection is actually requested; tests inject a fake.
+    select_skills_fn: Callable[..., list[Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +136,16 @@ def route_entry(state: WorkflowState) -> str:
 
 
 def route_after_planner(state: WorkflowState) -> str:
-    """``research`` only when the Planner asked for it, otherwise straight to ``cad``."""
-    if state.get("status") == "failed":
+    """Route a Planner/Editor result.
+
+    A ``failed`` plan and a ``clarification`` (blocking questions under the
+    ``ask`` policy) both end the workflow; a run that stopped for clarification
+    deliberately never produced a specification or reached the CAD agent
+    (docs/planner-clarification.md 2-3.). Otherwise ``research`` is entered only
+    when the Planner asked for it.
+    """
+    status = state.get("status")
+    if status in {"failed", "clarification"}:
         return END
     return "research" if state.get("needs_research") else "cad"
 
@@ -201,6 +222,8 @@ def build_workflow(deps: WorkflowDeps):
             provider=deps.provider,
             retrieve_fn=deps.retrieve_fn,
             limit=deps.research_limit,
+            search_fn=deps.search_fn,
+            web_limit=deps.web_limit,
         ),
     )
     graph.add_node(
@@ -269,13 +292,16 @@ def run_workflow(
     reference_image_note: str = "",
     base_specification: dict[str, Any] | None = None,
     annotations: list[dict[str, Any]] | None = None,
+    clarify_policy: str = "assume",
+    skill_ids: list[int] | None = None,
+    auto_skill_selection: bool = False,
 ) -> WorkflowState:
     """Run the prompt -> specification -> SCAD -> STL workflow once.
 
     Args:
         prompt: Raw user request.
-        deps: Injected dependencies (provider/CAD backend/RAG).
-        company_id: Optional workspace scope for RAG retrieval.
+        deps: Injected dependencies (provider/CAD backend/RAG/skills/search).
+        company_id: Optional workspace scope for RAG retrieval and skill scoping.
         reference_image: Optional reference photo bytes (terv.md 27. fejezet).
             Kept in-process only and offered to the Editor/Planner/Research LLM
             calls when the provider supports vision; absent -> unchanged
@@ -286,14 +312,33 @@ def run_workflow(
         annotations: Visual-prompt annotation payload. A non-empty list switches
             the graph into edit mode (``START -> editor``); ``None``/empty keeps
             ``START -> planner``.
+        clarify_policy: ``"assume"`` (default) lets the Planner guess missing
+            values and record them as assumptions; ``"ask"`` stops the run with
+            ``status == "clarification"`` when the Planner flagged a critical
+            missing value (docs/planner-clarification.md).
+        skill_ids: Explicit per-run skill ids; they win over auto selection and
+            mark ``skill_selection == "manual"`` (docs/skills.md 3.).
+        auto_skill_selection: When set (and no explicit ids), resolve the active
+            skills through ``select_skills`` and mark ``"auto"``.
 
     Returns the final state. A failed run has ``status == "failed"`` and a
-    structured ``error`` JSON string; it never raises for a workflow-level
-    failure (only programming/DB errors propagate).
+    structured ``error`` JSON string; a run stopped for clarification has
+    ``status == "clarification"`` with the blocking questions in
+    ``clarifications``. It never raises for a workflow-level failure (only
+    programming/DB errors propagate).
     """
     compiled = build_workflow(deps)
     base_specification = dict(base_specification or {})
     annotations = list(annotations or [])
+    # Skill selection is resolved once, before the graph runs, and carried in
+    # the state so every node (prompt + Validator) sees the same skills.
+    skills, skill_selection = resolve_skill_selection(
+        deps.select_skills_fn,
+        prompt=prompt,
+        company_id=company_id,
+        manual_ids=skill_ids,
+        auto=auto_skill_selection,
+    )
     initial: WorkflowState = {
         "prompt": prompt,
         "company_id": company_id,
@@ -310,6 +355,14 @@ def run_workflow(
         "max_attempts": deps.max_attempts,
         "research_sources": [],
         "research_used": False,
+        "research_web_used": False,
+        # Planner clarification / assumptions (docs/planner-clarification.md).
+        "clarify_policy": str(clarify_policy or "assume"),
+        "clarifications": [],
+        "assumptions": [],
+        # Skill injection + provenance (docs/skills.md 3-4.).
+        "skills": skills,
+        "skill_selection": skill_selection,
         # Vision self-check (docs/vision-self-check.md): the review node fills
         # these in; the empty defaults keep the summary/persistence paths simple.
         "vision_used": False,

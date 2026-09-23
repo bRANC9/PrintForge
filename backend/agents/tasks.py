@@ -49,11 +49,12 @@ from accounts.models import User
 from agents.graph import WorkflowDeps, run_workflow
 from agents.graph.reviser import make_llm_reviser
 from agents.llm import get_provider
+from agents.search import WebSearchBackend
 from agents.services import fail_run, finish_run, start_run
 from configuration.services import get_setting
 from designs.cad.openscad import OpenSCADBackend
 from designs.cad.preview import render_stl_preview
-from designs.models import ModelVersion, model_artifact_path
+from designs.models import ModelVersion, ModelVersionOrigin, model_artifact_path
 from designs.services import create_next_version
 from embeddings.services import retrieve
 from files.services import get_storage
@@ -109,6 +110,9 @@ def build_dependencies() -> WorkflowDeps:
         reviser=make_llm_reviser(provider),
         preview_renderer=render_stl_preview,
         review_provider=review_provider,
+        # Web search is best-effort: a disabled/unreachable backend returns []
+        # without touching the network, so wiring it always is safe.
+        search_fn=WebSearchBackend().search,
     )
 
 
@@ -260,6 +264,54 @@ def _vision_review_summary(review: Any) -> dict[str, Any]:
     }
 
 
+def _clarification_summary(items: Any) -> list[dict[str, str]]:
+    """Reduce blocking questions to ``{question, field}`` (no assumed answer)."""
+    summary: list[dict[str, str]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            {
+                "question": str(item.get("question") or ""),
+                "field": str(item.get("field") or ""),
+            }
+        )
+    return summary
+
+
+def _assumption_summary(items: Any) -> list[dict[str, str]]:
+    """Reduce assumptions to ``{field, question, answer}`` for the provenance."""
+    summary: list[dict[str, str]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            {
+                "field": str(item.get("field") or ""),
+                "question": str(item.get("question") or ""),
+                "answer": str(item.get("answer") or ""),
+            }
+        )
+    return summary
+
+
+def _skill_summary(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Reduce the active skills to ``{slug, name, selection}`` (docs/skills.md 7.)."""
+    selection = str(state.get("skill_selection") or "")
+    summary: list[dict[str, str]] = []
+    for skill in state.get("skills") or []:
+        if not isinstance(skill, dict):
+            continue
+        summary.append(
+            {
+                "slug": str(skill.get("slug") or ""),
+                "name": str(skill.get("name") or ""),
+                "selection": selection,
+            }
+        )
+    return summary
+
+
 def _summarise_state(
     state: dict[str, Any],
     *,
@@ -271,16 +323,22 @@ def _summarise_state(
     size is kept (the artifact itself is written to the storage backend). The
     same holds for the rendered ``preview_image`` -- only the vision verdict and
     usage flag are summarised. The visual-prompt payload (docs/visual-editing.md)
-    is likewise reduced to its count -- never the raw annotation JSON.
+    is likewise reduced to its count -- never the raw annotation JSON. Planner
+    clarifications/assumptions and the selected skills are kept as their
+    documented, byte-free summaries (docs/planner-clarification.md 4.,
+    docs/skills.md 7.).
     """
     scad_source = str(state.get("scad_source") or "")
     stl_bytes = state.get("stl_bytes") or b""
+    clarifications = _clarification_summary(state.get("clarifications"))
+    assumptions = _assumption_summary(state.get("assumptions"))
     return {
         "status": state.get("status"),
         "attempts": int(state.get("attempt", 0)),
         "max_attempts": int(state.get("max_attempts", 0)),
         "needs_research": bool(state.get("needs_research", False)),
         "research_used": bool(state.get("research_used", False)),
+        "research_web_used": bool(state.get("research_web_used", False)),
         "research_sources": list(state.get("research_sources") or []),
         # Reference image provenance (terv.md 27.): only presence/usage flags,
         # never the raw bytes.
@@ -290,6 +348,14 @@ def _summarise_state(
         "reference_image_warning": state.get("reference_image_warning"),
         # Visual-prompt provenance (docs/visual-editing.md): count only.
         "annotation_count": len(annotations or []),
+        # Planner clarification / assumption provenance (docs/planner-clarification.md 4.).
+        "clarification_count": len(clarifications),
+        "clarifications": clarifications,
+        "assumption_count": len(assumptions),
+        "assumptions": assumptions,
+        # Skill provenance (docs/skills.md 7.).
+        "skills": _skill_summary(state),
+        "skill_selection": str(state.get("skill_selection") or ""),
         # Vision self-check provenance (docs/vision-self-check.md): flags and
         # verdict only, never the preview bytes.
         "vision_used": bool(state.get("vision_used", False)),
@@ -311,6 +377,7 @@ def _persist_version(
     reference_image_name: str = "",
     parent_version: ModelVersion | None = None,
     annotations: list[dict[str, Any]] | None = None,
+    regenerate: bool = False,
 ) -> Any:
     """Create the next ``ModelVersion`` and store the CAD artifacts on it.
 
@@ -343,6 +410,7 @@ def _persist_version(
         specification=dict(state.get("specification") or {}),
         reference_note=reference_note,
         reference_image=reference_file,
+        origin=ModelVersionOrigin.REGENERATE if regenerate else ModelVersionOrigin.GENERATE,
     )
 
     storage = get_storage()
@@ -380,6 +448,22 @@ def _persist_version(
         "vision_review": _vision_review_summary(state.get("vision_review")),
         "completed_at": timezone.now().isoformat(),
     }
+    # Planner assumptions (docs/planner-clarification.md 4.): a run that made
+    # its own guesses is marked for review and carries them on the version.
+    assumptions = _assumption_summary(state.get("assumptions"))
+    if assumptions:
+        validation_json["assumptions"] = assumptions
+        validation_json["review_required"] = True
+    # Skill provenance (docs/skills.md 7.): which recipes shaped this version.
+    skills = _skill_summary(state)
+    if skills:
+        validation_json["skills"] = skills
+        validation_json["skill_selection"] = str(state.get("skill_selection") or "")
+    skill_warnings = [
+        str(warning) for warning in (state.get("validation") or {}).get("warnings") or []
+    ]
+    if skill_warnings:
+        validation_json["skill_warnings"] = skill_warnings
     update_fields = [
         "scad_file",
         "stl_file",
@@ -407,6 +491,10 @@ def run_agent_workflow(
     reference_note: str = "",
     base_version_id: int | None = None,
     annotations: list[dict[str, Any]] | None = None,
+    clarify_policy: str = "assume",
+    regenerate: bool = False,
+    skill_ids: list[int] | None = None,
+    auto_skill_selection: bool = False,
 ) -> int:
     """Run the full agent workflow for ``project_id`` and return the ``AgentRun`` id.
 
@@ -430,6 +518,22 @@ def run_agent_workflow(
     ``project`` (a missing/foreign id is ignored), its ``specification_json`` is
     fed to the Editor as ``base_specification``, and the persisted new version
     records ``parent_version`` + ``annotations_json``.
+
+    ``regenerate=True`` (docs/version-history-controls.md 2.) marks the created
+    version ``origin="regenerate"`` with ``parent_version=base_version``; the
+    capability is declared so ``designs.services`` can stop probing for it.
+
+    ``clarify_policy="ask"`` lets the Planner stop with
+    ``status == "clarification"`` (docs/planner-clarification.md): no
+    ``ModelVersion`` is created, the blocking questions are persisted on
+    ``AgentRun.state_json`` and the run finishes done so the user can answer and
+    start a new run.
+
+    ``skill_ids`` / ``auto_skill_selection`` select the skills for this run
+    (docs/skills.md 3.): explicit ids win and mark the selection ``"manual"``,
+    otherwise auto selection runs when requested. The chosen skills guide the
+    Planner/Editor prompt and are enforced by the Validator; their provenance is
+    recorded on the run and the version.
     """
     project = Project.objects.get(pk=project_id)
     user = User.objects.filter(pk=user_id).first() if user_id else None
@@ -472,6 +576,9 @@ def run_agent_workflow(
             reference_image_note=reference_image_note,
             base_specification=base_specification,
             annotations=edit_annotations,
+            clarify_policy=clarify_policy,
+            skill_ids=skill_ids,
+            auto_skill_selection=auto_skill_selection,
         )
     except Exception as exc:  # noqa: BLE001 - never leave a run RUNNING
         logger.exception("Agent workflow crashed for AgentRun %s", run.pk)
@@ -486,6 +593,16 @@ def run_agent_workflow(
             ),
         )
 
+    if state.get("status") == "clarification":
+        # The Planner stopped for a missing critical value: no ModelVersion is
+        # created (nothing was finalised and no CAD ran). The questions are
+        # persisted on the run and the run finishes done, so the UI can collect
+        # the answers and start a new run (docs/planner-clarification.md 4.).
+        summary = _summarise_state(state, annotations=edit_annotations)
+        finish_run(run=run, state=summary)
+        logger.info("AgentRun %s stopped for user clarification", run.pk)
+        return run.pk
+
     if state.get("status") == "done" and state.get("scad_source") and state.get("stl_bytes"):
         try:
             version = _persist_version(
@@ -497,6 +614,7 @@ def run_agent_workflow(
                 reference_image_name=reference_image_name,
                 parent_version=base_version,
                 annotations=edit_annotations,
+                regenerate=regenerate,
             )
         except Exception as exc:  # noqa: BLE001 - storage/DB failure must fail the run
             logger.exception("Could not persist ModelVersion for AgentRun %s", run.pk)

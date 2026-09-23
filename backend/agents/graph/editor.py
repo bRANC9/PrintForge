@@ -27,11 +27,15 @@ from agents.llm import LLMError, LLMProvider
 from agents.spec import MAX_OPERATION_LABEL
 
 from .planner import (
+    CLARIFICATION_PROMPT,
     OPERATION_DIMENSIONS_PROMPT,
     PRIMITIVE_DIMENSIONS_PROMPT,
     PlannerPlan,
+    clarification_state,
     coerce_plan,
+    split_clarifications,
 )
+from .skills import template_object_kind, with_skills
 from .state import WorkflowState, append_history, failure_state
 from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
@@ -69,6 +73,7 @@ EDITOR_SYSTEM_PROMPT = (
     "requires a change. Emit 'operations': [] when the edit adds no feature. "
     + OPERATION_DIMENSIONS_PROMPT
     + PRIMITIVE_DIMENSIONS_PROMPT
+    + CLARIFICATION_PROMPT
     + "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
 )
 
@@ -272,7 +277,7 @@ def make_editor_node(
                 provider,
                 prompt,
                 PlannerPlan,
-                system=EDITOR_SYSTEM_PROMPT,
+                system=with_skills(EDITOR_SYSTEM_PROMPT, state.get("skills")),
                 images=reference_images(state),
             )
             plan = coerce_plan(raw)
@@ -284,8 +289,31 @@ def make_editor_node(
                 message=str(exc),
             )
 
+        # The Editor reuses the Planner's clarification contract, so a visual
+        # edit can also stop and ask the user (docs/planner-clarification.md 3.).
+        clarification = clarification_state(
+            plan,
+            state,
+            image_used=image_used,
+            image_warning=image_warning,
+            max_attempts=max_attempts,
+            stage="editor",
+        )
+        if clarification is not None:
+            return clarification
+
+        assumptions, _blocking = split_clarifications(plan)
         specification = plan.specification.model_dump()
+        # A "template" skill selects a built-in CAD generator (docs/skills.md 4.).
+        object_kind = template_object_kind(state.get("skills"))
+        if object_kind:
+            specification["object"] = object_kind
         history = append_history(state, "editor: specification updated (edit mode)")
+        if assumptions:
+            history = [
+                *history,
+                f"editor: {len(assumptions)} feltételezés (review required)",
+            ]
 
         # Deterministic guardrail: the LLM must not silently place a feature far
         # from the annotation that asked for it (docs/visual-editing.md 3.5).
@@ -315,6 +343,9 @@ def make_editor_node(
             "research_query": plan.research_query,
             "research_sources": [],
             "research_used": False,
+            "research_web_used": False,
+            "clarifications": [],
+            "assumptions": assumptions,
             "reference_image_used": image_used,
             "reference_image_warning": image_warning,
             "attempt": 0,

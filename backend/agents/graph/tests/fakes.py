@@ -51,6 +51,11 @@ class FakeProvider(LLMProvider):
         self.enriched = enriched
         self.planner_error = planner_error
         self.calls: list[str] = []
+        #: System prompt of the most recent ``structured`` call, so tests can
+        #: assert what was actually injected (e.g. the skills block).
+        self.last_system: str = ""
+        #: User prompt of the most recent ``structured`` call.
+        self.last_prompt: str = ""
 
     def generate(self, prompt: str, **kwargs: Any) -> str:
         return "fake generation (never used by the workflow)"
@@ -63,6 +68,8 @@ class FakeProvider(LLMProvider):
     ) -> dict[str, Any]:
         name = getattr(schema, "__name__", str(schema))
         self.calls.append(name)
+        self.last_system = str(kwargs.get("system", ""))
+        self.last_prompt = str(prompt)
         if name == "PlannerPlan":
             if self.planner_error is not None:
                 raise self.planner_error

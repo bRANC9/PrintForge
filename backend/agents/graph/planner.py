@@ -19,18 +19,22 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agents.llm import LLMError, LLMProvider
-from agents.spec import ModelSpecification
+from agents.spec import Clarification, ModelSpecification
 
+from .skills import template_object_kind, with_skills
 from .state import WorkflowState, append_history, failure_state
 from .vision import reference_images, reference_prompt_for, structured_with_reference_image
 
 __all__ = [
+    "CLARIFICATION_PROMPT",
     "OPERATION_DIMENSIONS_PROMPT",
     "PLANNER_SYSTEM_PROMPT",
     "PRIMITIVE_DIMENSIONS_PROMPT",
     "PlannerPlan",
+    "clarification_state",
     "coerce_plan",
     "make_planner_node",
+    "split_clarifications",
 ]
 
 #: Shared instruction pinning the per-operation required fields. The Planner,
@@ -61,6 +65,24 @@ PRIMITIVE_DIMENSIONS_PROMPT = (
     "leave a required size missing or null. "
 )
 
+#: Shared instruction teaching the Planner/Editor how to record missing values
+#: instead of silently inventing them (docs/planner-clarification.md 2.).
+#: ``clarifications`` is Planner-only data: it is part of ``PlannerPlan`` and
+#: therefore never reaches the CAD backend (the strict terv.md 8. contract is
+#: unchanged).
+CLARIFICATION_PROMPT = (
+    "If the user did not give a value that could change the function of the "
+    "part, do one of two things: (a) choose a realistic, printable default and "
+    "record it in 'clarifications' with 'kind': 'assumed', the guess in "
+    "'answer', the reasoning in 'question' and an optional dotted 'field' "
+    "(e.g. 'dimensions.width'); or (b) when a wrong guess could break the part "
+    "(a critical dimension, mounting or interface), record it with 'kind': "
+    "'needs_user_input' and 'answer': ''. Return at most 8 'clarifications' "
+    "entries; use an empty list when nothing was missing. 'clarifications' is "
+    "Planner-only data: never put it inside the specification and never send it "
+    "to the CAD backend. "
+)
+
 PLANNER_SYSTEM_PROMPT = (
     "You are the Planner agent of an OpenSCAD 3D-printing workflow. "
     "Read the user's request and return ONE JSON object with two jobs: "
@@ -81,6 +103,7 @@ PLANNER_SYSTEM_PROMPT = (
     "with primitives. Use sensible printable defaults when a value is missing. "
     + OPERATION_DIMENSIONS_PROMPT
     + PRIMITIVE_DIMENSIONS_PROMPT
+    + CLARIFICATION_PROMPT
     + "Never emit OpenSCAD code, G-code or STL data - only the structured plan."
 )
 
@@ -106,6 +129,70 @@ class PlannerPlan(BaseModel):
         max_length=512,
         description="Lookup query for the Research agent (when needs_research).",
     )
+    clarifications: list[Clarification] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Missing-value questions the Planner answered itself (kind='assumed') "
+            "or must ask the user (kind='needs_user_input'); Planner-only data."
+        ),
+    )
+
+
+def split_clarifications(plan: PlannerPlan) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a plan's clarifications into ``(assumptions, blocking)``.
+
+    ``assumed`` entries continue the run (the Planner guessed a value); the
+    ``needs_user_input`` entries are the blocking questions that, under the
+    ``ask`` policy, stop the workflow before any specification is finalised
+    (docs/planner-clarification.md 2.).
+    """
+    assumptions = [item.model_dump() for item in plan.clarifications if item.kind == "assumed"]
+    blocking = [
+        item.model_dump() for item in plan.clarifications if item.kind == "needs_user_input"
+    ]
+    return assumptions, blocking
+
+
+def clarification_state(
+    plan: PlannerPlan,
+    state: WorkflowState,
+    *,
+    image_used: bool,
+    image_warning: str | None,
+    max_attempts: int,
+    stage: str,
+) -> dict[str, Any] | None:
+    """Build the partial state for a blocking clarification, or ``None``.
+
+    Returns ``None`` when the plan asks no question (or the policy is not
+    ``ask``), so the caller continues to the normal planned branch. There is
+    deliberately no ``specification`` in the returned update: a run that stops
+    for clarification never finalises one and never reaches the CAD agent.
+    """
+    blocking = [
+        item.model_dump() for item in plan.clarifications if item.kind == "needs_user_input"
+    ]
+    if not blocking or state.get("clarify_policy") != "ask":
+        return None
+
+    assumptions, _ = split_clarifications(plan)
+    history = append_history(state, f"{stage}: {len(blocking)} question(s) for the user")
+    if image_warning:
+        history = [*history, f"{stage}: {image_warning}"]
+    return {
+        "clarifications": blocking,
+        "assumptions": assumptions,
+        "needs_research": bool(plan.needs_research),
+        "research_query": plan.research_query,
+        "reference_image_used": image_used,
+        "reference_image_warning": image_warning,
+        "attempt": 0,
+        "max_attempts": int(max_attempts),
+        "status": "clarification",
+        "error": None,
+        "history": history,
+    }
 
 
 def coerce_plan(raw: Any) -> PlannerPlan:
@@ -146,7 +233,7 @@ def make_planner_node(
                 provider,
                 prompt,
                 PlannerPlan,
-                system=PLANNER_SYSTEM_PROMPT,
+                system=with_skills(PLANNER_SYSTEM_PROMPT, state.get("skills")),
                 images=reference_images(state),
             )
             plan = coerce_plan(raw)
@@ -158,15 +245,43 @@ def make_planner_node(
                 message=str(exc),
             )
 
+        # Blocking questions under the "ask" policy stop the run before a
+        # specification is finalised: no CAD, no STL (docs/planner-clarification.md 2.).
+        clarification = clarification_state(
+            plan,
+            state,
+            image_used=image_used,
+            image_warning=image_warning,
+            max_attempts=max_attempts,
+            stage="planner",
+        )
+        if clarification is not None:
+            return clarification
+
+        assumptions, _blocking = split_clarifications(plan)
+        specification = plan.specification.model_dump()
+        # A "template" skill selects a built-in CAD generator (docs/skills.md 4.).
+        object_kind = template_object_kind(state.get("skills"))
+        if object_kind:
+            specification["object"] = object_kind
+
         history = append_history(state, "planner: specification ready")
+        if assumptions:
+            history = [
+                *history,
+                f"planner: {len(assumptions)} feltételezés (review required)",
+            ]
         if image_warning:
             history = [*history, f"planner: {image_warning}"]
         return {
-            "specification": plan.specification.model_dump(),
+            "specification": specification,
             "needs_research": bool(plan.needs_research),
             "research_query": plan.research_query,
             "research_sources": [],
             "research_used": False,
+            "research_web_used": False,
+            "clarifications": [],
+            "assumptions": assumptions,
             "reference_image_used": image_used,
             "reference_image_warning": image_warning,
             "attempt": 0,
