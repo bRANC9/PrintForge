@@ -312,7 +312,7 @@ def build_parameters(specification: dict[str, Any] | None) -> HolderParameters:
     mounting = mounting or {}
     mount_type = mounting.get("type", "M5")
     clearance = _coerce_float(mounting, "clearance", default=0.3, minimum=0.0, maximum=2.0)
-    hole_count = _coerce_int(mounting, "count", default=2, minimum=1, maximum=8)
+    hole_count = _coerce_int(mounting, "count", default=2, minimum=0, maximum=8)
 
     return HolderParameters(
         object_name=_sanitize_object_name(spec.get("object")),
