@@ -76,9 +76,24 @@ class ReviewResult(BaseModel):
   `ModelSpecification`-t ad (`structured(prompt, ModelSpecification)`);
   hiba esetén `None` (a CAD változatlan specet próbál).
 - `workflow.build_workflow`: `validate` valid éle `review`-ra vált; a review
-  node a `deps.provider`-t és a `deps.preview_renderer`-t kapja.
-- `workflow.WorkflowDeps` új mező: `preview_renderer: Callable = render_stl_preview`.
-- `build_dependencies` (tasks.py): `reviser=make_llm_reviser(provider)`.
+  node a `deps.review_provider or deps.provider`-t és a
+  `deps.preview_renderer`-t kapja.
+- `workflow.WorkflowDeps` új mezők:
+  `preview_renderer: Callable = render_stl_preview` és
+  `review_provider: LLMProvider | None = None`.
+- `build_dependencies` (tasks.py): `reviser=make_llm_reviser(provider)`, és a
+  review külön vision modellt kap, ha a `ollama_vision_model` runtime beállítás
+  ki van töltve (`get_provider(model=vision_model)`); üresen a fő providerre esik
+  vissza. Így a tervezés koder modellen, a self-check vision modellen futhat.
+
+### 4.1 Külön vision modell (opcionális)
+
+- Beállítás: `OLLAMA_VISION_MODEL` env, illetve a Beállítások oldalon a
+  `ollama_vision_model` runtime override (DB → env → default `""`).
+- Üres érték = a review a fő `OLLAMA_MODEL`-t használja; ha az nem vision-képes,
+  a review kimarad (warning).
+- 8 GB VRAM-on az Ollama a két 7B modellt egymás után tölti be (swap) — ez
+  elvárt; a self-check csak a generálás végén fut.
 
 ## 5. Perzisztálás (agent-orchestrator, `agents/tasks.py`)
 
