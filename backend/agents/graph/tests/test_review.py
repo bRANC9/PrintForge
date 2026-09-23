@@ -250,3 +250,41 @@ def test_workflow_without_vision_still_finishes_done():
     assert state["vision_used"] is False
     assert state["vision_review"] == {"skipped": True, "reason": "no_vision"}
     assert provider.calls == ["PlannerPlan"]  # no vision call was made
+
+
+def test_review_runs_on_the_dedicated_vision_provider():
+    """A text-only main provider plus a vision ``review_provider`` still reviews.
+
+    The review node is built with the dedicated provider, so the self-check runs
+    even though the planner/editor provider has no vision -- and the vision
+    provider is the one that receives the rendered preview image.
+    """
+    main = FakeProvider()  # supports_vision() is False
+    reviewer = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    cad = FakeCADBackend()
+
+    state = run_workflow(
+        "make a phone holder",
+        deps=_deps(main, cad, review_provider=reviewer),
+    )
+
+    assert state["status"] == "done"
+    assert state["vision_used"] is True
+    assert state["vision_review"] == {"matches": True, "issues": [], "summary": "ok"}
+    assert state["preview_image"] == PREVIEW_PNG
+    # The dedicated vision provider judged the rendered preview ...
+    assert reviewer.review_images == [[PREVIEW_PNG]]
+    assert reviewer.calls == ["ReviewResult"]
+    # ... while the main (non-vision) provider was only used by the Planner.
+    assert main.calls == ["PlannerPlan"]
+
+
+def test_review_falls_back_to_the_main_provider_without_a_review_provider():
+    """With ``review_provider=None`` the review keeps using the main provider."""
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    cad = FakeCADBackend()
+
+    state = run_workflow("make a phone holder", deps=_deps(provider, cad))
+
+    assert state["vision_used"] is True
+    assert provider.calls == ["PlannerPlan", "ReviewResult"]

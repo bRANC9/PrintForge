@@ -50,6 +50,7 @@ from agents.graph import WorkflowDeps, run_workflow
 from agents.graph.reviser import make_llm_reviser
 from agents.llm import get_provider
 from agents.services import fail_run, finish_run, start_run
+from configuration.services import get_setting
 from designs.cad.openscad import OpenSCADBackend
 from designs.cad.preview import render_stl_preview
 from designs.models import ModelVersion, model_artifact_path
@@ -90,8 +91,16 @@ def build_dependencies() -> WorkflowDeps:
     turns validator/vision errors into a corrected specification, falling back
     to the unchanged one on any failure. The vision self-check gets the real
     headless preview renderer.
+
+    The review self-check can run on a dedicated vision model: the runtime
+    setting ``ollama_vision_model`` (DB override -> ``settings.OLLAMA_VISION_MODEL``
+    -> env -> default) is resolved through the runtime settings service so a UI
+    override applies without a restart. When it is empty the review reuses the
+    main provider, preserving the previous behaviour.
     """
     provider = get_provider()
+    vision_model = str(get_setting("ollama_vision_model") or "").strip()
+    review_provider = get_provider(model=vision_model) if vision_model else None
     return WorkflowDeps(
         provider=provider,
         cad_backend=OpenSCADBackend(),
@@ -99,6 +108,7 @@ def build_dependencies() -> WorkflowDeps:
         max_attempts=int(getattr(settings, "AGENT_MAX_ATTEMPTS", 3)),
         reviser=make_llm_reviser(provider),
         preview_renderer=render_stl_preview,
+        review_provider=review_provider,
     )
 
 

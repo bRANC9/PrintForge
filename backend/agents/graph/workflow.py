@@ -26,7 +26,8 @@ Graph shape::
     it renders a preview and, when the provider supports vision, asks the model
     to compare it with the request. It skips (never fails) when there is no STL,
     no vision or a review error, and it only routes back to ``cad`` while
-    ``attempt < max_attempts``.
+    ``attempt < max_attempts``. When :attr:`WorkflowDeps.review_provider` is set
+    the review runs on that dedicated (vision) provider instead of the main one.
 
     In edit mode (non-empty annotations) ``START`` routes to ``editor`` instead
     of ``planner``; the editor returns the same partial state, so the rest of
@@ -79,7 +80,9 @@ class WorkflowDeps:
     """Injected dependencies of the workflow (the test seam).
 
     Production builds this in :func:`agents.tasks.build_dependencies` with the
-    real Ollama provider and ``OpenSCADBackend``; tests pass fakes.
+    real Ollama provider and ``OpenSCADBackend``; tests pass fakes. The optional
+    :attr:`review_provider` lets the vision self-check run on a dedicated model
+    while the other agents keep :attr:`provider`.
     """
 
     provider: LLMProvider
@@ -92,6 +95,12 @@ class WorkflowDeps:
     research_limit: int = 5
     #: Optional CAD retry hook (see :data:`agents.graph.cad.SpecReviser`).
     reviser: SpecReviser | None = None
+    #: Optional dedicated provider for the vision ``review`` node. When set, the
+    #: self-check uses it instead of :attr:`provider`; when ``None`` the main
+    #: provider is used. This lets a separate vision model serve the review
+    #: (``settings.OLLAMA_VISION_MODEL`` / runtime ``ollama_vision_model``)
+    #: while the planner/editor/reviser keep the main text model.
+    review_provider: LLMProvider | None = None
     #: Renderer used by the vision self-check: ``bytes(stl) -> PNG bytes``.
     #: Defaults to the import-light headless renderer; tests inject a fake so no
     #: real mesh/trimesh/Pillow work is needed.
@@ -205,7 +214,7 @@ def build_workflow(deps: WorkflowDeps):
     graph.add_node(
         "review",
         make_review_node(
-            deps.provider,
+            deps.review_provider or deps.provider,
             render_preview=deps.preview_renderer,
         ),
     )

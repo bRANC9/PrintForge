@@ -324,6 +324,43 @@ def test_build_dependencies_injects_the_embeddings_retrieve_service():
 
 
 # ---------------------------------------------------------------------------
+# Dedicated vision provider (docs/vision-self-check.md)
+# ---------------------------------------------------------------------------
+
+
+def test_build_dependencies_without_a_vision_model_has_no_review_provider(monkeypatch):
+    """An empty ``ollama_vision_model`` keeps the review on the main provider."""
+    monkeypatch.setattr("agents.tasks.get_setting", lambda name: "")
+    monkeypatch.setattr("agents.tasks.get_provider", lambda **kwargs: FakeProvider())
+
+    deps = build_dependencies()
+
+    assert deps.review_provider is None
+
+
+def test_build_dependencies_builds_the_review_provider_with_the_vision_model(monkeypatch):
+    """A configured ``ollama_vision_model`` builds a dedicated review provider."""
+    main = FakeProvider()
+    vision = FakeVisionProvider()
+    calls: list[dict[str, Any]] = []
+
+    def fake_provider(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return vision if kwargs.get("model") else main
+
+    monkeypatch.setattr("agents.tasks.get_provider", fake_provider)
+    monkeypatch.setattr("agents.tasks.get_setting", lambda name: "llava:13b")
+
+    deps = build_dependencies()
+
+    # The main provider is built without a model override; the review provider
+    # receives the configured vision model (the base URL stays provider-resolved).
+    assert deps.provider is main
+    assert deps.review_provider is vision
+    assert calls == [{}, {"model": "llava:13b"}]
+
+
+# ---------------------------------------------------------------------------
 # Visual-prompt edits (docs/visual-editing.md 3.5)
 # ---------------------------------------------------------------------------
 
