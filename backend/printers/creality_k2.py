@@ -1,44 +1,51 @@
-"""Creality K2 Pro adapter (terv.md 13. fejezet).
+"""Creality K2 adapter (terv.md 13. fejezet).
 
-Reality check -- what is actually true about the K2 Pro
--------------------------------------------------------
+Current reality -- K2 series protocol
+-------------------------------------
 
-There is **no official, open, documented local control API** for the K2 Pro.
-The machine runs a *locked* Creality OS on top of Klipper, and the pieces that
-look like a local API are gated or unofficial:
+The K2 series runs Klipper with a stock Moonraker stack (HTTP on port ``7125``,
+Fluidd on ``4408``). Creality still ships **no official, open, documented local
+control API**, but the Klipper/Moonraker surface is present on the device and is
+what this adapter uses:
 
-* Klipper is the firmware underneath, and a Moonraker/Fluidd stack does ship on
-  the device (Moonraker on port ``7125``, Fluidd on ``4408``). It is **not
-  exposed by default**: Creality's Moonraker config restricts clients via
-  ``trusted_clients``/``[authorization]`` and the config tree is root-owned and
-  locked, so an arbitrary LAN host is refused until the operator unlocks the
-  printer. The CFS is exposed as the Klipper ``box`` object
-  (``GET /printer/objects/query?box``); the payload shape is firmware-dependent
-  (see :mod:`printers.k2_box`).
-* The CFS (Creality Filament System) is a proprietary subsystem that speaks its
-  own protocol over RS-485 internally and a Creality WebSocket on port ``9999``
-  externally. Community projects (k2-websocket-re, CFSync, ha-creality-lan)
-  reverse-engineered it; it is **unofficial and firmware-version dependent**.
-* The officially supported path is Creality Cloud (HTTP + MQTT) or CrealityPrint
-  LAN control. Both require a Creality account/app and are not self-hosted, so
-  they are not a fit for this project's core.
+* Print operations (status / upload / start / cancel) go through Moonraker --
+  the documented Klipper API.
+* The CFS (Creality Filament System) is exposed by Creality's ``[box]`` Klipper
+  module. The **primary** CFS source is the standard object query
+  ``GET /printer/objects/query?box`` (see :mod:`printers.k2_box`), which needs no
+  bespoke framing.
+* When the ``[box]`` query is unavailable or reports no slots, the adapter falls
+  back to the reverse-engineered Creality WebSocket on port ``9999``
+  (:mod:`printers.k2_websocket`; community ``k2-websocket-re`` /
+  ``Creality-K2-websocket``). That protocol is **unofficial and
+  firmware-dependent**.
 
-Consequently the adapter ships a **best-effort, opt-in** transport:
+Moonraker on the K2 is often **gated**: Creality's config restricts LAN clients
+via ``trusted_clients`` / ``[authorization]`` and the config tree is root-owned,
+so an arbitrary host is refused until the operator adds it to
+``trusted_clients`` or supplies an API key. The officially supported Creality
+Cloud (HTTP + MQTT) / CrealityPrint LAN path needs a Creality account and is
+**out of scope** for this self-hosted core.
 
-* :class:`MoonrakerK2Transport` uses the on-device Moonraker (port ``7125``) for
-  status/upload/start/cancel -- exactly the documented Klipper API. For the CFS
-  it prefers Moonraker's ``[box]`` object query and falls back to the
-  proprietary WebSocket (port ``9999``) when that query fails or reports no
-  slots. Both paths are unofficial/gated and firmware-dependent; they never fake
-  success, so an unreachable or locked printer raises
+Design
+------
+
+* :class:`MoonrakerK2Transport` is the default produced by
+  :meth:`K2Transport.from_printer`: Moonraker for print operations, the ``[box]``
+  object as the primary CFS source and the port-9999 WebSocket as fallback. It
+  never fakes success -- an unreachable or locked printer raises
   :class:`~printers.base.PrinterConnectionError` and the job is marked
   ``FAILED``.
-* :class:`UnconfiguredK2Transport` remains the explicit "no protocol" fallback
-  (kept for tests and for deployments that want to refuse rather than try).
+* :class:`UnconfiguredK2Transport` is an explicit refuse-rather-than-fake
+  fallback for callers that want no network attempt at all.
+* The K2-specific wire protocol lives only behind :class:`K2Transport`, so the
+  core (queue, API, factory) never depends on it; the K2 is just another registry
+  entry.
 
-The rest of the app never depends on the K2: the queue and the factory treat it
-like any other backend. Pin the validated firmware version in the deployment
-notes when you roll this out.
+Operational notes and the per-device validation checklist live in
+:data:`K2_OPERATIONAL_NOTES`: pin the validated firmware, unlock Moonraker for
+the app host, and never log credentials or tokens. No shell is used anywhere in
+this adapter.
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ from .moonraker import MoonrakerClient, moonraker_base_url, status_from_objects
 __all__ = [
     "K2_FLUIDD_PORT",
     "K2_MOONRAKER_PORT",
+    "K2_OPERATIONAL_NOTES",
     "K2_WEBSOCKET_PORT",
     "CrealityK2Backend",
     "K2Transport",
@@ -73,27 +81,27 @@ K2_MOONRAKER_PORT = 7125  # Klipper HTTP API -- gated by trusted_clients
 K2_FLUIDD_PORT = 4408  # bundled Fluidd web UI
 # K2_WEBSOCKET_PORT (9999) is defined in ``k2_websocket`` and re-exported above.
 
-#: The precise TODO surfaced by :class:`UnconfiguredK2Transport`. Kept as a
-#: module constant so tests and callers can assert on it verbatim.
-K2_PROTOCOL_TODO = (
-    "Creality K2 Pro has no public local API. TODO(printer-integration): "
-    "implement a K2Transport and pin the firmware version it was validated on. "
-    "Candidates: (a) Moonraker on port 7125 for status/upload/start/cancel -- "
-    "requires the client IP in Moonraker's trusted_clients/authorization, which "
-    "Creality's locked config does not expose by default, and it does NOT expose "
-    "CFS; (b) the proprietary Creality WebSocket on port 9999 for live status "
-    "and CFS slot data (reverse-engineered, unofficial, firmware-specific); "
-    "(c) Creality Cloud MQTT/HTTP (requires a Creality account, not "
-    "self-hosted). No shell, never log credentials/tokens."
+#: Operational notes for a real K2 deployment. This is **not** a TODO: the
+#: Moonraker transport is implemented. It records what an operator must validate
+#: per device so the adapter can reach the printer, and is surfaced verbatim by
+#: :class:`UnconfiguredK2Transport`.
+K2_OPERATIONAL_NOTES = (
+    "K2 deployment checklist: (1) add the app host to Moonraker's "
+    "trusted_clients, or set Printer.api_key for [authorization]; (2) pin the "
+    "validated firmware version per device -- the [box] payload and the port-9999 "
+    "CFS schema are firmware-dependent; (3) CFS is read from the Klipper [box] "
+    "object (/printer/objects/query?box) with the port-9999 WebSocket as "
+    "fallback; (4) the official Creality Cloud path is out of scope. Never log "
+    "credentials or tokens; no shell."
 )
 
 
 class K2Transport(ABC):
-    """Replaceable wire-protocol boundary for the K2 Pro.
+    """Replaceable wire-protocol boundary for the K2 series.
 
-    This is the only place K2-specific communication may live. Subclasses (e.g.
-    a future ``MoonrakerK2Transport`` or ``WebSocketK2Transport``) translate the
-    operations below into the real protocol; the adapter and the rest of the app
+    This is the only place K2-specific communication may live. The concrete
+    :class:`MoonrakerK2Transport` translates the operations below into Moonraker
+    plus the CFS ``[box]``/WebSocket protocol; the adapter and the rest of the app
     stay protocol-agnostic. ``host`` is the printer's LAN address.
     """
 
@@ -137,14 +145,21 @@ class K2Transport(ABC):
 
 
 class UnconfiguredK2Transport(K2Transport):
-    """Default K2 transport: refuses every operation with a precise TODO.
+    """Explicit refuse-rather-than-fake transport (not the default).
 
-    It never fakes success. The app keeps working because the K2 is just one
-    registry entry and the queue never assumes a live printer.
+    :meth:`K2Transport.from_printer` returns :class:`MoonrakerK2Transport`, so
+    production never uses this. It is kept for callers and tests that want a
+    transport which raises for every operation instead of touching the network;
+    it never fabricates a successful result. The message carries the deployment
+    checklist from :data:`K2_OPERATIONAL_NOTES`.
     """
 
     def _fail(self) -> NoReturn:
-        raise PrinterProtocolNotImplementedError(K2_PROTOCOL_TODO)
+        raise PrinterProtocolNotImplementedError(
+            "No K2 transport configured; set Printer.host so "
+            "K2Transport.from_printer builds a MoonrakerK2Transport. "
+            f"{K2_OPERATIONAL_NOTES}"
+        )
 
     def fetch_status(self) -> PrinterStatus:
         self._fail()

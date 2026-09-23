@@ -1,9 +1,13 @@
 """Tests for the Creality K2 adapter -- no network, transport is faked.
 
-The real K2 protocol is unknown (see ``printers/creality_k2.py``), so the
-default transport must *refuse* every operation. These tests also verify that
-the adapter correctly delegates to an injected transport, which is how a future
-real transport will be exercised.
+The K2 series runs Klipper + a stock Moonraker, so
+:meth:`K2Transport.from_printer` builds a :class:`MoonrakerK2Transport`
+(Moonraker for print ops, the Klipper ``[box]`` object as the primary CFS
+source and the port-9999 WebSocket as fallback). The explicit
+:class:`UnconfiguredK2Transport` must *refuse* every operation rather than fake
+success. These tests also verify that the adapter correctly delegates to an
+injected transport, which is how the real transport is exercised without a
+network.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import pytest
 
 from printers.base import CfsSlot, PrinterProtocolNotImplementedError, PrinterState, PrinterStatus
 from printers.creality_k2 import (
-    K2_PROTOCOL_TODO,
+    K2_OPERATIONAL_NOTES,
     CrealityK2Backend,
     K2Transport,
     MoonrakerK2Transport,
@@ -67,11 +71,13 @@ class FakeTransport(K2Transport):
 # ---------------------------------------------------------------------------
 
 
-def test_unconfigured_transport_refuses_status_with_todo():
+def test_unconfigured_transport_refuses_status_with_guidance():
     backend = CrealityK2Backend(_printer(), transport=UnconfiguredK2Transport(host="k2.local"))
     with pytest.raises(PrinterProtocolNotImplementedError) as excinfo:
         backend.status()
-    assert "TODO(printer-integration)" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "No K2 transport configured" in message
+    assert K2_OPERATIONAL_NOTES in message
 
 
 def test_unconfigured_transport_refuses_every_operation():
@@ -86,10 +92,17 @@ def test_unconfigured_transport_refuses_every_operation():
             call()
 
 
-def test_unconfigured_transport_exposes_todo_constant():
+def test_operational_notes_describe_the_implemented_reality():
     transport = UnconfiguredK2Transport(host="k2.local")
     assert transport.host == "k2.local"
-    assert "K2 Pro" in K2_PROTOCOL_TODO
+    # The notes are an operational checklist, not an "unimplemented" TODO.
+    assert "K2 deployment checklist" in K2_OPERATIONAL_NOTES
+    assert "Moonraker" in K2_OPERATIONAL_NOTES
+    assert "trusted_clients" in K2_OPERATIONAL_NOTES
+    assert "[box]" in K2_OPERATIONAL_NOTES
+    lowered = K2_OPERATIONAL_NOTES.lower()
+    assert "todo" not in lowered
+    assert "not implemented" not in lowered
     with pytest.raises(NotImplementedError):
         transport.fetch_cfs_slots()
 
