@@ -16,10 +16,12 @@ Estimates/metadata are stored in ``PrintJob.slicing_json``.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from django.conf import settings
 from django.utils import timezone
 
 from files.services import get_storage
@@ -37,6 +39,8 @@ from .base import (
     with_default_filament_density,
 )
 from .models import FilamentProfile, PrinterProfile, ProcessProfile
+from .orcaslicer import OrcaSlicerBackend
+from .preview import render_gcode_preview
 from .prusaslicer import PrusaSlicerBackend
 
 try:  # api-dev implements this contract in parallel; degrade gracefully without it
@@ -51,19 +55,54 @@ __all__ = [
     "get_backend",
     "notify_slice_failed",
     "notify_slice_ready",
+    "preview_path",
     "printer_settings",
     "process_settings",
     "read_plate_items",
+    "resolve_backend_name",
     "resolve_printer_profile",
     "slice_job",
 ]
 
 logger = logging.getLogger(__name__)
 
+#: ``SLICER_BACKEND`` value -> backend class. Aliases are accepted so both the
+#: short and the canonical spelling work in config.
+_BACKEND_REGISTRY: dict[str, type[SlicerBackend]] = {
+    "prusaslicer": PrusaSlicerBackend,
+    "prusa": PrusaSlicerBackend,
+    "orcaslicer": OrcaSlicerBackend,
+    "orca": OrcaSlicerBackend,
+}
 
-def get_backend() -> PrusaSlicerBackend:
+
+def resolve_backend_name() -> str:
+    """Resolve the configured backend name (runtime -> env -> Django -> default).
+
+    ``configuration.services.get_setting`` only knows registered runtime names;
+    an unknown ``slicer_backend`` (not yet registered by the config app) falls
+    through to ``SLICER_BACKEND`` / the Django setting, then ``prusaslicer``.
+    """
+    name = ""
+    try:
+        from configuration.services import get_setting
+
+        name = str(get_setting("slicer_backend") or "")
+    except Exception:  # noqa: BLE001 - unregistered key / settings backend unavailable
+        name = ""
+    if not name:
+        name = str(os.environ.get("SLICER_BACKEND") or getattr(settings, "SLICER_BACKEND", ""))
+    return (name or "prusaslicer").strip().lower()
+
+
+def get_backend() -> SlicerBackend:
     """Return the configured slicer backend (indirection point for tests)."""
-    return PrusaSlicerBackend()
+    name = resolve_backend_name()
+    backend_cls = _BACKEND_REGISTRY.get(name)
+    if backend_cls is None:
+        supported = ", ".join(sorted(set(_BACKEND_REGISTRY)))
+        raise SlicerError(f"Unknown SLICER_BACKEND {name!r}; expected one of: {supported}")
+    return backend_cls()
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +153,11 @@ def notify_slice_failed(job: PrintJob, error: BaseException) -> None:
 def gcode_path(project_id: int, job_id: int) -> str:
     """Relative storage path of a job's G-code (matches printers' upload_to)."""
     return f"print_jobs/{project_id}/{job_id}.gcode"
+
+
+def preview_path(project_id: int, job_id: int) -> str:
+    """Relative storage path of a job's rendered G-code preview (PNG)."""
+    return f"print_jobs/{project_id}/{job_id}/preview.png"
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +256,28 @@ def _persist_slicing_metadata(job: PrintJob, data: dict[str, Any]) -> None:
     existing ones), validates JSON-serializability and persists the field.
     """
     set_slicing_metadata(job, **data)
+
+
+def _render_preview(job: PrintJob, storage: Any, gcode: bytes) -> dict[str, Any]:
+    """Render + persist the G-code preview, never failing the slice.
+
+    Returns the ``slicing_json`` keys to merge (``preview`` + ``preview_bytes``)
+    or an empty dict when rendering/storage failed -- a preview is a nice-to-have
+    and must not turn a successful slice into a failed job.
+    """
+    try:
+        png = render_gcode_preview(gcode)
+    except Exception as exc:  # noqa: BLE001 - preview is best-effort
+        logger.warning("G-code preview rendering failed for PrintJob %s: %s", job.pk, exc)
+        return {}
+
+    relative = preview_path(job.project_id, job.pk)
+    try:
+        storage.write_bytes(relative, png)
+    except Exception as exc:  # noqa: BLE001 - preview is best-effort
+        logger.warning("Could not persist the G-code preview for PrintJob %s: %s", job.pk, exc)
+        return {}
+    return {"preview": relative, "preview_bytes": len(png)}
 
 
 def _read_model(job: PrintJob, storage: Any) -> bytes:
@@ -358,6 +424,8 @@ def slice_job(
         }
         if plate_items is not None:
             metadata.update(_plate_metadata(job.build_plate, plate_items))
+        preview = _render_preview(job, storage, result.data)
+        metadata.update(preview)
         _persist_slicing_metadata(job, metadata)
 
         job.gcode.name = relative
@@ -383,6 +451,8 @@ def slice_job(
         "gcode": relative,
         "estimate": estimate,
     }
+    if preview:
+        response["preview"] = preview["preview"]
     if plate_items is not None:
         response["item_count"] = len(plate_items)
     return response

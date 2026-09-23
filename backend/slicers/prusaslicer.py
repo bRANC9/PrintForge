@@ -411,6 +411,19 @@ class PrusaSlicerBackend(SlicerBackend):
     name = "prusaslicer"
     supported_formats = ("gcode",)
 
+    #: Human-readable name used in timeout/error messages.
+    _display_name = "PrusaSlicer"
+
+    @classmethod
+    def _default_config(cls) -> PrusaSlicerConfig:
+        """Transport-level config read from the environment.
+
+        Subclasses (notably :class:`slicers.orcaslicer.OrcaSlicerBackend`)
+        override this to change the binary/image defaults while keeping the
+        runtime ``slicer_mode``/``slicer_timeout_sec`` resolution.
+        """
+        return _config_from_environment()
+
     def __init__(
         self,
         config: PrusaSlicerConfig | None = None,
@@ -423,7 +436,7 @@ class PrusaSlicerBackend(SlicerBackend):
         memory_limit: str | None = None,
         cpu_limit: str | None = None,
     ) -> None:
-        resolved = config or _config_from_environment()
+        resolved = config or self._default_config()
         overrides: dict[str, Any] = {
             "mode": mode,
             "binary": binary,
@@ -469,6 +482,18 @@ class PrusaSlicerBackend(SlicerBackend):
             raise SlicerError(f"Unknown slicer_mode {config.mode!r}; expected 'local' or 'docker'")
         return config
 
+    # -- Profile materialisation (overridable per backend) ------------------
+
+    def _prepare_profiles(
+        self,
+        input_dir: Path,
+        printer: PrinterSettings,
+        filament: FilamentSettings,
+        process: ProcessSettings,
+    ) -> tuple[list[Path], list[str]]:
+        """Write the three profiles into ``input_dir`` (PrusaSlicer ``.ini``)."""
+        return prepare_profiles(input_dir, printer, filament, process)
+
     # -- SlicerBackend ------------------------------------------------------
 
     def slice(
@@ -489,7 +514,7 @@ class PrusaSlicerBackend(SlicerBackend):
             output_dir.mkdir()
             (input_dir / model_name).write_bytes(source.data)
 
-            config_files, overrides = prepare_profiles(input_dir, printer, filament, process)
+            config_files, overrides = self._prepare_profiles(input_dir, printer, filament, process)
             args = self.build_args(
                 input_dir,
                 output_dir,
@@ -538,7 +563,7 @@ class PrusaSlicerBackend(SlicerBackend):
             output_dir.mkdir()
             (input_dir / model_name).write_bytes(plate_bytes)
 
-            config_files, overrides = prepare_profiles(input_dir, printer, filament, process)
+            config_files, overrides = self._prepare_profiles(input_dir, printer, filament, process)
             args = self.build_args(
                 input_dir,
                 output_dir,
@@ -569,20 +594,25 @@ class PrusaSlicerBackend(SlicerBackend):
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise SlicerTimeout(f"PrusaSlicer timed out after {config.timeout_sec}s") from exc
+            raise SlicerTimeout(
+                f"{self._display_name} timed out after {config.timeout_sec}s"
+            ) from exc
 
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
             raise SlicerError(
-                f"PrusaSlicer exited with code {completed.returncode}: {detail[:500]}"
+                f"{self._display_name} exited with code {completed.returncode}: {detail[:500]}"
             )
 
-    @staticmethod
-    def _read_gcode(output_dir: Path) -> bytes:
+    def _read_gcode(self, output_dir: Path) -> bytes:
         output_path = output_dir / "model.gcode"
         if not output_path.exists():
-            raise SlicerError("PrusaSlicer reported success but produced no G-code")
+            raise SlicerError(f"{self._display_name} reported success but produced no G-code")
         return output_path.read_bytes()
+
+    def _parse_estimates(self, text: str) -> dict[str, Any]:
+        """Parse the slicer's G-code comment headers (overridable per backend)."""
+        return parse_gcode_estimates(text)
 
     def _result_from_gcode(
         self,
@@ -591,7 +621,7 @@ class PrusaSlicerBackend(SlicerBackend):
         filament: FilamentSettings | None = None,
         extra_metadata: Mapping[str, Any] | None = None,
     ) -> SlicedResult:
-        estimates = parse_gcode_estimates(data.decode("utf-8", errors="replace"))
+        estimates = self._parse_estimates(data.decode("utf-8", errors="replace"))
         if filament is not None:
             estimates = _fill_missing_filament_grams(estimates, filament)
         metadata: dict[str, Any] = {"slicer": self.name, **estimates}

@@ -54,6 +54,30 @@ class BoomBackend(FakeBackend):
         raise SlicerError("slicer exploded")
 
 
+#: G-code with real extruding moves so the preview renderer produces a PNG.
+PREVIEW_GCODE = (
+    b"; estimated printing time (normal mode) = 1m 0s\n"
+    b"; filament used [g] = 1.50\n"
+    b"G1 X0 Y0 E0\n"
+    b"G1 X10 Y0 E1.0\n"
+    b"G1 X10 Y10 E2.0\n"
+)
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+class PreviewBackend(FakeBackend):
+    def slice(self, model, printer, filament, process):  # noqa: ANN001
+        self.received = (model, printer, filament, process)
+        return SlicedResult(
+            data=PREVIEW_GCODE,
+            format="gcode",
+            estimated_time_sec=60,
+            estimated_filament_g=1.5,
+            metadata={"slicer": "fake"},
+        )
+
+
 @pytest.fixture
 def job():
     user = UserFactory()
@@ -99,6 +123,38 @@ def test_slice_job_stores_gcode_and_estimate(job, tmp_path):
     assert metadata["slicer"] == "fake"
     assert metadata["estimate"]["filament_g"] == 1.5
     assert "computed_at" in metadata
+
+
+def test_slice_job_persists_gcode_preview(job, tmp_path):
+    storage = _storage_with_model(job, tmp_path)
+
+    result = services.slice_job(job, backend=PreviewBackend(), storage=storage)
+
+    job.refresh_from_db()
+    relative = services.preview_path(job.project_id, job.pk)
+    assert job.status == PrintJobStatus.READY
+    assert job.slicing_json["preview"] == relative
+    assert job.slicing_json["preview_bytes"] > 0
+    assert storage.exists(relative)
+    assert storage.read_bytes(relative).startswith(PNG_MAGIC)
+    assert result["preview"] == relative
+
+
+def test_slice_job_survives_a_preview_failure(job, tmp_path, monkeypatch):
+    storage = _storage_with_model(job, tmp_path)
+
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("preview backend unavailable")
+
+    monkeypatch.setattr(services, "render_gcode_preview", boom)
+
+    result = services.slice_job(job, backend=PreviewBackend(), storage=storage)
+
+    job.refresh_from_db()
+    assert job.status == PrintJobStatus.READY
+    assert "preview" not in job.slicing_json
+    assert result["status"] == "READY"
+    assert storage.read_bytes(job.gcode.name) == PREVIEW_GCODE
 
 
 def test_slice_job_links_resolved_printer_profile(job, tmp_path):
