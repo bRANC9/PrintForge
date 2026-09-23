@@ -243,6 +243,9 @@ CELERY_TIMEZONE = TIME_ZONE
 # LLM / Ollama
 OLLAMA_BASE_URL = env("OLLAMA_BASE_URL", default="http://localhost:11434")
 OLLAMA_MODEL = env("OLLAMA_MODEL", default="qwen3-coder:30b")
+# Optional dedicated vision model for the agent self-check review (empty = use
+# the main OLLAMA_MODEL). Runtime override: `ollama_vision_model`.
+OLLAMA_VISION_MODEL = env("OLLAMA_VISION_MODEL", default="")
 
 # Embedding / RAG
 EMBEDDING_MODEL = env("EMBEDDING_MODEL", default="bge-m3")

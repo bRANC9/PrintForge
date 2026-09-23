@@ -35,6 +35,7 @@ class AppSettings(models.Model):
 
     ollama_base_url = models.URLField(blank=True)
     ollama_model = models.CharField(max_length=200, blank=True)
+    ollama_vision_model = models.CharField(max_length=200, blank=True)
     embedding_model = models.CharField(max_length=200, blank=True)
     rag_enabled = models.BooleanField(null=True, blank=True)
     openscad_mode = models.CharField(max_length=20, blank=True, choices=MODE_CHOICES)
