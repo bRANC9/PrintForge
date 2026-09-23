@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 
@@ -70,6 +71,50 @@ def test_update_settings_overrides_and_invalidates_cache():
     assert payload["effective"]["ollama_model"] == "qwen3-coder:7b"
     assert payload["overrides"]["ollama_model"] == "qwen3-coder:7b"
     assert payload["sources"]["ollama_model"] == "db"
+
+
+def test_ollama_vision_model_is_registered_with_empty_default(monkeypatch):
+    monkeypatch.delattr(django_settings, "OLLAMA_VISION_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
+
+    assert "ollama_vision_model" in SETTING_NAMES
+    assert get_setting("ollama_vision_model") == ""
+    assert effective_settings()["sources"]["ollama_vision_model"] == "default"
+
+
+def test_ollama_vision_model_falls_back_to_settings_attr(monkeypatch):
+    monkeypatch.setattr(django_settings, "OLLAMA_VISION_MODEL", "llava:13b")
+
+    assert get_setting("ollama_vision_model") == "llava:13b"
+    assert effective_settings()["sources"]["ollama_vision_model"] == "env"
+
+
+def test_ollama_vision_model_db_override_round_trip():
+    update_settings(ollama_vision_model="llava:7b")
+
+    assert get_setting("ollama_vision_model") == "llava:7b"
+    payload = effective_settings()
+    assert payload["effective"]["ollama_vision_model"] == "llava:7b"
+    assert payload["overrides"]["ollama_vision_model"] == "llava:7b"
+    assert payload["sources"]["ollama_vision_model"] == "db"
+
+
+def test_ollama_vision_model_empty_string_clears_override():
+    update_settings(ollama_vision_model="llava:7b")
+    assert effective_settings()["sources"]["ollama_vision_model"] == "db"
+
+    update_settings(ollama_vision_model="")
+
+    payload = effective_settings()
+    assert payload["overrides"]["ollama_vision_model"] is None
+    assert payload["sources"]["ollama_vision_model"] != "db"
+
+
+def test_ollama_vision_model_max_length_is_enforced():
+    with pytest.raises(ValueError, match="ollama_vision_model"):
+        update_settings(ollama_vision_model="x" * 201)
+
+    assert effective_settings()["overrides"]["ollama_vision_model"] is None
 
 
 def test_rag_enabled_is_tri_state():

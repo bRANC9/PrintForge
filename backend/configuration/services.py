@@ -66,6 +66,7 @@ __all__ = [
 _SETTING_SPECS: dict[str, tuple[str, Any]] = {
     "ollama_base_url": ("OLLAMA_BASE_URL", "http://localhost:11434"),
     "ollama_model": ("OLLAMA_MODEL", "qwen3-coder:30b"),
+    "ollama_vision_model": ("OLLAMA_VISION_MODEL", ""),
     "embedding_model": ("EMBEDDING_MODEL", "bge-m3"),
     "rag_enabled": ("RAG_ENABLED", False),
     "openscad_mode": ("OPENSCAD_MODE", "local"),

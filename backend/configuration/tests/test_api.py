@@ -87,6 +87,40 @@ def test_patch_settings_persists_and_returns_payload(staff):
     assert get_setting("ollama_model") == "qwen3-coder:7b"
 
 
+def test_patch_settings_round_trips_vision_model(staff):
+    response = auth(staff).patch(
+        "/api/v1/settings/",
+        {"ollama_vision_model": "llava:7b"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["effective"]["ollama_vision_model"] == "llava:7b"
+    assert body["overrides"]["ollama_vision_model"] == "llava:7b"
+    assert body["sources"]["ollama_vision_model"] == "db"
+    assert get_setting("ollama_vision_model") == "llava:7b"
+
+    cleared = auth(staff).patch(
+        "/api/v1/settings/",
+        {"ollama_vision_model": ""},
+        format="json",
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["overrides"]["ollama_vision_model"] is None
+
+
+def test_patch_settings_rejects_oversized_vision_model(staff):
+    response = auth(staff).patch(
+        "/api/v1/settings/",
+        {"ollama_vision_model": "x" * 201},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "ollama_vision_model" in response.json()["detail"]
+
+
 def test_patch_rejects_unknown_name(staff):
     response = auth(staff).patch("/api/v1/settings/", {"nope": 1}, format="json")
 
