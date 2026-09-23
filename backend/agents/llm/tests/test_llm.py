@@ -21,7 +21,7 @@ from agents.llm import (
     get_provider,
     normalise_images,
 )
-from agents.llm.ollama import _service_setting
+from agents.llm.ollama import DEFAULT_TIMEOUT_SEC, _service_setting
 from agents.spec import ModelSpecification
 
 VALID_SPEC: dict[str, Any] = ModelSpecification.example()
@@ -259,6 +259,110 @@ def test_reload_keeps_explicit_values():
     provider = OllamaProvider(get_setting=lambda name: live[name])
     provider.reload(model="override")
     assert (provider.base_url, provider.model) == ("http://svc:11434", "override")
+
+
+# ---------------------------------------------------------------------------
+# OllamaProvider timeout resolution (injected seam, no network)
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_defaults_when_setting_missing():
+    provider = OllamaProvider(get_setting=fake_settings())
+    assert provider.timeout == DEFAULT_TIMEOUT_SEC
+    assert isinstance(provider.timeout, float)
+
+
+def test_timeout_uses_runtime_setting():
+    provider = OllamaProvider(get_setting=fake_settings({"ollama_timeout": 45}))
+    assert provider.timeout == 45.0
+
+
+def test_timeout_accepts_numeric_string_setting():
+    provider = OllamaProvider(get_setting=fake_settings({"ollama_timeout": "90"}))
+    assert provider.timeout == 90.0
+
+
+def test_explicit_timeout_wins_over_setting():
+    provider = OllamaProvider(timeout=7, get_setting=fake_settings({"ollama_timeout": 45}))
+    assert provider.timeout == 7.0
+
+
+def test_explicit_timeout_wins_over_raising_seam():
+    def exploding(name: str) -> Any:
+        raise AssertionError(f"settings service must not be queried for {name}")
+
+    provider = OllamaProvider(
+        base_url="http://test:11434",
+        model="test-model",
+        timeout=7,
+        get_setting=exploding,
+    )
+    assert provider.timeout == 7.0
+
+
+def test_timeout_positional_argument_still_supported():
+    provider = OllamaProvider(None, None, 5, get_setting=fake_settings())
+    assert provider.timeout == 5.0
+
+
+def test_timeout_degrades_when_seam_raises():
+    def broken(name: str) -> Any:
+        if name == "ollama_timeout":
+            raise RuntimeError("settings service unavailable")
+        return None
+
+    provider = OllamaProvider(get_setting=broken)
+    assert provider.timeout == DEFAULT_TIMEOUT_SEC
+
+
+def test_timeout_degrades_when_setting_unknown():
+    def unknown(name: str) -> Any:
+        if name == "ollama_timeout":
+            raise ValueError(f"Unknown setting: {name}")
+        return None
+
+    provider = OllamaProvider(get_setting=unknown)
+    assert provider.timeout == DEFAULT_TIMEOUT_SEC
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [0, -5, "0", "-1", "", "   ", "abc", None, float("nan"), float("inf")],
+)
+def test_invalid_timeout_setting_falls_back_to_default(bad):
+    provider = OllamaProvider(get_setting=fake_settings({"ollama_timeout": bad}))
+    assert provider.timeout == DEFAULT_TIMEOUT_SEC
+
+
+def test_invalid_explicit_timeout_falls_back_to_default():
+    provider = OllamaProvider(timeout=0, get_setting=fake_settings({"ollama_timeout": 45}))
+    assert provider.timeout == DEFAULT_TIMEOUT_SEC
+
+
+def test_reload_picks_up_timeout_change():
+    live = {
+        "ollama_base_url": "http://old:11434",
+        "ollama_model": "old-model",
+        "ollama_timeout": 30,
+    }
+    provider = OllamaProvider(get_setting=lambda name: live[name])
+    assert provider.timeout == 30.0
+
+    live["ollama_timeout"] = 60
+    provider.reload()
+    assert provider.timeout == 60.0
+
+
+def test_reload_keeps_explicit_timeout():
+    live = {
+        "ollama_base_url": "http://svc:11434",
+        "ollama_model": "svc-model",
+        "ollama_timeout": 30,
+    }
+    provider = OllamaProvider(timeout=7, get_setting=lambda name: live[name])
+    live["ollama_timeout"] = 60
+    provider.reload()
+    assert provider.timeout == 7.0
 
 
 def test_default_resolver_uses_module_seam(monkeypatch):

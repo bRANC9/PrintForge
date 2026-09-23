@@ -84,6 +84,7 @@ _SETTING_SPECS: dict[str, SettingSpec] = {
     "ollama_base_url": SettingSpec("OLLAMA_BASE_URL", "http://localhost:11434"),
     "ollama_model": SettingSpec("OLLAMA_MODEL", "qwen3-coder:30b"),
     "ollama_vision_model": SettingSpec("OLLAMA_VISION_MODEL", ""),
+    "ollama_timeout": SettingSpec("OLLAMA_TIMEOUT", 120),
     "llm_provider": SettingSpec("LLM_PROVIDER", "ollama"),
     "openai_base_url": SettingSpec("OPENAI_BASE_URL", ""),
     "openai_api_key": SettingSpec("OPENAI_API_KEY", "", secret=True),

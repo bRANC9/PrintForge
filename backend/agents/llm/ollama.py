@@ -5,13 +5,15 @@ extra dependency (terv.md 3. / 18. fejezet). ``generate()`` calls
 ``POST {base}/api/generate`` and ``structured()`` calls ``POST {base}/api/chat``
 with Ollama's structured-output ``format`` field.
 
-``base_url``/``model`` are resolved from the runtime settings service
-(``configuration.services.get_setting``: DB override -> Django settings ->
-``os.environ`` -> default). Values are resolved **at construction time** —
+``base_url``/``model``/``timeout`` are resolved from the runtime settings
+service (``configuration.services.get_setting``: DB override -> Django settings
+-> ``os.environ`` -> default). Values are resolved **at construction time** —
 never cached at import time — and can be refreshed with :meth:`reload`, so an
 admin setting change takes effect on the next provider instance without a
 process restart. Explicit constructor arguments always win; a ``get_setting``
-seam can be injected for tests without touching the database.
+seam can be injected for tests without touching the database. ``timeout`` is
+resolved from ``ollama_timeout``; a missing/unknown name, a raising resolver or
+an invalid/blank/non-positive value degrades to :data:`DEFAULT_TIMEOUT_SEC`.
 
 Vision (terv.md 27. fejezet) is detected from the model's own capability
 metadata via ``POST /api/show`` (field ``capabilities``) and cached in-process
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import threading
 import urllib.error
 import urllib.request
@@ -60,30 +63,40 @@ class OllamaProvider(LLMProvider):
         self,
         base_url: str | None = None,
         model: str | None = None,
-        timeout: float = DEFAULT_TIMEOUT_SEC,
+        timeout: float | None = None,
         *,
         system_prompt: str = STRUCTURED_SYSTEM_PROMPT,
         get_setting: SettingGetter | None = None,
     ) -> None:
         self._get_setting: SettingGetter = get_setting or _service_setting
-        self.timeout = float(timeout)
+        #: Positive seconds when the caller pinned ``timeout``, else ``None`` so
+        #: :meth:`reload` resolves ``ollama_timeout`` from the settings service.
+        self._explicit_timeout: float | None = _coerce_timeout(timeout)
+        self._timeout_pinned = timeout is not None
         self.system_prompt = system_prompt
         self.base_url = DEFAULT_BASE_URL
         self.model = DEFAULT_MODEL
+        self.timeout = DEFAULT_TIMEOUT_SEC
         self.reload(base_url=base_url, model=model)
 
     def reload(self, *, base_url: str | None = None, model: str | None = None) -> None:
-        """Re-resolve ``base_url``/``model`` from the settings service.
+        """Re-resolve ``base_url``/``model``/``timeout`` from the settings service.
 
         Called by ``__init__``; call it again to pick up a runtime settings
         change (a provider instance is short-lived per call, so this is usually
         not needed). Explicit arguments win over the settings service, so
-        ``reload(model="x")`` refreshes only the base URL.
+        ``reload(model="x")`` refreshes only the base URL. A ``timeout`` passed
+        to the constructor is sticky: it keeps winning over ``ollama_timeout``
+        across reloads.
         """
         resolved_base = base_url if base_url is not None else self._get_setting("ollama_base_url")
         resolved_model = model if model is not None else self._get_setting("ollama_model")
         self.base_url = str(_or_default(resolved_base, DEFAULT_BASE_URL)).rstrip("/")
         self.model = str(_or_default(resolved_model, DEFAULT_MODEL))
+        if self._timeout_pinned:
+            self.timeout = self._explicit_timeout or DEFAULT_TIMEOUT_SEC
+        else:
+            self.timeout = _resolve_timeout(self._get_setting)
 
     # -- public API ---------------------------------------------------------
 
@@ -304,6 +317,47 @@ def _or_default(value: Any, default: str) -> Any:
     if isinstance(value, str) and not value.strip():
         return default
     return value
+
+
+def _coerce_timeout(value: Any) -> float | None:
+    """Return *value* as positive seconds, or ``None`` when unusable.
+
+    Rejects ``None``, booleans, blanks, non-numeric strings, ``NaN``/``inf``
+    and non-positive numbers, so the caller can fall back to
+    :data:`DEFAULT_TIMEOUT_SEC`.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    elif isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _resolve_timeout(get_setting: SettingGetter) -> float:
+    """Resolve ``ollama_timeout`` from the settings service, never raising.
+
+    A missing/unknown name, a raising resolver (e.g. no database reachable) or
+    an invalid/blank/non-positive value all degrade to
+    :data:`DEFAULT_TIMEOUT_SEC`, so a bad runtime setting can never break
+    provider construction.
+    """
+    try:
+        value = get_setting("ollama_timeout")
+    except Exception:  # noqa: BLE001 - a missing service/DB must not break construction
+        return DEFAULT_TIMEOUT_SEC
+    return _coerce_timeout(value) or DEFAULT_TIMEOUT_SEC
 
 
 def _message_content(result: dict[str, Any]) -> str | None:

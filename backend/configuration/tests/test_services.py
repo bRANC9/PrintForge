@@ -119,6 +119,62 @@ def test_ollama_vision_model_max_length_is_enforced():
     assert effective_settings()["overrides"]["ollama_vision_model"] is None
 
 
+def test_ollama_timeout_is_registered_with_service_default(monkeypatch):
+    monkeypatch.delattr(django_settings, "OLLAMA_TIMEOUT", raising=False)
+    monkeypatch.delenv("OLLAMA_TIMEOUT", raising=False)
+
+    assert "ollama_timeout" in SETTING_NAMES
+    assert _SETTING_SPECS["ollama_timeout"][:2] == ("OLLAMA_TIMEOUT", 120)
+    assert get_setting("ollama_timeout") == 120
+    assert effective_settings()["sources"]["ollama_timeout"] == "default"
+
+
+def test_ollama_timeout_falls_back_to_settings_attr(monkeypatch):
+    monkeypatch.setattr(django_settings, "OLLAMA_TIMEOUT", 300)
+
+    assert get_setting("ollama_timeout") == 300
+    assert effective_settings()["sources"]["ollama_timeout"] == "env"
+
+
+def test_ollama_timeout_falls_back_to_environment(monkeypatch):
+    monkeypatch.delattr(django_settings, "OLLAMA_TIMEOUT", raising=False)
+    monkeypatch.setenv("OLLAMA_TIMEOUT", "480")
+
+    assert get_setting("ollama_timeout") == 480
+    assert effective_settings()["sources"]["ollama_timeout"] == "env"
+
+
+def test_ollama_timeout_db_override_round_trip():
+    update_settings(ollama_timeout=600)
+
+    assert get_setting("ollama_timeout") == 600
+    payload = effective_settings()
+    assert payload["effective"]["ollama_timeout"] == 600
+    assert payload["overrides"]["ollama_timeout"] == 600
+    assert payload["sources"]["ollama_timeout"] == "db"
+
+
+def test_ollama_timeout_is_coerced_and_cleared():
+    update_settings(ollama_timeout="240")
+    assert get_setting("ollama_timeout") == 240
+
+    update_settings(ollama_timeout="")
+    assert get_setting("ollama_timeout") == 120
+    assert effective_settings()["overrides"]["ollama_timeout"] is None
+
+    update_settings(ollama_timeout=None)
+    assert effective_settings()["sources"]["ollama_timeout"] != "db"
+
+
+def test_ollama_timeout_validation_rejects_invalid_values():
+    with pytest.raises(ValueError, match="ollama_timeout"):
+        update_settings(ollama_timeout=-1)
+    with pytest.raises(ValueError, match="ollama_timeout"):
+        update_settings(ollama_timeout="abc")
+
+    assert effective_settings()["overrides"]["ollama_timeout"] is None
+
+
 def test_openai_model_is_registered_with_service_default(monkeypatch):
     monkeypatch.delattr(django_settings, "OPENAI_MODEL", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)

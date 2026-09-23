@@ -258,6 +258,9 @@ OLLAMA_MODEL = env("OLLAMA_MODEL", default="qwen3-coder:30b")
 # Optional dedicated vision model for the agent self-check review (empty = use
 # the main OLLAMA_MODEL). Runtime override: `ollama_vision_model`.
 OLLAMA_VISION_MODEL = env("OLLAMA_VISION_MODEL", default="")
+# Request timeout (seconds) for Ollama LLM calls; raise it for slow/offloaded
+# models. Runtime override: `ollama_timeout`.
+OLLAMA_TIMEOUT = env.int("OLLAMA_TIMEOUT", default=120)
 
 # LLM provider selection (terv.md 19. fejezet). "ollama" is the default and
 # needs nothing else; set it to "openai" to use any OpenAI-compatible endpoint

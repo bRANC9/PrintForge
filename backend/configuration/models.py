@@ -36,6 +36,10 @@ class AppSettings(models.Model):
     ollama_base_url = models.URLField(blank=True)
     ollama_model = models.CharField(max_length=200, blank=True)
     ollama_vision_model = models.CharField(max_length=200, blank=True)
+    # Request timeout (seconds) for Ollama LLM calls. Empty means "fall back to
+    # ``OLLAMA_TIMEOUT`` / the hardcoded default (120 s)", matching the
+    # ``openscad_timeout_sec`` / ``slicer_timeout_sec`` overrides.
+    ollama_timeout = models.PositiveIntegerField(null=True, blank=True)
     # LLM provider selection: "ollama" (default) or an OpenAI-compatible
     # endpoint. ``openai_api_key`` is a credential; this model has no dedicated
     # secret field, so it is stored as a plain CharField.
