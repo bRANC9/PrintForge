@@ -139,6 +139,41 @@ def test_resolve_identity_rejects_non_integer(settings, monkeypatch):
         resolve_identity_user_id()
 
 
+def test_resolve_identity_prefers_runtime_setting_override(settings, monkeypatch):
+    """A DB/runtime override beats the Django setting and the environment."""
+    settings.MCP_SERVICE_USER_ID = 7
+    monkeypatch.setenv(IDENTITY_SETTING, "9")
+    monkeypatch.setattr(
+        "configuration.services.get_setting",
+        lambda name: "42" if name == "mcp_service_user_id" else "",
+    )
+
+    assert resolve_identity_user_id() == 42
+
+
+def test_resolve_identity_rejects_non_integer_runtime_override(settings, monkeypatch):
+    """A bad runtime override fails loudly just like a bad setting/env value."""
+    monkeypatch.setattr(
+        "configuration.services.get_setting",
+        lambda name: "not-a-number",
+    )
+
+    with pytest.raises(ImproperlyConfigured):
+        resolve_identity_user_id()
+
+
+def test_resolve_identity_falls_back_when_runtime_settings_unavailable(settings, monkeypatch):
+    """If the settings store cannot be reached, read settings/env directly."""
+    settings.MCP_SERVICE_USER_ID = 7
+
+    def unavailable(name):
+        raise RuntimeError("database access not allowed")
+
+    monkeypatch.setattr("configuration.services.get_setting", unavailable)
+
+    assert resolve_identity_user_id() == 7
+
+
 # ---------------------------------------------------------------------------
 # Database-backed fixtures
 # ---------------------------------------------------------------------------

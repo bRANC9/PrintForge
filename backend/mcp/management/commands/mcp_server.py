@@ -2,9 +2,11 @@
 
 The server runs inside the Django process and calls ``services.py`` directly; it
 never shells out. Because MCP has no Django request/user, the acting identity is
-resolved from ``MCP_SERVICE_USER_ID`` (setting or environment). The workspace-role
-``authorize`` gate still runs for that principal on every tool call -- the
-transport never bypasses it.
+resolved from the runtime ``mcp_service_user_id`` setting
+(``configuration.services``, DB override included), falling back to the
+``MCP_SERVICE_USER_ID`` Django setting / environment variable. The
+workspace-role ``authorize`` gate still runs for that principal on every tool
+call -- the transport never bypasses it.
 
 Examples::
 

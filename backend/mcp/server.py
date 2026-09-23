@@ -32,6 +32,7 @@ from __future__ import annotations
 import functools
 import importlib
 import inspect
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -41,6 +42,8 @@ from django.core.exceptions import ImproperlyConfigured
 
 from . import sdk_root as _discover_sdk_root
 from .tools import Tool, all_tools, call
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CacheHint",
@@ -97,16 +100,55 @@ IDENTITY_PARAMETERS: frozenset[str] = frozenset({"user_id", "owner_id"})
 #: Setting / environment variable holding the service user's numeric id.
 IDENTITY_SETTING = "MCP_SERVICE_USER_ID"
 
+#: Runtime-editable setting name in ``configuration.services`` (terv.md 19.).
+_IDENTITY_RUNTIME_SETTING = "mcp_service_user_id"
+
+
+def _identity_from_runtime_settings() -> Any:
+    """Read the identity through ``configuration.services.get_setting``.
+
+    The import is deferred (lazy) so this transport stays importable before the
+    configuration app is ready. ``get_setting`` already resolves the DB override
+    first, then the Django setting, then the environment variable, so a runtime
+    override takes effect without a restart. If the settings store cannot be
+    reached -- no database/cache, or the app is not installed -- this returns
+    ``None`` so :func:`resolve_identity_user_id` can fall back to reading the
+    Django setting / environment directly.
+    """
+    try:
+        from configuration.services import get_setting
+    except Exception:  # noqa: BLE001 - optional app / import-time misconfiguration
+        logger.debug("configuration.services unavailable; using settings/env", exc_info=True)
+        return None
+    try:
+        return get_setting(_IDENTITY_RUNTIME_SETTING)
+    except Exception:  # noqa: BLE001 - settings store unreachable: use settings/env
+        logger.debug(
+            "could not read %s via configuration.services; using settings/env",
+            _IDENTITY_RUNTIME_SETTING,
+            exc_info=True,
+        )
+        return None
+
 
 def resolve_identity_user_id() -> int | None:
     """Return the configured MCP principal's user id, or ``None`` when unset.
 
-    Resolution order: the ``MCP_SERVICE_USER_ID`` Django setting, then the
-    ``MCP_SERVICE_USER_ID`` environment variable. A non-integer value raises
+    Resolution order:
+
+    1. ``configuration.services.get_setting("mcp_service_user_id")`` -- the
+       runtime/DB override, then the ``MCP_SERVICE_USER_ID`` Django setting,
+       then the environment variable (terv.md 19. fejezet);
+    2. the ``MCP_SERVICE_USER_ID`` Django setting;
+    3. the ``MCP_SERVICE_USER_ID`` environment variable.
+
+    A non-integer value raises
     :class:`~django.core.exceptions.ImproperlyConfigured` so a typo fails loudly
     instead of silently resolving to no identity.
     """
-    configured = getattr(settings, IDENTITY_SETTING, None)
+    configured = _identity_from_runtime_settings()
+    if configured is None or configured == "":
+        configured = getattr(settings, IDENTITY_SETTING, None)
     if configured is None or configured == "":
         configured = os.environ.get(IDENTITY_SETTING) or None
     if configured is None:
