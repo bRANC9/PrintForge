@@ -96,13 +96,17 @@ def test_get_provider_forwards_overrides():
     assert provider.timeout == 5.0
 
 
-def test_get_provider_returns_openai_stub():
-    provider = get_provider("openai-compatible")
+def test_get_provider_returns_openai_provider():
+    provider = get_provider(
+        "openai-compatible",
+        base_url="http://gateway:8000/v1/",
+        api_key="sk-test",
+        model="local-model",
+        get_setting=lambda name: None,
+    )
     assert isinstance(provider, OpenAICompatibleProvider)
-    with pytest.raises(NotImplementedError):
-        provider.generate("hello")
-    with pytest.raises(NotImplementedError):
-        provider.structured("hello", ModelSpecification)
+    assert provider.base_url == "http://gateway:8000/v1"
+    assert provider.model == "local-model"
 
 
 def test_get_provider_rejects_unknown_name():
@@ -430,5 +434,7 @@ def test_ollama_without_images_does_not_query_show(monkeypatch):
 
 
 def test_openai_supports_vision_is_config_driven():
-    assert OpenAICompatibleProvider().supports_vision() is False
-    assert OpenAICompatibleProvider(vision=True).supports_vision() is True
+    off = OpenAICompatibleProvider(get_setting=lambda name: None)
+    assert off.supports_vision() is False
+    on = OpenAICompatibleProvider(vision=True, get_setting=lambda name: None)
+    assert on.supports_vision() is True

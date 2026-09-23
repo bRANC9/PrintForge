@@ -10,58 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
-
 from .base import LLMError, LLMProvider
 from .ollama import OllamaProvider
+from .openai import OpenAICompatibleProvider
 
 PROVIDER_OLLAMA = "ollama"
 PROVIDER_OPENAI = "openai-compatible"
 
 _OPENAI_ALIASES = {"openai", "openai-compatible", "openai_compatible"}
-
-
-class OpenAICompatibleProvider(LLMProvider):
-    """Placeholder for an OpenAI-compatible HTTP backend.
-
-    TODO: implement ``POST {base}/v1/chat/completions`` with bearer auth and
-    JSON-mode output, then wire it into :func:`get_provider` via
-    ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` (terv.md 19. fejezet). Cloud LLMs
-    must stay optional.
-
-    Vision support is config-driven and defaults to ``False`` (terv.md 27.1:
-    the API supports it, but it depends on the selected model). Pass
-    ``vision=True`` to opt in.
-    """
-
-    name = PROVIDER_OPENAI
-
-    def __init__(self, *, vision: bool = False, **kwargs: Any) -> None:
-        self._vision = bool(vision)
-
-    def supports_vision(self) -> bool:
-        return self._vision
-
-    def generate(
-        self,
-        prompt: str,
-        *,
-        images: list[bytes] | None = None,
-        **kwargs: Any,
-    ) -> str:
-        raise NotImplementedError("OpenAICompatibleProvider.generate is not implemented yet (TODO)")
-
-    def structured(
-        self,
-        prompt: str,
-        schema: type[BaseModel] | dict[str, Any],
-        *,
-        images: list[bytes] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        raise NotImplementedError(
-            "OpenAICompatibleProvider.structured is not implemented yet (TODO)"
-        )
 
 
 def get_provider(name: str | None = None, **kwargs: Any) -> LLMProvider:
