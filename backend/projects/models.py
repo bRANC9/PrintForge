@@ -74,6 +74,11 @@ class Project(models.Model):
         blank=True,
         related_name="projects",
     )
+    skills = models.ManyToManyField(
+        "skills.Skill",
+        blank=True,
+        related_name="projects",
+    )
     download_count = models.PositiveIntegerField(default=0)
     print_count = models.PositiveIntegerField(default=0)
     description_source = models.CharField(

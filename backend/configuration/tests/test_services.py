@@ -151,7 +151,7 @@ def test_bad_int_is_rejected():
     [
         ("openscad_mode", "bogus"),
         ("slicer_mode", "bogus"),
-        ("storage_backend", "s3"),
+        ("storage_backend", "gcs"),
     ],
 )
 def test_invalid_choice_is_rejected_and_not_persisted(name, value):
@@ -166,6 +166,13 @@ def test_valid_choices_are_accepted():
 
     assert get_setting("openscad_mode") == "docker"
     assert get_setting("slicer_mode") == "docker"
+
+
+def test_storage_backend_accepts_s3_override():
+    update_settings(storage_backend="s3")
+
+    assert get_setting("storage_backend") == "s3"
+    assert effective_settings()["sources"]["storage_backend"] == "db"
 
 
 def test_field_validators_are_enforced():

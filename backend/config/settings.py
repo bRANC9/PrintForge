@@ -95,6 +95,7 @@ LOCAL_APPS = [
     "accounts",
     "workspaces",
     "projects",
+    "skills",
     "designs",
     "agents",
     "files",
@@ -206,7 +207,18 @@ STORAGES = {
 MEDIA_URL = "media/"
 MEDIA_ROOT = env("MEDIA_ROOT", default=str(BASE_DIR / "media"))
 
+# Storage backend selection plus S3/MinIO credentials. ``files.services`` reads
+# the AWS_* keys straight from these Django settings (the runtime singleton only
+# knows ``storage_backend``), so they are deliberately not part of
+# ``configuration.services``. They are only used when STORAGE_BACKEND == "s3";
+# the empty defaults keep local development and the sqlite test suite working
+# without any credentials.
 STORAGE_BACKEND = env("STORAGE_BACKEND", default="local")
+AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID", default="")
+AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY", default="")
+AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME", default="")
+AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default="")
+AWS_S3_REGION_NAME = env("AWS_S3_REGION_NAME", default="")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -247,10 +259,27 @@ OLLAMA_MODEL = env("OLLAMA_MODEL", default="qwen3-coder:30b")
 # the main OLLAMA_MODEL). Runtime override: `ollama_vision_model`.
 OLLAMA_VISION_MODEL = env("OLLAMA_VISION_MODEL", default="")
 
+# LLM provider selection (terv.md 19. fejezet). "ollama" is the default and
+# needs nothing else; set it to "openai" to use any OpenAI-compatible endpoint
+# (hosted OpenAI or a local gateway), which is when OPENAI_BASE_URL /
+# OPENAI_API_KEY are read. Cloud LLMs are always optional. Runtime overrides:
+# `llm_provider`, `openai_base_url`, `openai_api_key`.
+LLM_PROVIDER = env("LLM_PROVIDER", default="ollama")
+OPENAI_BASE_URL = env("OPENAI_BASE_URL", default="")
+OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
+
 # Embedding / RAG
 EMBEDDING_MODEL = env("EMBEDDING_MODEL", default="bge-m3")
 EMBEDDING_DIM = env("EMBEDDING_DIM")
 RAG_ENABLED = env("RAG_ENABLED")
+
+# Web search (Research agent). Empty SEARCH_BACKEND disables web search; set it
+# to "searxng" to use the optional self-hosted instance from
+# docker-compose.search.yml. SEARXNG_BASE_URL is only read when SEARCH_BACKEND
+# is set, so the default is harmless for existing deployments. Runtime
+# overrides: `search_backend`, `searxng_base_url`.
+SEARCH_BACKEND = env("SEARCH_BACKEND", default="")
+SEARXNG_BASE_URL = env("SEARXNG_BASE_URL", default="")
 
 # OpenSCAD sandbox defaults (see terv.md 20. fejezet)
 OPENSCAD_TIMEOUT_SEC = env.int("OPENSCAD_TIMEOUT_SEC", default=60)
@@ -259,3 +288,9 @@ OPENSCAD_CPU_LIMIT = env("OPENSCAD_CPU_LIMIT", default="1.0")
 
 # Agent workflow (see terv.md 6-7. fejezet)
 AGENT_MAX_ATTEMPTS = env.int("AGENT_MAX_ATTEMPTS", default=3)
+
+# MCP transport identity (terv.md 25. fejezet). The numeric Django user id that
+# every MCP tool acts as; None (the default) disables identity-dependent tools.
+# ``mcp.server`` reads this straight from the Django setting / environment, so
+# it is intentionally not part of ``configuration.services``.
+MCP_SERVICE_USER_ID = env("MCP_SERVICE_USER_ID", default=None)

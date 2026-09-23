@@ -67,8 +67,13 @@ _SETTING_SPECS: dict[str, tuple[str, Any]] = {
     "ollama_base_url": ("OLLAMA_BASE_URL", "http://localhost:11434"),
     "ollama_model": ("OLLAMA_MODEL", "qwen3-coder:30b"),
     "ollama_vision_model": ("OLLAMA_VISION_MODEL", ""),
+    "llm_provider": ("LLM_PROVIDER", "ollama"),
+    "openai_base_url": ("OPENAI_BASE_URL", ""),
+    "openai_api_key": ("OPENAI_API_KEY", ""),
     "embedding_model": ("EMBEDDING_MODEL", "bge-m3"),
     "rag_enabled": ("RAG_ENABLED", False),
+    "search_backend": ("SEARCH_BACKEND", ""),
+    "searxng_base_url": ("SEARXNG_BASE_URL", ""),
     "openscad_mode": ("OPENSCAD_MODE", "local"),
     "openscad_timeout_sec": ("OPENSCAD_TIMEOUT_SEC", 60),
     "openscad_memory_limit": ("OPENSCAD_MEMORY_LIMIT", "1g"),
@@ -76,6 +81,7 @@ _SETTING_SPECS: dict[str, tuple[str, Any]] = {
     "slicer_mode": ("SLICER_MODE", "local"),
     "slicer_timeout_sec": ("SLICER_TIMEOUT_SEC", 300),
     "storage_backend": ("STORAGE_BACKEND", "local"),
+    "mcp_service_user_id": ("MCP_SERVICE_USER_ID", ""),
 }
 
 #: Names accepted by :func:`get_setting` / :func:`update_settings`.

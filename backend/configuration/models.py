@@ -17,7 +17,7 @@ from django.conf import settings
 from django.db import models
 
 MODE_CHOICES = [("local", "local"), ("docker", "docker")]
-STORAGE_BACKEND_CHOICES = [("local", "local")]
+STORAGE_BACKEND_CHOICES = [("local", "local"), ("s3", "s3")]
 
 
 class OllamaPullStatus(models.TextChoices):
@@ -36,8 +36,17 @@ class AppSettings(models.Model):
     ollama_base_url = models.URLField(blank=True)
     ollama_model = models.CharField(max_length=200, blank=True)
     ollama_vision_model = models.CharField(max_length=200, blank=True)
+    # LLM provider selection: "ollama" (default) or an OpenAI-compatible
+    # endpoint. ``openai_api_key`` is a credential; this model has no dedicated
+    # secret field, so it is stored as a plain CharField.
+    llm_provider = models.CharField(max_length=50, blank=True)
+    openai_base_url = models.URLField(blank=True)
+    openai_api_key = models.CharField(max_length=255, blank=True)
     embedding_model = models.CharField(max_length=200, blank=True)
     rag_enabled = models.BooleanField(null=True, blank=True)
+    # Web search for the Research agent; empty disables it.
+    search_backend = models.CharField(max_length=50, blank=True)
+    searxng_base_url = models.URLField(blank=True)
     openscad_mode = models.CharField(max_length=20, blank=True, choices=MODE_CHOICES)
     openscad_timeout_sec = models.PositiveIntegerField(null=True, blank=True)
     openscad_memory_limit = models.CharField(max_length=20, blank=True)
@@ -49,6 +58,8 @@ class AppSettings(models.Model):
         blank=True,
         choices=STORAGE_BACKEND_CHOICES,
     )
+    # MCP transport identity: the numeric user id as a string (empty = unset).
+    mcp_service_user_id = models.CharField(max_length=20, blank=True)
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
