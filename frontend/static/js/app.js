@@ -38,6 +38,7 @@
         printerStatus: (printerId) =>
             `${API_BASE}/printers/${encodeURIComponent(printerId)}/status/`,
         notifications: () => `${API_BASE}/notifications/`,
+        notificationsReadAll: () => `${API_BASE}/notifications/read-all/`,
         notificationRead: (notificationId) =>
             `${API_BASE}/notifications/${encodeURIComponent(notificationId)}/read/`,
         // Runtime settings (staff-only).
@@ -69,6 +70,13 @@
     }
 
     const NOTIFICATION_POLL_MS = 60000;
+    // Header bell: one page of 10, more on scroll. NOTIFICATION_MAX_LOADED mirrors
+    // the backend's NotificationPagination.max_page_size, so one refresh can
+    // re-read everything the user already scrolled to.
+    const NOTIFICATION_PAGE_SIZE = 10;
+    const NOTIFICATION_MAX_LOADED = 100;
+    // How close to the bottom (px) the list must be before the next page loads.
+    const NOTIFICATION_SCROLL_THRESHOLD_PX = 48;
     const OLLAMA_POLL_MS = 2000;
     const POLL_INTERVAL_MS = 2000;
     const POLL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -249,7 +257,9 @@
         deactivatePrinter: (printerId) =>
             request(endpoints.printer(printerId), { method: "DELETE" }),
         printerStatus: (printerId) => request(endpoints.printerStatus(printerId)),
-        listNotifications: async () => unwrapList(await request(endpoints.notifications())),
+        listNotifications: (params) => request(withQuery(endpoints.notifications(), params || {})),
+        listNotificationsPage: (url) => request(url),
+        readAllNotifications: () => request(endpoints.notificationsReadAll(), { method: "POST" }),
         markNotificationRead: (notificationId) =>
             request(endpoints.notificationRead(notificationId), { method: "POST" }),
         getSettings: () => request(endpoints.settings()),
@@ -706,14 +716,30 @@
     function notificationsBellComponent() {
         return {
             notifications: [],
+            unreadTotal: 0,
+            nextUrl: "",
             open: false,
             loading: false,
+            loadingMore: false,
             loaded: false,
             error: "",
             pollTimer: null,
 
+            /** Server-side unread total, so the badge never caps at the page size. */
             get unreadCount() {
-                return this.notifications.filter((item) => !item.is_read).length;
+                return this.unreadTotal;
+            },
+
+            get hasMore() {
+                return Boolean(this.nextUrl);
+            },
+
+            /** Normalise DRF's absolute `next` link to a same-origin path. */
+            nextLink(payload) {
+                const link = payload && payload.next;
+                if (!link) return "";
+                const ext = window.PrintForgeExt;
+                return ext && typeof ext.sameOrigin === "function" ? ext.sameOrigin(link) : link;
             },
 
             formatDate,
@@ -725,16 +751,62 @@
                 }, NOTIFICATION_POLL_MS);
             },
 
+            /**
+             * Reload the list without collapsing the scroll: we ask for as many
+             * items as are currently shown, so a poll while the user has 3 pages
+             * open keeps all 3.
+             */
             async refresh() {
                 this.loading = true;
                 try {
-                    this.notifications = await api.listNotifications();
+                    const limit = Math.min(
+                        Math.max(NOTIFICATION_PAGE_SIZE, this.notifications.length),
+                        NOTIFICATION_MAX_LOADED,
+                    );
+                    const payload = (await api.listNotifications({ limit })) || {};
+                    this.notifications = unwrapList(payload);
+                    this.nextUrl = this.nextLink(payload);
+                    if (typeof payload.unread === "number") {
+                        this.unreadTotal = payload.unread;
+                    }
                     this.error = "";
                 } catch (error) {
                     this.error = error.message || String(error);
                 } finally {
                     this.loading = false;
                     this.loaded = true;
+                }
+            },
+
+            /** Infinite scroll: append the next page to the bottom of the list. */
+            async loadMore() {
+                if (!this.nextUrl || this.loadingMore) return;
+                this.loadingMore = true;
+                try {
+                    const payload = (await api.listNotificationsPage(this.nextUrl)) || {};
+                    const more = unwrapList(payload);
+                    this.notifications = [...this.notifications, ...more];
+                    this.nextUrl = this.nextLink(payload);
+                    if (typeof payload.unread === "number") {
+                        this.unreadTotal = payload.unread;
+                    }
+                    this.error = "";
+                } catch (error) {
+                    this.error = error.message || String(error);
+                    // A failing page must not be retried in a scroll loop.
+                    this.nextUrl = "";
+                } finally {
+                    this.loadingMore = false;
+                }
+            },
+
+            /** Scroll handler: pull the next page when the list nears its end. */
+            onListScroll(event) {
+                const element = event && event.target;
+                if (!element) return;
+                const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+                if (remaining <= NOTIFICATION_SCROLL_THRESHOLD_PX) {
+                    this.loadMore();
                 }
             },
 
@@ -751,11 +823,28 @@
                 if (!notification || notification.is_read) return;
                 const previous = notification.is_read;
                 notification.is_read = true; // optimistic, rolled back on failure
+                this.unreadTotal = Math.max(0, this.unreadTotal - 1);
                 try {
                     await api.markNotificationRead(notification.id);
                     this.error = "";
                 } catch (error) {
                     notification.is_read = previous;
+                    this.unreadTotal += 1;
+                    this.error = error.message || String(error);
+                }
+            },
+
+            async markAllRead() {
+                try {
+                    const result = (await api.readAllNotifications()) || {};
+                    this.notifications = this.notifications.map((item) => ({
+                        ...item,
+                        is_read: true,
+                    }));
+                    this.unreadTotal = 0;
+                    if (typeof result.unread === "number") this.unreadTotal = result.unread;
+                    this.error = "";
+                } catch (error) {
                     this.error = error.message || String(error);
                 }
             },

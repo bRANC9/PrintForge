@@ -46,7 +46,9 @@
                             <p class="muted" x-show="loading">Betöltés…</p>
                             <p class="error-box" x-show="error" x-text="error"></p>
                             <p class="muted" x-show="!loading && !notifications.length">Nincs értesítés.</p>
-                            <ul class="notif-list">
+                            <ul class="notif-list"
+                                x-show="notifications.length"
+                                @scroll="onListScroll($event)">
                                 <template x-for="item in notifications" :key="item.id">
                                     <li :class="{ 'is-unread': !item.is_read }">
                                         <a :href="item.url || '#'"
@@ -63,6 +65,19 @@
                                     </li>
                                 </template>
                             </ul>
+                            <p class="muted notif-more" x-show="loadingMore" x-cloak>Betöltés…</p>
+                            <p class="muted notif-more"
+                               x-show="!loadingMore && !hasMore && notifications.length"
+                               x-cloak>Nincs több értesítés.</p>
+                            <div class="notif-footer" x-show="notifications.length">
+                                <button type="button"
+                                        class="link-btn"
+                                        x-show="unreadCount"
+                                        @click="markAllRead()">Mind olvasott</button>
+                                <span class="muted"
+                                      x-show="unreadCount"
+                                      x-text="unreadCount + ' olvasatlan'"></span>
+                            </div>
                         </div>
                     </div>
                     <span class="user">{{ user }}</span>

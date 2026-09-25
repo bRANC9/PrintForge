@@ -114,6 +114,7 @@ from skills.services import (
 from workspaces.models import Workspace, WorkspaceRole
 from workspaces.services import create_workspace, workspaces_for_user
 
+from .pagination import NotificationPagination
 from .permissions import BuiltinReadOnly, IsStaff, WorkspaceScopePermission
 from .serializers import (
     AgentRunSerializer,
@@ -967,10 +968,17 @@ class NotificationViewSet(
     mixins.RetrieveModelMixin,
     viewsets.GenericViewSet,
 ):
-    """The caller's own notifications only (Phase 7)."""
+    """The caller's own notifications only (Phase 7).
+
+    The list is paginated in small pages (10 by default, ``?limit=`` to ask for
+    more) so the header bell can infinite-scroll instead of loading the user's
+    whole history. Every page also carries the **total** unread count, so the
+    badge never caps at the page size.
+    """
 
     serializer_class = NotificationSerializer
     permission_classes = [WorkspaceScopePermission]
+    pagination_class = NotificationPagination
     # Own-only: scoping + the read action enforce ownership, not a workspace role.
     permission_scope_exempt = True
 
@@ -979,6 +987,13 @@ class NotificationViewSet(
         if not user.is_authenticated:
             return Notification.objects.none()
         return notifications_for_user(user)
+
+    def list(self, request, *args, **kwargs):
+        """Paginated list plus the caller's total unread count."""
+        page = self.paginate_queryset(self.get_queryset())
+        response = self.get_paginated_response(self.get_serializer(page, many=True).data)
+        response.data["unread"] = unread_count(request.user)
+        return response
 
     @action(detail=True, methods=["post"], url_path="read")
     def read(self, request, pk=None):

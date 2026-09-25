@@ -377,6 +377,53 @@ def test_read_all_marks_every_unread_notification(owner):
     assert unread_count(owner) == 0
 
 
+def test_notifications_are_paginated_in_pages_of_ten_with_an_unread_total(owner):
+    """The bell loads 10 at a time and scrolls; the badge needs the real total."""
+    for index in range(25):
+        notify(user=owner, message=f"n{index}")
+    client = auth(owner)
+
+    first = client.get("/api/v1/notifications/").json()
+
+    assert first["count"] == 25
+    assert first["unread"] == 25
+    assert len(first["results"]) == 10
+    assert first["next"] is not None
+
+    second = client.get(first["next"]).json()
+    assert len(second["results"]) == 10
+
+    third = client.get(second["next"]).json()
+    assert len(third["results"]) == 5
+    assert third["next"] is None
+
+
+def test_notifications_limit_is_honoured_and_clamped(owner):
+    """`?limit=` drives the "keep the scroll depth" poll and is capped."""
+    for index in range(120):
+        notify(user=owner, message=f"n{index}")
+    client = auth(owner)
+
+    # An explicit limit wins.
+    assert len(client.get("/api/v1/notifications/?limit=30").json()["results"]) == 30
+    # An absurd value is clamped to the max page size, not the default.
+    assert len(client.get("/api/v1/notifications/?limit=100000").json()["results"]) == 100
+    # Nonsense falls back to the default page size instead of erroring.
+    assert len(client.get("/api/v1/notifications/?limit=nonsense").json()["results"]) == 10
+    assert len(client.get("/api/v1/notifications/?limit=0").json()["results"]) == 10
+
+
+def test_notifications_unread_drops_when_a_page_item_is_marked_read(owner):
+    mine = notify(user=owner, message="hello")
+    client = auth(owner)
+
+    assert client.get("/api/v1/notifications/").json()["unread"] == 1
+
+    client.post(f"/api/v1/notifications/{mine.pk}/read/")
+
+    assert client.get("/api/v1/notifications/").json()["unread"] == 0
+
+
 def test_notification_service_contract(owner):
     notification = notify(user=owner, message="m", kind="k", url="/x")
 
