@@ -28,10 +28,17 @@ from agents.llm import LLMError, LLMProvider
 from agents.spec import ReviewResult
 from designs.cad.preview import render_stl_preview
 
+from .consistency import consistency_issue
 from .state import WorkflowState, append_history
+from .textreview import run_text_review
 from .vision import reference_prompt_for
 
-__all__ = ["REVIEW_SYSTEM_PROMPT", "geometry_missing_issue", "make_review_node"]
+__all__ = [
+    "REVIEW_SYSTEM_PROMPT",
+    "geometry_missing_issue",
+    "make_review_node",
+    "review_prompt",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +105,7 @@ def geometry_missing_issue(state: WorkflowState) -> str | None:
     )
 
 
-def _review_prompt(provider: LLMProvider, state: WorkflowState) -> str:
+def review_prompt(provider: LLMProvider, state: WorkflowState) -> str:
     """Build the reviewer user prompt from the request and the specification.
 
     ``reference_prompt_for`` keeps the optional reference note/photo behaviour
@@ -117,6 +124,10 @@ def _review_prompt(provider: LLMProvider, state: WorkflowState) -> str:
     )
 
 
+#: Backwards-compatible private alias.
+_review_prompt = review_prompt
+
+
 def _skipped(state: WorkflowState, reason: str, history_entry: str) -> dict[str, Any]:
     """Build the partial-state update for a skipped (non-fatal) review."""
     return {
@@ -130,6 +141,7 @@ def make_review_node(
     provider: LLMProvider,
     *,
     render_preview: Callable[..., bytes] = render_stl_preview,
+    text_provider: LLMProvider | None = None,
 ) -> Callable[[WorkflowState], dict[str, Any]]:
     """Build the ``review`` graph node bound to *provider*.
 
@@ -139,6 +151,8 @@ def make_review_node(
         render_preview: ``bytes(stl) -> PNG bytes`` renderer, defaulting to the
             headless :func:`designs.cad.preview.render_stl_preview`. Injected so
             tests never need a real mesh or the trimesh/Pillow stack.
+        text_provider: Optional provider for the specification second opinion
+            (no image). When ``None`` only the vision verdict counts.
 
     The returned callable is a LangGraph node: it takes the running state and
     returns a partial state update. It never raises for a review-level problem.
@@ -176,7 +190,7 @@ def make_review_node(
                 images=[preview],
                 system=REVIEW_SYSTEM_PROMPT,
             )
-            review = ReviewResult.model_validate(payload)
+            vision_review = ReviewResult.model_validate(payload)
         except (LLMError, ValidationError) as exc:
             # Vision is optional: a failing call is a warning, not a failure.
             logger.warning("Vision review call failed, skipping: %s", exc)
@@ -186,17 +200,37 @@ def make_review_node(
                 f"review: vision call failed ({type(exc).__name__}); skipped",
             )
 
-        # Deterministic backstop: a weak vision model (e.g. llava:7b) frequently
-        # rubber-stamps a fallback part as a match. When the specification has no
-        # real geometry and the request is not a holder, trust the guard over the
-        # model so the bounded retry adds the missing primitives.
-        guard_issue = geometry_missing_issue(state)
-        guard_override = bool(review.matches and guard_issue)
-        if guard_override:
-            review = ReviewResult(matches=False, issues=[guard_issue], summary=guard_issue)
+        # Second opinion from the main (text) model: it compares the request with
+        # the *specification* (no image), which a weak vision model cannot do
+        # reliably. Both verdicts must agree for a part to be accepted.
+        text_review = run_text_review(text_provider, state) if text_provider else None
+
+        # Deterministic backstops (no model involved): a weak vision model
+        # (e.g. llava:7b) rubber-stamps a fallback or misshapen part, so
+        # geometry that cannot satisfy the request is flagged here.
+        issues = [str(issue) for issue in vision_review.issues]
+        if text_review is not None and not text_review.matches:
+            issues.extend(str(issue) for issue in text_review.issues)
+        guards = (
+            geometry_missing_issue(state),
+            consistency_issue(str(state.get("prompt") or ""), state.get("specification")),
+        )
+        for guard_issue in guards:
+            if guard_issue and guard_issue not in issues:
+                issues.append(guard_issue)
+
+        accepted = vision_review.matches and (text_review is None or text_review.matches)
+        review = ReviewResult(
+            matches=accepted and not issues,
+            issues=issues,
+            summary=vision_review.summary,
+        )
+        guard_override = bool(vision_review.matches and not review.matches)
 
         attempt = int(state.get("attempt", 0))
         max_attempts = int(state.get("max_attempts", 0))
+        # `issues` already holds the merged findings; keep the list for the retry.
+        issues = [str(issue) for issue in review.issues]
         update: dict[str, Any] = {
             "preview_image": preview,
             "vision_used": True,
@@ -208,6 +242,7 @@ def make_review_node(
                 "system": REVIEW_SYSTEM_PROMPT,
                 "prompt": review_prompt,
                 "response": payload if isinstance(payload, dict) else {},
+                "text_response": text_review.model_dump() if text_review else None,
                 "guard_override": guard_override,
             },
         }
@@ -219,7 +254,6 @@ def make_review_node(
             )
             return update
 
-        issues = [str(issue) for issue in review.issues]
         if attempt < max_attempts:
             # Hand the concrete issues to the CAD node's reviser through the
             # same ``validation.errors`` channel the Validator uses.

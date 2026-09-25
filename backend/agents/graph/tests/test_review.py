@@ -17,6 +17,7 @@ from agents.graph.tests.fakes import (
     DEFAULT_SPEC,
     FakeCADBackend,
     FakeProvider,
+    FakeTextReviewProvider,
     FakeVisionProvider,
 )
 from agents.graph.workflow import route_after_review, route_after_validate
@@ -45,6 +46,10 @@ def _deps(provider: Any, cad: Any, **kwargs: Any) -> WorkflowDeps:
     kwargs.setdefault("retrieve_fn", lambda *args, **k: [])
     kwargs.setdefault("max_attempts", 3)
     kwargs.setdefault("preview_renderer", lambda _stl: PREVIEW_PNG)
+    # The review node also asks a text provider for a second opinion; by default
+    # it agrees, so the vision verdict alone decides. Tests that care pass their
+    # own ``review_text_provider``.
+    kwargs.setdefault("review_text_provider", FakeTextReviewProvider())
     return WorkflowDeps(provider=provider, cad_backend=cad, **kwargs)
 
 
@@ -200,6 +205,79 @@ def test_guard_override_is_recorded_in_the_trace():
     result = node(_state(prompt="make a christmas tree clay stamp", specification=spec))
 
     assert result["vision_trace"]["guard_override"] is True
+
+
+def test_text_review_mismatch_overrides_a_vision_match():
+    """A vision "yes" is not enough: the text reviewer can still reject the part.
+
+    This is the real-world failure: ``llava:7b`` rubber-stamped a solid block,
+    while the main model reading the specification noticed the mismatch.
+    """
+    vision = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "looks ok"}])
+    text = FakeTextReviewProvider(
+        text_reviews=[
+            {
+                "matches": False,
+                "issues": ["the specification is a plain box, not a tree outline"],
+                "summary": "spec disagrees with the request",
+            }
+        ]
+    )
+    node = make_review_node(vision, render_preview=lambda _stl: PREVIEW_PNG, text_provider=text)
+
+    result = node(_state(prompt="make a christmas tree stamp", attempt=1, max_attempts=3))
+
+    assert result["status"] == "retry"
+    assert result["vision_review"]["matches"] is False
+    assert "plain box" in result["vision_review"]["issues"][0]
+    # The text verdict is kept in the trace for the UI.
+    assert result["vision_trace"]["text_response"]["matches"] is False
+    assert result["vision_trace"]["guard_override"] is True
+
+
+def test_text_review_failure_keeps_the_vision_verdict():
+    """The second opinion is best-effort: a broken provider must not block a run."""
+    vision = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    text = FakeTextReviewProvider()
+    text.fail = True
+    node = make_review_node(vision, render_preview=lambda _stl: PREVIEW_PNG, text_provider=text)
+
+    result = node(_state())
+
+    assert result["status"] == "done"
+    assert result["vision_review"]["matches"] is True
+    assert result["vision_trace"]["text_response"] is None
+
+
+def test_deterministic_consistency_guard_catches_a_rectangle_tree():
+    """No model is asked: the request/spec contradiction is caught mechanically."""
+    vision = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    node = make_review_node(vision, render_preview=lambda _stl: PREVIEW_PNG)
+    specification = {
+        "object": "Christmas Tree",
+        "dimensions": {"width": 100.0, "height": 200.0, "thickness": 10.0},
+        "primitives": [
+            {
+                "type": "extrude",
+                "role": "add",
+                "height": 400.0,
+                "profile": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 100.0, "y": 0.0},
+                    {"x": 100.0, "y": 200.0},
+                    {"x": 0.0, "y": 200.0},
+                    {"x": 0.0, "y": 0.0},
+                ],
+            }
+        ],
+    }
+
+    result = node(
+        _state(prompt="karácsony fa formájú kinyomó", specification=specification),
+    )
+
+    assert result["vision_review"]["matches"] is False
+    assert any("rectangle" in issue for issue in result["vision_review"]["issues"])
 
 
 def test_geometry_guard_keeps_a_holder_request_matching():

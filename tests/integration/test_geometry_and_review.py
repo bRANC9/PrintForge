@@ -23,7 +23,12 @@ import pytest
 from factories import ProjectFactory
 
 from agents.graph import WorkflowDeps
-from agents.graph.tests.fakes import FakeCADBackend, FakeProvider, FakeVisionProvider
+from agents.graph.tests.fakes import (
+    FakeCADBackend,
+    FakeProvider,
+    FakeTextReviewProvider,
+    FakeVisionProvider,
+)
 from agents.models import AgentRun, AgentRunStatus
 from agents.spec import ModelSpecification
 from agents.tasks import run_agent_workflow
@@ -103,6 +108,9 @@ def _deps(
 ) -> WorkflowDeps:
     """Build the fake workflow dependencies (never a live backend)."""
     overrides.setdefault("preview_renderer", lambda _stl: PREVIEW_PNG)
+    # The review node also asks a text provider for a second opinion; by default
+    # it agrees, so the vision verdict alone decides.
+    overrides.setdefault("review_text_provider", FakeTextReviewProvider())
     return WorkflowDeps(
         provider=provider or FakeProvider(),
         cad_backend=cad or FakeCADBackend(),

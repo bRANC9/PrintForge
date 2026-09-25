@@ -19,6 +19,7 @@ __all__ = [
     "ENRICHED_SPEC",
     "FakeCADBackend",
     "FakeProvider",
+    "FakeTextReviewProvider",
     "FakeVisionProvider",
     "SpecFixingCADBackend",
 ]
@@ -123,6 +124,45 @@ class FakeVisionProvider(FakeProvider):
                 raise AssertionError("unexpected ReviewResult call")
             return dict(self.reviews.pop(0))
         return super().structured(prompt, schema, **kwargs)
+
+
+class FakeTextReviewProvider(FakeProvider):
+    """Text-only fake for the review node's specification second opinion.
+
+    Returns canned ``ReviewResult`` payloads in order (default: one "matches"
+    verdict), so the review node's merge logic can be exercised without a real
+    model. ``fail=True`` makes every call raise, to cover the best-effort skip.
+    """
+
+    name = "fake-text-review"
+
+    def __init__(self, *, text_reviews: list[dict[str, Any]] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.text_reviews = [
+            dict(review)
+            for review in (text_reviews or [{"matches": True, "issues": [], "summary": ""}])
+        ]
+        self.fail = False
+        self.text_prompts: list[str] = []
+        self.text_systems: list[str] = []
+
+    def structured(
+        self,
+        prompt: str,
+        schema: type[BaseModel] | dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        name = getattr(schema, "__name__", str(schema))
+        if name != "ReviewResult":
+            return super().structured(prompt, schema, **kwargs)
+        if self.fail:
+            raise RuntimeError("text reviewer offline")
+        self.calls.append(name)
+        self.text_prompts.append(prompt)
+        self.text_systems.append(str(kwargs.get("system", "")))
+        if not self.text_reviews:
+            raise RuntimeError("no queued text review")
+        return dict(self.text_reviews.pop(0))
 
 
 class FakeCADBackend(CADBackend):

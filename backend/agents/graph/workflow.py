@@ -102,6 +102,12 @@ class WorkflowDeps:
     #: (``settings.OLLAMA_VISION_MODEL`` / runtime ``ollama_vision_model``)
     #: while the planner/editor/reviser keep the main text model.
     review_provider: LLMProvider | None = None
+    #: Optional provider for the review node's **text** second opinion, which
+    #: compares the request with the structured specification without an image
+    #: (a weak vision model cannot be trusted alone). Defaults to
+    #: :attr:`provider`; a dedicated provider lets tests (or a deployment) swap
+    #: the reviewer without touching the planner.
+    review_text_provider: LLMProvider | None = None
     #: Renderer used by the vision self-check: ``bytes(stl) -> PNG bytes``.
     #: Defaults to the import-light headless renderer; tests inject a fake so no
     #: real mesh/trimesh/Pillow work is needed.
@@ -239,6 +245,7 @@ def build_workflow(deps: WorkflowDeps):
         make_review_node(
             deps.review_provider or deps.provider,
             render_preview=deps.preview_renderer,
+            text_provider=deps.review_text_provider or deps.provider,
         ),
     )
 

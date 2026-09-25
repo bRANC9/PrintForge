@@ -16,7 +16,13 @@ from django.conf import settings
 from factories import ModelVersionFactory, ProjectFactory
 
 from agents.graph import WorkflowDeps
-from agents.graph.tests.fakes import DEFAULT_SPEC, FakeCADBackend, FakeProvider, FakeVisionProvider
+from agents.graph.tests.fakes import (
+    DEFAULT_SPEC,
+    FakeCADBackend,
+    FakeProvider,
+    FakeTextReviewProvider,
+    FakeVisionProvider,
+)
 from agents.llm import LLMError
 from agents.models import AgentRun, AgentRunStatus
 from agents.spec import ModelSpecification
@@ -49,6 +55,7 @@ def _deps(
     cad: FakeCADBackend | None = None,
     **overrides: Any,
 ) -> WorkflowDeps:
+    overrides.setdefault("review_text_provider", FakeTextReviewProvider())
     return WorkflowDeps(
         provider=provider or FakeProvider(),
         cad_backend=cad or FakeCADBackend(),

@@ -97,17 +97,26 @@ class ReviewResult(BaseModel):
 
 ### 4.2 Determinisztikus alak-guard (gyenge vision modell ellen)
 
-- A `review` node a vision verdikt mellé egy determinisztikus ellenőrzést is
-  futtat (`geometry_missing_issue`): ha a `specification`-ben **nincs
-  `primitives`**, a CAD backend csak a beépített holder sablont vagy egy
-  szintetizált dobozt tud renderelni, soha nem a kért alakot.
-- Ha a kérés nem holder-jellegű (nincs `holder`/`tartó`/`stand`/`phone`/
-  `telefon`/`tablet` token a promptban) és a spec primitív nélküli, a guard
-  felülírja a `matches: true` verdiktet, és ugyanúgy `retry`-t indít, mint egy
-  valódi mismatch. Így egy gyenge, mindent jóváhagyó vision modell (pl.
-  `llava:7b`) sem engedi át a fallback alkatrészt.
+- A `review` node a vision verdikt mellé **két további** ellenőrzést is futtat,
+  mert egy `llava:7b` szintén rubber-stampelheti a hibás alakot:
+  - **`geometry_missing_issue`**: ha a `specification`-ben nincs `primitives`
+    (csak a beépített holder sablon / szintetizált doboz jöhet létre), és a
+    kérés nem holder-jellegű, felülírja a `matches: true`-t.
+  - **`consistency_issue`** (`agents/graph/consistency.py`): modell nélkül
+    hasonlítja a kérést a specifikációhoz. Jelenlegi szabályok (HU+EN kulcsszavak):
+    - «silhouette» kérés (fa, csillag, szív, kivágás, bélyeg…) `extrude`-dal, de a
+      `profile` csak egy tengelyillesztett téglalap → hiba;
+    - kinyomó/sajtó/matric, de az `extrude`-nak nincs `wall_thickness` → tömör
+      blokk, nem kinyomó;
+    - lyuk/csap/csavar kérés, de semmi nem von le anyagot → hiba;
+    - hordható méretű kérés (fülbevaló, ékszer) > 250 mm mérettel → hiba.
+- **Szöveges második vélemény** (`agents/graph/textreview.py`): a fő (nem
+  vision) modell a `ReviewResult` sémával a kérést és a *specifikációt* hasonlítja
+  össze — kép nélkül. Csak akkor fogadunk el egy alkatrészt, ha **a vision
+  reviewer ÉS a szöveges reviewer is egyezik** (a szöveges hiba best-effort: ha a
+  provider nem tud válaszolni, a vision verdikt marad).
 - Holder-kérésnél a guard szándékosan nem szól, mert ott a beépített sablon a
-  helyes. A guard csak egy korlátos retry-t kér, modellt sosem blokkol.
+  helyes. Minden finding a bounded CAD retry-t indítja el, modellt sosem blokkol.
 
 ## 5. Perzisztálás (agent-orchestrator, `agents/tasks.py`)
 
@@ -116,10 +125,11 @@ class ReviewResult(BaseModel):
   `validation_json`-ba bekerül a `vision_review` összegzése (issues/summary,
   **nem** a nyers bájtok).
 - A nyers input/output is bekerül: `validation_json["vision_trace"]` =
-  `{system, prompt, response, guard_override}` (`_vision_trace_summary`, a
-  prompt `VISION_TRACE_PROMPT_CHARS` = 4000 karakterre vágva). Ez a
-  `AgentRun.state_json`-ba is bekerül, így a UI-on a „Vision önellenőrzés"
-  panelen látható, **mit kapott és mit válaszolt** a vision modell.
+  `{system, prompt, response, text_response, guard_override}`
+  (`_vision_trace_summary`, a prompt `VISION_TRACE_PROMPT_CHARS` = 4000
+  karakterre vágva). Ez a `AgentRun.state_json`-ba is bekerül, így a UI-on a
+  „Vision önellenőrzés" panelen látható, **mit kapott és mit válaszolt** a vision
+  modell (`text_response`: a szöveges második vélemény).
 - `_summarise_state`: `vision_used`, `vision_review` (issues/summary), és
   `vision_trace` — bájtok nélkül.
 
