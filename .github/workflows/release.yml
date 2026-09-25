@@ -70,6 +70,10 @@ jobs:
           # later with QEMU + a platforms list, but is intentionally not enabled.
           platforms: linux/amd64
           push: true
+          # Bake the commit into the image so /api/v1/health/ and the footer can
+          # report which build a running instance actually is.
+          build-args: |
+            APP_GIT_SHA=${{ github.sha }}
           # Keep a plain single-platform manifest: provenance attestations add an
           # extra OCI index entry that can make Watchtower's digest comparison
           # report a perpetual "update available" on the NAS.

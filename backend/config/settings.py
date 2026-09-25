@@ -140,6 +140,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "config.context_processors.build_info",
             ],
         },
     },
@@ -147,6 +148,17 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
+
+# ---------------------------------------------------------------------------
+# Build identity
+# ---------------------------------------------------------------------------
+# The commit the image was built from, baked in by the Dockerfile's
+# ``APP_GIT_SHA`` build arg (the release workflow passes ``github.sha``). It is
+# surfaced by ``/api/v1/health/`` and in the page footer so a running instance
+# can be identified without shell access. ``"dev"`` means "not baked in" (local
+# runs, unit tests).
+
+APP_GIT_SHA = env("APP_GIT_SHA", default="dev")
 
 # ---------------------------------------------------------------------------
 # Database (PostgreSQL + pgvector in Docker; sqlite fallback for local tests)

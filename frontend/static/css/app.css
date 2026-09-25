@@ -52,6 +52,19 @@ a {
     text-decoration: none;
 }
 
+/* Footer: build identity (which commit the image was built from) ----------- */
+
+.site-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 1.5rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.78rem;
+    color: var(--muted);
+}
+
 .site-nav {
     display: flex;
     align-items: center;

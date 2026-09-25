@@ -162,8 +162,13 @@ Finally create the superuser:
 
 ```bash
 docker ps
-curl -fsS http://<truenas-host>:8080/api/v1/health/     # expect {"status":"ok"}
+curl -fsS http://<truenas-host>:8080/api/v1/health/
+# {"status": "ok", "git_sha": "<a buildból sütött commit>"}
 ```
+
+A `git_sha` a pontosan futó build commitja (a release workflow sütötte be a
+képbe), a UI alján megjelenő `build: <rövid sha>` pedig ugyanez. Így shell
+hozzáférés nélkül is azonosítható a deploy.
 
 Then open `http://<truenas-host>:8080`, log in, and open a couple of pages to
 confirm the UI renders. `docker logs` / the app's **Logs** pane shows startup

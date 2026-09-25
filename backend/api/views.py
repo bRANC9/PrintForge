@@ -147,8 +147,18 @@ from .serializers import (
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(request):
-    """Liveness probe used by Docker healthchecks (the only public endpoint)."""
-    return Response({"status": "ok"})
+    """Liveness probe used by Docker healthchecks (the only public endpoint).
+
+    Also answers the "which build is this?" question: ``git_sha`` is the commit
+    the image was built from (baked in via the ``APP_GIT_SHA`` build arg), so a
+    deployment can be identified without shell access.
+    """
+    return Response(
+        {
+            "status": "ok",
+            "git_sha": str(getattr(settings, "APP_GIT_SHA", "") or ""),
+        }
+    )
 
 
 def _hash_client_ip(request) -> str:

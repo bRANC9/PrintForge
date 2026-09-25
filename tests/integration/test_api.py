@@ -1,5 +1,6 @@
 import pytest
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from rest_framework.test import APIClient
 
 from projects.services import create_project
@@ -13,7 +14,25 @@ User = get_user_model()
 def test_health_is_public():
     response = APIClient().get("/api/v1/health/")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
+
+
+@override_settings(APP_GIT_SHA="0123456789abcdef0123456789abcdef01234567")
+def test_health_reports_the_baked_in_commit():
+    """The health probe doubles as the "which build is this?" endpoint."""
+    response = APIClient().get("/api/v1/health/")
+    assert response.json() == {
+        "status": "ok",
+        "git_sha": "0123456789abcdef0123456789abcdef01234567",
+    }
+
+
+@override_settings(APP_GIT_SHA="d767c82aaaaa")
+def test_page_footer_shows_the_build_commit():
+    """The footer shows the short SHA so a deployment is identifiable in the UI."""
+    response = APIClient().get("/login/")
+    assert response.status_code == 200
+    assert "build: d767c82aaaaa" in response.content.decode()
 
 
 def test_creating_workspace_requires_authentication():

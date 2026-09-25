@@ -78,6 +78,11 @@
         <main class="site-main">
             {% block content %}{% endblock %}
         </main>
+        <footer class="site-footer">
+            <span>PrintForge</span>
+            <span class="muted"
+                  title="Az image a(z) commitból készült: {{ app_git_sha }}">build: {{ app_git_sha_short }}</span>
+        </footer>
         <script src="{% static 'js/app.js' %}"></script>
         {% block extra_js %}{% endblock %}
     </body>

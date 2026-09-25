@@ -1,3 +1,9 @@
+# Commit the image was built from, surfaced by /api/v1/health/ and the page
+# footer. The release workflow passes it as a build arg; a local build without
+# it stays "dev".
+ARG APP_GIT_SHA=dev
+ENV APP_GIT_SHA=${APP_GIT_SHA}
+
 FROM python:3.13-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
