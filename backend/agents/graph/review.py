@@ -31,7 +31,7 @@ from designs.cad.preview import render_stl_preview
 from .state import WorkflowState, append_history
 from .vision import reference_prompt_for
 
-__all__ = ["REVIEW_SYSTEM_PROMPT", "make_review_node"]
+__all__ = ["REVIEW_SYSTEM_PROMPT", "geometry_missing_issue", "make_review_node"]
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,61 @@ REVIEW_SYSTEM_PROMPT = (
     "user's original request and the specification the part was built from. "
     "Judge whether the preview matches the request and the specification: the "
     "shape, the proportions, the requested features and the orientation. "
+    "Pay special attention to the specification's 'object' and 'primitives': "
+    "when 'primitives' is empty the CAD backend falls back to a generic holder "
+    "or box, so a request for any other shape is a mismatch. "
     "Answer ONLY with one JSON object matching the ReviewResult schema: "
     "'matches' (boolean), 'issues' (a list of concrete, actionable "
     "discrepancies; empty when the preview matches) and 'summary' (one short "
     "sentence). Every issue must say what is visibly wrong and what to change. "
     "Never emit OpenSCAD code, G-code or STL data - only the structured verdict."
 )
+
+#: Request tokens that mark an intentional holder request. The deterministic
+#: shape guard below uses them so a real holder request is never flagged, while
+#: a specification that rendered the built-in holder (or a synthesized box) for
+#: a *different* object is caught even when a weak vision model rubber-stamps it
+#: as a match (docs/vision-self-check.md). A false positive only costs one
+#: bounded retry, never a wrong model.
+_HOLDER_REQUEST_TOKENS = (
+    "holder",
+    "tartó",
+    "tarto",
+    "stand",
+    "phone",
+    "telefon",
+    "tablet",
+)
+
+
+def _looks_like_holder_request(prompt: str) -> bool:
+    """True when the user prompt plausibly asks for a holder/stand part."""
+    text = (prompt or "").lower()
+    return any(token in text for token in _HOLDER_REQUEST_TOKENS)
+
+
+def geometry_missing_issue(state: WorkflowState) -> str | None:
+    """Return a mismatch issue when the spec carries no geometry, else ``None``.
+
+    A specification without ``primitives`` can only render the built-in holder
+    template or a synthesized box, never the object the user asked for. This
+    deterministic guard catches that even when the vision model wrongly reports
+    a match, and forces the bounded CAD retry (with the reviser) to add real
+    geometry. A holder request is exempt: the built-in template is then correct.
+    """
+    specification = state.get("specification")
+    if not isinstance(specification, dict):
+        return None
+    if specification.get("primitives"):
+        return None
+    if _looks_like_holder_request(str(state.get("prompt") or "")):
+        return None
+    return (
+        "the specification has no 'primitives', so the CAD backend can only render "
+        "the built-in holder template or a plain box instead of the requested object; "
+        "add primitives that build the real shape (use a single 'extrude' with a "
+        "polygon 'profile' for a flat 2D shape such as a stamp or cutter)"
+    )
 
 
 def _review_prompt(provider: LLMProvider, state: WorkflowState) -> str:
@@ -119,9 +168,10 @@ def make_review_node(
                 f"review: preview render failed ({type(exc).__name__}); skipped",
             )
 
+        review_prompt = _review_prompt(provider, state)
         try:
             payload = provider.structured(
-                _review_prompt(provider, state),
+                review_prompt,
                 ReviewResult,
                 images=[preview],
                 system=REVIEW_SYSTEM_PROMPT,
@@ -136,12 +186,30 @@ def make_review_node(
                 f"review: vision call failed ({type(exc).__name__}); skipped",
             )
 
+        # Deterministic backstop: a weak vision model (e.g. llava:7b) frequently
+        # rubber-stamps a fallback part as a match. When the specification has no
+        # real geometry and the request is not a holder, trust the guard over the
+        # model so the bounded retry adds the missing primitives.
+        guard_issue = geometry_missing_issue(state)
+        guard_override = bool(review.matches and guard_issue)
+        if guard_override:
+            review = ReviewResult(matches=False, issues=[guard_issue], summary=guard_issue)
+
         attempt = int(state.get("attempt", 0))
         max_attempts = int(state.get("max_attempts", 0))
         update: dict[str, Any] = {
             "preview_image": preview,
             "vision_used": True,
             "vision_review": review.model_dump(),
+            # Raw input/output for the UI (docs/vision-self-check.md 5.): the
+            # literal prompt the reviewer received and the model's raw JSON
+            # answer, so "what it saw and thought" is auditable. JSON-safe only.
+            "vision_trace": {
+                "system": REVIEW_SYSTEM_PROMPT,
+                "prompt": review_prompt,
+                "response": payload if isinstance(payload, dict) else {},
+                "guard_override": guard_override,
+            },
         }
 
         if review.matches:

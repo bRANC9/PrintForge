@@ -6,6 +6,7 @@ the preview renderer and the CAD backend are all fakes.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langgraph.graph import END
@@ -141,6 +142,91 @@ def test_match_keeps_done_and_records_the_preview():
     assert result["vision_used"] is True
     assert result["preview_image"] == PREVIEW_PNG
     assert result["vision_review"] == {"matches": True, "issues": [], "summary": "ok"}
+
+
+def test_geometry_guard_overrides_a_false_match():
+    """A weak vision model's "match" on a geometry-less spec is overridden.
+
+    The specification has no primitives, so the CAD backend could only render a
+    fallback holder/box for a request that is clearly not a holder. The
+    deterministic guard must force the bounded retry even though the (weak)
+    vision model reported ``matches: true``.
+    """
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    node = make_review_node(provider, render_preview=lambda _stl: PREVIEW_PNG)
+    spec = {
+        "object": "christmas_tree",
+        "dimensions": {"width": 40.0, "height": 50.0, "thickness": 4.0},
+    }
+
+    result = node(_state(prompt="make a christmas tree clay stamp", specification=spec))
+
+    assert result["status"] == "retry"
+    assert result["vision_review"]["matches"] is False
+    assert "primitives" in result["vision_review"]["issues"][0]
+    assert result["validation"]["errors"] == result["vision_review"]["issues"]
+
+
+def test_review_records_the_raw_prompt_and_response():
+    """The review node exposes what the model received and answered.
+
+    The stored trace is what the UI shows under "Vision önellenőrzés": the literal
+    system/user prompt plus the model's raw JSON answer (docs/vision-self-check.md
+    5.). The image bytes are never part of it.
+    """
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "looks ok"}])
+    node = make_review_node(provider, render_preview=lambda _stl: PREVIEW_PNG)
+
+    result = node(_state())
+
+    trace = result["vision_trace"]
+    assert "make a 70 mm phone holder" in trace["prompt"]
+    assert trace["system"] == REVIEW_SYSTEM_PROMPT
+    assert trace["response"] == {"matches": True, "issues": [], "summary": "looks ok"}
+    assert trace["guard_override"] is False
+    # The trace is JSON-safe: it carries no bytes.
+    assert json.dumps(trace)
+
+
+def test_guard_override_is_recorded_in_the_trace():
+    """The trace remembers that the guard overrode a rubber-stamped match."""
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    node = make_review_node(provider, render_preview=lambda _stl: PREVIEW_PNG)
+    spec = {
+        "object": "christmas_tree",
+        "dimensions": {"width": 40.0, "height": 50.0, "thickness": 4.0},
+    }
+
+    result = node(_state(prompt="make a christmas tree clay stamp", specification=spec))
+
+    assert result["vision_trace"]["guard_override"] is True
+
+
+def test_geometry_guard_keeps_a_holder_request_matching():
+    """The built-in holder template is correct for an actual holder request."""
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    node = make_review_node(provider, render_preview=lambda _stl: PREVIEW_PNG)
+
+    result = node(_state(prompt="make a 70 mm phone holder"))
+
+    assert result["status"] == "done"
+    assert result["vision_review"]["matches"] is True
+
+
+def test_geometry_guard_ignores_specs_with_primitives():
+    """A spec that describes real geometry is never flagged by the guard."""
+    provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
+    node = make_review_node(provider, render_preview=lambda _stl: PREVIEW_PNG)
+    spec = {
+        "object": "christmas_tree",
+        "dimensions": {"width": 40.0, "height": 50.0, "thickness": 4.0},
+        "primitives": [{"type": "box", "role": "add", "width": 40.0, "depth": 50.0, "height": 4.0}],
+    }
+
+    result = node(_state(prompt="make a christmas tree clay stamp", specification=spec))
+
+    assert result["status"] == "done"
+    assert result["vision_review"]["matches"] is True
 
 
 def test_review_prompt_carries_the_reference_note():

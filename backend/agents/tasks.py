@@ -74,6 +74,11 @@ SCAD_FILENAME = "model.scad"
 STL_FILENAME = "model.stl"
 PREVIEW_FILENAME = "preview.png"
 
+#: Upper bound for the stored vision system/user prompt (docs/vision-self-check.md
+#: 5.). Long specifications are clipped so a single review trace cannot bloat the
+#: run/version JSON.
+_VISION_TRACE_PROMPT_CHARS = 4000
+
 
 def build_dependencies() -> WorkflowDeps:
     """Build the production workflow dependencies.
@@ -264,6 +269,30 @@ def _vision_review_summary(review: Any) -> dict[str, Any]:
     }
 
 
+def _vision_trace_summary(trace: Any) -> dict[str, Any]:
+    """Reduce a ``vision_trace`` payload to a bounded, JSON-safe dict (no bytes).
+
+    The review node stores the system/user prompt the reviewer received and the
+    model's raw JSON answer (docs/vision-self-check.md 5.) so the UI can show what
+    the vision model received and returned. The prompt is clipped so a very long
+    specification cannot bloat ``AgentRun.state_json`` /
+    ``ModelVersion.validation_json``.
+    """
+    if not isinstance(trace, dict) or not trace:
+        return {}
+    prompt = str(trace.get("prompt") or "")
+    system = str(trace.get("system") or "")
+    response = trace.get("response")
+    if not isinstance(response, dict):
+        response = {}
+    return {
+        "system": system[:_VISION_TRACE_PROMPT_CHARS],
+        "prompt": prompt[:_VISION_TRACE_PROMPT_CHARS],
+        "response": response,
+        "guard_override": bool(trace.get("guard_override")),
+    }
+
+
 def _clarification_summary(items: Any) -> list[dict[str, str]]:
     """Reduce blocking questions to ``{question, field}`` (no assumed answer)."""
     summary: list[dict[str, str]] = []
@@ -360,6 +389,7 @@ def _summarise_state(
         # verdict only, never the preview bytes.
         "vision_used": bool(state.get("vision_used", False)),
         "vision_review": _vision_review_summary(state.get("vision_review")),
+        "vision_trace": _vision_trace_summary(state.get("vision_trace")),
         "validation": dict(state.get("validation") or {}),
         "scad_chars": len(scad_source),
         "stl_bytes": len(stl_bytes),
@@ -448,6 +478,11 @@ def _persist_version(
         "vision_review": _vision_review_summary(state.get("vision_review")),
         "completed_at": timezone.now().isoformat(),
     }
+    # The raw vision input/output (docs/vision-self-check.md 5.) so the UI can
+    # show what the reviewer received and answered.
+    vision_trace = _vision_trace_summary(state.get("vision_trace"))
+    if vision_trace:
+        validation_json["vision_trace"] = vision_trace
     # Planner assumptions (docs/planner-clarification.md 4.): a run that made
     # its own guesses is marked for review and carries them on the version.
     assumptions = _assumption_summary(state.get("assumptions"))

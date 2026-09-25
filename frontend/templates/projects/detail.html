@@ -109,6 +109,25 @@
                                 <button type="button"
                                         class="btn btn-small"
                                         @click.stop="startEditVersion(version)">Szerkesztés</button>
+                                <template x-if="confirmDeleteVersionId !== version.id">
+                                    <button type="button"
+                                            class="btn btn-danger btn-small"
+                                            @click.stop="confirmDeleteVersionId = version.id"
+                                            :disabled="deletingVersionId === version.id">Törlés</button>
+                                </template>
+                                <template x-if="confirmDeleteVersionId === version.id">
+                                    <span class="confirm-inline">
+                                        <button type="button"
+                                                class="btn btn-danger btn-small"
+                                                @click.stop="deleteVersion(version)"
+                                                :disabled="deletingVersionId === version.id"
+                                                x-text="deletingVersionId === version.id ? 'Törlés…' : 'Igen, törlés'">
+                                        </button>
+                                        <button type="button"
+                                                class="btn btn-small"
+                                                @click.stop="confirmDeleteVersionId = null">Mégse</button>
+                                    </span>
+                                </template>
                             </div>
                             <template x-if="editingVersionId === version.id">
                                 <div class="version-edit" @click.stop @keydown.stop>

@@ -79,13 +79,24 @@ def regenerate_version(
     `parent_version == base` verziót várja (mint az annotációs folyam).
 - `ModelVersionSerializer` read-only mezői: `parent_version`, `origin`
   (a meglévő `annotations_json` mellett).
+- Kézi törlés: a viewset a `DestroyModelMixin`-t is használja, így
+  `DELETE /api/v1/versions/{id}/}` töröl egy verziót (MEMBER+ a workspace-ben).
+  Ha a verzióhoz nyomtatási feladat (`print_jobs`) vagy tányérbeli elem
+  (`plate_items`) tartozik, a FK `CASCADE` miatt a kérés `409 Conflict`-ot
+  ad — előbb ezeket kell törölni. `designs.services.delete_version` a
+  sort és a tárolt artifact fájlokat (scad/stl/glb/preview/reference)
+  best-effort törli; a származtatott verziók megmaradnak
+  (`parent_version` `SET_NULL`).
 
 ## 4. Frontend (`project.js`, `viewer.html`, viewer-frontend)
 
-- A verziólista minden eleme kap két gombot:
+- A verziólista minden eleme kap három gombot:
   - **„Újragenerálás”** → `POST .../regenerate/` üres body-val, pollozás.
   - **„Szerkesztés”** → a verzió `prompt`-jával előtöltött inline szerkesztő;
     mentés → `POST .../regenerate/ {prompt}`.
+  - **„Törlés”** → inline megerősítés („Igen, törlés” / „Mégse"), majd
+    `DELETE .../versions/{id}/`; siker esetén a lista frissül, és ha a
+    törölt verzió volt kiválasztva, a UI a következő verzióra vált.
 - A kiválasztott verzió fejléce mutassa a láncot: `v3 ← v2 (regenerate)` /
   `(annotation)`.
 - A pollozás és a „csak akkor váltok verzióra, ha valóban új született”
@@ -103,3 +114,4 @@ automatikusan örökli a Planner visszakérdezést/feltételezéseket
 - Meglévő verzió in-place módosítása (a verziók immutable-ek).
 - Elágazás-kezelő fa/merge UI – a `parent_version` lánc lineáris marad.
 - A fájlok (scad/stl) kézi szerkesztése.
+- Verzió **visszaállítása** törölés után; a history csak előre épül.

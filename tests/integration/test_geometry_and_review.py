@@ -160,11 +160,19 @@ def test_task_persists_primitives_and_hands_them_to_the_cad_backend(monkeypatch,
 
 def test_task_retries_once_on_a_vision_mismatch_then_finishes_done(monkeypatch, tmp_path):
     project = ProjectFactory()
+    # A bracket request must carry real geometry: the deterministic shape guard
+    # (docs/vision-self-check.md) would otherwise flag the geometry-less holder
+    # spec and force an extra retry, beyond the one this test pins.
     provider = FakeVisionProvider(
+        plan={
+            "specification": PRIMITIVE_SPEC,
+            "needs_research": False,
+            "research_query": None,
+        },
         reviews=[
             {"matches": False, "issues": ["the body is too short"], "summary": "mismatch"},
             {"matches": True, "issues": [], "summary": "ok"},
-        ]
+        ],
     )
     cad = FakeCADBackend()
     reviser_calls: list[tuple[dict[str, Any], list[str], int]] = []
@@ -207,6 +215,13 @@ def test_task_retries_once_on_a_vision_mismatch_then_finishes_done(monkeypatch, 
         "issues": [],
         "summary": "ok",
     }
+    # The raw input/output of the vision call is persisted too (prompt + answer),
+    # so the UI can show what the reviewer received and returned.
+    trace = version.validation_json["vision_trace"]
+    assert PROMPT in trace["prompt"]
+    assert trace["response"] == {"matches": True, "issues": [], "summary": "ok"}
+    assert trace["guard_override"] is False
+    assert run.state_json["vision_trace"]["prompt"] == trace["prompt"]
     assert run.state_json["vision_review"] == version.validation_json["vision_review"]
     # The retry (and its mismatch verdict) is visible in the run history.
     assert any("review: mismatch, retrying" in entry for entry in run.state_json["history"])

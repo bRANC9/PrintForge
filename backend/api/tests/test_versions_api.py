@@ -9,9 +9,12 @@ from rest_framework.test import APIClient
 
 from agents.models import AgentRun
 from agents.tasks import run_agent_workflow
+from designs.models import ModelVersion
 from designs.services import create_next_version
 from designs.tasks import render_model_stl
 from files.services import LocalStorage
+from printers.models import Printer
+from printers.services import enqueue_job
 from projects.services import create_project
 from workspaces.services import create_workspace
 
@@ -36,6 +39,11 @@ def client(user):
 def project(user):
     workspace = create_workspace(name="Lab", owner=user)
     return create_project(workspace=workspace, name="Holder", created_by=user)
+
+
+@pytest.fixture
+def printer():
+    return Printer.objects.create(name="K2 Pro")
 
 
 @pytest.fixture(autouse=True)
@@ -203,3 +211,69 @@ def test_agent_runs_list_and_detail(client, project):
     detail_response = client.get(f"/api/v1/agent-runs/{run.pk}/")
     assert detail_response.status_code == 200
     assert detail_response.json()["user_prompt"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Manual version deletion
+# ---------------------------------------------------------------------------
+
+
+def test_delete_version_removes_the_row_and_its_artifacts(client, project, user, tmp_path):
+    version = create_next_version(project=project, prompt="make it", created_by=user)
+    with override_settings(MEDIA_ROOT=str(tmp_path)):
+        storage = LocalStorage(root=tmp_path)
+        relative = f"projects/{project.pk}/v{version.version}/model.scad"
+        storage.write_bytes(relative, b"cube([1,1,1]);")
+        version.scad_file.name = relative
+        version.save(update_fields=["scad_file"])
+
+        response = client.delete(f"/api/v1/versions/{version.pk}/")
+        exists = storage.exists(relative)
+
+    assert response.status_code == 204
+    assert not ModelVersion.objects.filter(pk=version.pk).exists()
+    assert exists is False
+
+
+def test_delete_version_detaches_derived_versions(client, project, user):
+    base = create_next_version(project=project, prompt="v1", created_by=user)
+    derived = create_next_version(
+        project=project, prompt="v2", created_by=user, parent_version=base
+    )
+
+    response = client.delete(f"/api/v1/versions/{base.pk}/")
+
+    assert response.status_code == 204
+    derived.refresh_from_db()
+    assert derived.parent_version is None
+
+
+def test_delete_version_conflicts_when_print_jobs_reference_it(client, project, user, printer):
+    version = create_next_version(project=project, prompt="make it", created_by=user)
+    enqueue_job(project=project, model_version=version, printer=printer)
+
+    response = client.delete(f"/api/v1/versions/{version.pk}/")
+
+    assert response.status_code == 409
+    assert ModelVersion.objects.filter(pk=version.pk).exists()
+
+
+def test_delete_version_requires_authentication(project, user):
+    version = create_next_version(project=project, prompt="make it", created_by=user)
+
+    response = APIClient().delete(f"/api/v1/versions/{version.pk}/")
+
+    assert response.status_code in (401, 403)
+    assert ModelVersion.objects.filter(pk=version.pk).exists()
+
+
+def test_delete_foreign_version_404s(client, user):
+    other = User.objects.create_user(username="bob", email="bob@example.com", password="pw")
+    workspace = create_workspace(name="Other", owner=other)
+    foreign = create_project(workspace=workspace, name="Theirs", created_by=other)
+    version = create_next_version(project=foreign, prompt="x", created_by=other)
+
+    response = client.delete(f"/api/v1/versions/{version.pk}/")
+
+    assert response.status_code == 404
+    assert ModelVersion.objects.filter(pk=version.pk).exists()

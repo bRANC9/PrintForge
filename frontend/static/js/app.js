@@ -17,6 +17,7 @@
         project: (projectId) => `${API_BASE}/projects/${encodeURIComponent(projectId)}/`,
         projectPrint: (projectId) => `${API_BASE}/projects/${encodeURIComponent(projectId)}/print/`,
         versions: (projectId) => `${API_BASE}/projects/${encodeURIComponent(projectId)}/versions/`,
+        version: (versionId) => `${API_BASE}/versions/${encodeURIComponent(versionId)}/`,
         versionStatus: (versionId) => `${API_BASE}/versions/${encodeURIComponent(versionId)}/status/`,
         artifact: (versionId, kind) =>
             `${API_BASE}/versions/${encodeURIComponent(versionId)}/artifact/${encodeURIComponent(kind)}/`,
@@ -231,6 +232,7 @@
         listWorkspaces: async () => unwrapList(await request(endpoints.workspaces())),
         createWorkspace: (name) => request(endpoints.workspaces(), { method: "POST", body: { name } }),
         listVersions: async (projectId) => unwrapList(await request(endpoints.versions(projectId))),
+        deleteVersion: (versionId) => request(endpoints.version(versionId), { method: "DELETE" }),
         createVersion: (projectId, prompt) =>
             request(endpoints.versions(projectId), { method: "POST", body: { prompt } }),
         versionStatus: (versionId) => request(endpoints.versionStatus(versionId)),
@@ -872,6 +874,7 @@
                 ollama_base_url: "",
                 ollama_model: "",
                 ollama_vision_model: "",
+                ollama_timeout: "",
                 embedding_model: "",
                 rag_enabled: false,
                 openscad_mode: "",
@@ -890,6 +893,10 @@
                 ollama_base_url: data.ollama_base_url || "",
                 ollama_model: data.ollama_model || "",
                 ollama_vision_model: data.ollama_vision_model || "",
+                ollama_timeout:
+                    data.ollama_timeout === null || data.ollama_timeout === undefined
+                        ? ""
+                        : data.ollama_timeout,
                 embedding_model: data.embedding_model || "",
                 rag_enabled: Boolean(data.rag_enabled),
                 openscad_mode: data.openscad_mode || "",

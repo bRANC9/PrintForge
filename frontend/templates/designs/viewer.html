@@ -118,4 +118,48 @@
             </div>
         </template>
     </section>
+    <section class="vision-panel" x-show="visionReviewVisible" x-cloak>
+        <header class="annotation-head">
+            <h3>Vision önellenőrzés</h3>
+            <span class="badge"
+                  :class="visionReview && visionReview.matches ? 'is-ok' : ''"
+                  x-text="visionReviewLabel(visionReview)"></span>
+        </header>
+        <template x-if="hasPreviewImage">
+            <figure class="vision-figure">
+                <img class="vision-preview"
+                     :src="previewImageUrl"
+                     alt="A vision modell által látott előnézet">
+                <figcaption class="muted">Ezt az előnézeti képet látta a vision modell.</figcaption>
+            </figure>
+        </template>
+        <p class="muted"
+           x-show="visionReview && visionReview.skipped"
+           x-text="'A self-check kimaradt: ' + (visionReview.reason || 'nincs megadott ok')"></p>
+        <p class="muted"
+           x-show="visionReview && visionReview.summary"
+           x-text="visionReview.summary"></p>
+        <template x-if="visionIssues.length">
+            <ul class="vision-issues">
+                <template x-for="(issue, index) in visionIssues" :key="index">
+                    <li x-text="issue"></li>
+                </template>
+            </ul>
+        </template>
+        <details class="vision-input" x-show="visionSpecificationText" x-cloak>
+            <summary>Amit kapott: specifikáció</summary>
+            <pre class="vision-spec" x-text="visionSpecificationText"></pre>
+        </details>
+        <p class="warning-box"
+           x-show="visionTraceGuardOverride"
+           x-cloak>A determinisztikus alak-guard felülírta a modell „egyezik" válaszát.</p>
+        <details class="vision-input" x-show="visionTracePrompt" x-cloak>
+            <summary>A modell teljes promptja (input)</summary>
+            <pre class="vision-spec" x-text="visionTracePrompt"></pre>
+        </details>
+        <details class="vision-input" x-show="visionTraceResponse" x-cloak>
+            <summary>A modell nyers válasza (output)</summary>
+            <pre class="vision-spec" x-text="visionTraceResponse"></pre>
+        </details>
+    </section>
 </section>

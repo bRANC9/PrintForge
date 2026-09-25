@@ -95,14 +95,33 @@ class ReviewResult(BaseModel):
 - 8 GB VRAM-on az Ollama a két 7B modellt egymás után tölti be (swap) — ez
   elvárt; a self-check csak a generálás végén fut.
 
+### 4.2 Determinisztikus alak-guard (gyenge vision modell ellen)
+
+- A `review` node a vision verdikt mellé egy determinisztikus ellenőrzést is
+  futtat (`geometry_missing_issue`): ha a `specification`-ben **nincs
+  `primitives`**, a CAD backend csak a beépített holder sablont vagy egy
+  szintetizált dobozt tud renderelni, soha nem a kért alakot.
+- Ha a kérés nem holder-jellegű (nincs `holder`/`tartó`/`stand`/`phone`/
+  `telefon`/`tablet` token a promptban) és a spec primitív nélküli, a guard
+  felülírja a `matches: true` verdiktet, és ugyanúgy `retry`-t indít, mint egy
+  valódi mismatch. Így egy gyenge, mindent jóváhagyó vision modell (pl.
+  `llava:7b`) sem engedi át a fallback alkatrészt.
+- Holder-kérésnél a guard szándékosan nem szól, mert ott a beépített sablon a
+  helyes. A guard csak egy korlátos retry-t kér, modellt sosem blokkol.
+
 ## 5. Perzisztálás (agent-orchestrator, `agents/tasks.py`)
 
 - `_persist_version`: ha van `preview_image`, menti a
   `ModelVersion.preview_image` mezőbe (a storage backendbe), és a
   `validation_json`-ba bekerül a `vision_review` összegzése (issues/summary,
   **nem** a nyers bájtok).
-- `_summarise_state`: `vision_used`, `vision_review` (issues/summary) — bájtok
-  nélkül.
+- A nyers input/output is bekerül: `validation_json["vision_trace"]` =
+  `{system, prompt, response, guard_override}` (`_vision_trace_summary`, a
+  prompt `VISION_TRACE_PROMPT_CHARS` = 4000 karakterre vágva). Ez a
+  `AgentRun.state_json`-ba is bekerül, így a UI-on a „Vision önellenőrzés"
+  panelen látható, **mit kapott és mit válaszolt** a vision modell.
+- `_summarise_state`: `vision_used`, `vision_review` (issues/summary), és
+  `vision_trace` — bájtok nélkül.
 
 ## 6. API (api-dev)
 

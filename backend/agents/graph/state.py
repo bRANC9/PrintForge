@@ -96,6 +96,10 @@ class WorkflowState(TypedDict, total=False):
     #: (``matches``/``issues``/``summary``) or a ``{"skipped": True,
     #: "reason": ...}`` marker. Contains no bytes, so it is safe to persist.
     vision_review: dict[str, Any]
+    #: Raw vision self-check trace for the UI (docs/vision-self-check.md 5.):
+    #: the system/user prompt the reviewer received and its raw JSON response.
+    #: JSON-safe strings/dicts only -- never the preview image bytes.
+    vision_trace: dict[str, Any]
     #: Whether the rendered preview was actually judged by a vision model.
     #: ``False`` when there was no STL, no vision support, or the review failed.
     vision_used: bool

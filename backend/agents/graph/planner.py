@@ -120,9 +120,14 @@ PLANNER_SYSTEM_PROMPT = (
     "Use role 'add' for material and role 'subtract' for holes and cutouts. "
     "The part must rest on the build plate (min Z = 0) and use sensible, "
     "printable sizes. Keep dimensions, angle, wall_thickness and mounting "
-    "filled for compatibility, and use 'primitives': [] only when the object "
-    "really is the built-in phone holder; otherwise always describe the object "
-    "with primitives. Use sensible printable defaults when a value is missing. "
+    "filled for compatibility. Use 'primitives': [] ONLY when the user "
+    "explicitly asked for the built-in phone holder (a phone or tablet stand); "
+    "for every other object you MUST fill 'primitives' with the geometry that "
+    "builds it and never fall back to the built-in phone holder. For a flat, "
+    "2D-shaped object (a stamp, cookie cutter, silhouette, tag or ornament) "
+    "use a single 'extrude' primitive whose 'profile' lists the {'x','y'} "
+    "outline points in mm in order. Use sensible printable defaults when a "
+    "value is missing. "
     + OPERATION_DIMENSIONS_PROMPT
     + PRIMITIVE_DIMENSIONS_PROMPT
     + CLARIFICATION_PROMPT

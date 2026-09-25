@@ -7,6 +7,7 @@ may depend on DRF or an HTTP request. Render jobs are *only* enqueued to Celery
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from django.db import transaction
@@ -22,6 +23,8 @@ from .tasks import render_model_stl
 if TYPE_CHECKING:  # pragma: no cover - import only for type hints
     from agents.models import AgentRun
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "ARTIFACT_CONTENT_TYPES",
     "ARTIFACT_KINDS",
@@ -31,6 +34,7 @@ __all__ = [
     "artifact_path",
     "create_annotation_edit",
     "create_next_version",
+    "delete_version",
     "latest_version",
     "read_artifact",
     "regenerate_version",
@@ -419,3 +423,25 @@ def read_artifact(version: ModelVersion, kind: str) -> tuple[str, bytes] | None:
     if not storage.exists(relative_path):
         return None
     return relative_path, storage.read_bytes(relative_path)
+
+
+@transaction.atomic
+def delete_version(version: ModelVersion) -> None:
+    """Delete a version and its stored artifacts (manual cleanup).
+
+    The API guards this against versions referenced by history that a cascade
+    would erase (print jobs, build plates). Derived versions keep existing --
+    ``parent_version`` is ``SET_NULL``, so the edit chain is simply detached.
+    Artifact files are removed best-effort: a storage failure must not roll back
+    the database delete.
+    """
+    storage = get_storage()
+    for field_name in ("scad_file", "stl_file", "glb_file", "preview_image", "reference_image"):
+        name = getattr(getattr(version, field_name, None), "name", "") or ""
+        if not name:
+            continue
+        try:
+            storage.delete(name)
+        except Exception:  # noqa: BLE001 - file cleanup must never fail the delete
+            logger.warning("could not delete artifact %r for version %s", name, version.pk)
+    version.delete()

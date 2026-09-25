@@ -53,6 +53,7 @@ from designs.services import (
     answer_clarifications,
     create_annotation_edit,
     create_next_version,
+    delete_version,
     read_artifact,
     regenerate_version,
     start_render,
@@ -587,8 +588,12 @@ class BuildPlateViewSet(viewsets.ModelViewSet):
         return Response(PlateItemSerializer(item).data, status=HTTPStatus.CREATED)
 
 
-class ModelVersionViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
-    """Version detail, job status and artifact download.
+class ModelVersionViewSet(
+    mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Version detail, manual delete, job status and artifact download.
 
     Only the detail route is registered (no top-level list; versions are listed
     per project via ``/projects/{id}/versions/``).
@@ -602,6 +607,29 @@ class ModelVersionViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
         if not user.is_authenticated:
             return ModelVersion.objects.none()
         return versions_accessible_to(user).select_related("project", "created_by")
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete one version (MEMBER+) unless history depends on it.
+
+        Print jobs and build-plate entries are history, and their foreign keys
+        to a version ``CASCADE`` -- deleting such a version would silently erase
+        them. Those cases are answered with ``409 Conflict`` so the user can
+        decide; everything else (including a parent whose derived versions are
+        only detached) is deleted together with its stored artifacts.
+        """
+        version = self.get_object()
+        if version.print_jobs.exists():
+            return Response(
+                {"detail": "This version has print jobs; delete them first."},
+                status=HTTPStatus.CONFLICT,
+            )
+        if version.plate_items.exists():
+            return Response(
+                {"detail": "This version is on a build plate; remove it from the plate first."},
+                status=HTTPStatus.CONFLICT,
+            )
+        delete_version(version)
+        return Response(status=HTTPStatus.NO_CONTENT)
 
     @action(detail=True, methods=["get"], url_path="status")
     def status(self, request, pk=None):

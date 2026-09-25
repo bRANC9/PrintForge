@@ -347,7 +347,11 @@ class ModelSpecification(BaseModel):
     object: str = Field(
         min_length=1,
         max_length=128,
-        description='Machine-readable object kind, e.g. "phone_holder".',
+        description=(
+            "Machine-readable object kind describing the requested object, "
+            'e.g. "cookie_cutter" or "wall_bracket". Name the real object; '
+            "never use a generic fallback when the request names a specific object."
+        ),
     )
     dimensions: Dimensions
     angle: float = Field(

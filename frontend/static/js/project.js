@@ -128,6 +128,8 @@
             editPrompt: "",
             editError: "",
             regenerateBusyId: null,
+            confirmDeleteVersionId: null,
+            deletingVersionId: null,
             originLabels: {
                 generate: "generate",
                 annotation: "annotation",
@@ -238,6 +240,102 @@
                 return this.selectedVersionId
                     ? PF.endpoints.artifact(this.selectedVersionId, "scad")
                     : "";
+            },
+
+            /** True when the selected version has a rendered preview artifact. */
+            get hasPreviewImage() {
+                const version = this.selectedVersion;
+                return Boolean(version && this.selectedVersionId && version.preview_image);
+            },
+
+            /**
+             * The rendered preview (what the vision model saw), served through the
+             * artifact endpoint so it works for every storage backend.
+             */
+            get previewImageUrl() {
+                return this.hasPreviewImage
+                    ? PF.endpoints.artifact(this.selectedVersionId, "preview")
+                    : "";
+            },
+
+            /**
+             * Stored vision self-check verdict of the selected version
+             * (`validation_json.vision_review`, docs/vision-self-check.md 5.):
+             * either `{matches, issues, summary}` or a `{skipped, reason}` marker.
+             */
+            get visionReview() {
+                const version = this.selectedVersion;
+                const validation =
+                    version && version.validation_json ? version.validation_json : null;
+                const review =
+                    validation && validation.vision_review ? validation.vision_review : null;
+                return review && typeof review === "object" ? review : null;
+            },
+
+            /** Show the panel when a verdict (or at least a preview) exists. */
+            get visionReviewVisible() {
+                const review = this.visionReview;
+                if (review && (typeof review.matches === "boolean" || review.skipped)) return true;
+                return this.hasPreviewImage;
+            },
+
+            /** Non-matching issues reported by the reviewer (empty when it matched). */
+            get visionIssues() {
+                const review = this.visionReview;
+                if (!review || review.matches) return [];
+                return Array.isArray(review.issues) ? review.issues : [];
+            },
+
+            /** The specification the vision model was shown beside the image. */
+            get visionSpecificationText() {
+                const version = this.selectedVersion;
+                const specification =
+                    version && version.specification_json ? version.specification_json : null;
+                if (!specification || !Object.keys(specification).length) return "";
+                try {
+                    return JSON.stringify(specification, null, 2);
+                } catch (error) {
+                    return "";
+                }
+            },
+
+            visionReviewLabel(review) {
+                if (!review) return "";
+                if (review.skipped) return "Kihagyva";
+                return review.matches ? "Egyezik" : "Eltérés";
+            },
+
+            /**
+             * Raw vision input/output (`validation_json.vision_trace`):
+             * the literal system/user prompt the reviewer received and the
+             * model's raw JSON answer.
+             */
+            get visionTrace() {
+                const version = this.selectedVersion;
+                const validation =
+                    version && version.validation_json ? version.validation_json : null;
+                const trace = validation && validation.vision_trace ? validation.vision_trace : null;
+                return trace && typeof trace === "object" ? trace : null;
+            },
+
+            get visionTracePrompt() {
+                const trace = this.visionTrace;
+                return trace ? String(trace.prompt || "") : "";
+            },
+
+            get visionTraceResponse() {
+                const trace = this.visionTrace;
+                if (!trace || !trace.response) return "";
+                try {
+                    return JSON.stringify(trace.response, null, 2);
+                } catch (error) {
+                    return "";
+                }
+            },
+
+            get visionTraceGuardOverride() {
+                const trace = this.visionTrace;
+                return Boolean(trace && trace.guard_override);
             },
 
             get ratingLabel() {
@@ -416,6 +514,40 @@
                 }
                 this.selectedVersionId = version.id;
                 this.showStoredAnnotations(version);
+            },
+
+            /**
+             * Delete one version (2025-09): the API removes its artifacts and
+             * refuses when print jobs / build plates still reference it. The
+             * selection follows the new list so the viewer never shows a model
+             * that no longer exists.
+             */
+            async deleteVersion(version) {
+                if (!version || this.deletingVersionId) return;
+                this.deletingVersionId = version.id;
+                this.errors = [];
+                this.error = "";
+                try {
+                    await PF.api.deleteVersion(version.id);
+                    this.confirmDeleteVersionId = null;
+                    if (String(this.selectedVersionId) === String(version.id)) {
+                        this.selectedVersionId = null;
+                        this.clearAnnotations();
+                    }
+                    await this.loadVersions();
+                    if (!this.selectedVersionId && this.versions.length) {
+                        this.selectVersion(this.versions[0]);
+                    }
+                    this.notice = `A v${version.version} verzió törölve.`;
+                } catch (error) {
+                    if (ext.isPermissionError(error)) {
+                        this.errors = ["Nincs jogosultságod a verzió törléséhez."];
+                    } else {
+                        this.errors = [error.message || String(error)];
+                    }
+                } finally {
+                    this.deletingVersionId = null;
+                }
             },
 
             /**

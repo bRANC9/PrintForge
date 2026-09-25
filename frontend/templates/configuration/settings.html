@@ -101,6 +101,19 @@
                     <p class="muted field-hint">Üresen hagyva ugyanaz, mint a fő Ollama modell (a review a fő modellt használja).</p>
                 </div>
                 <div class="form-row">
+                    <label for="setting-ollama-timeout">Ollama timeout (mp) <span class="badge"
+       :class="'source-' + source('ollama_timeout')"
+       x-text="source('ollama_timeout')"></span></label>
+                    <input id="setting-ollama-timeout"
+                           class="input"
+                           type="number"
+                           min="1"
+                           placeholder="120"
+                           x-model.number="form.ollama_timeout"
+                           :disabled="saving">
+                    <p class="muted field-hint">Egy Ollama LLM-hívás felső időkorlátja másodpercben. Nagyobb, CPU-ra offloadolt modelleknél emeld meg (pl. 300–600), különben a Planner timeoutol.</p>
+                </div>
+                <div class="form-row">
                     <label for="setting-embedding-model">Embedding modell <span class="badge"
        :class="'source-' + source('embedding_model')"
        x-text="source('embedding_model')"></span></label>
