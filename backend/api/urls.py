@@ -10,6 +10,7 @@ from .views import (
     OllamaModelPullView,
     OllamaModelsView,
     OllamaModelUseView,
+    OllamaPullActionView,
     OllamaPullDetailView,
     OllamaPullsView,
     OllamaRecommendationsView,
@@ -53,5 +54,10 @@ urlpatterns = [
     path("ollama/remote/", OllamaRemoteModelsView.as_view(), name="api-ollama-remote"),
     path("ollama/pulls/", OllamaPullsView.as_view(), name="api-ollama-pulls"),
     path("ollama/pulls/<int:pk>/", OllamaPullDetailView.as_view(), name="api-ollama-pull-detail"),
+    path(
+        "ollama/pulls/<int:pk>/<str:action>/",
+        OllamaPullActionView.as_view(),
+        name="api-ollama-pull-action",
+    ),
     path("", include(router.urls)),
 ]

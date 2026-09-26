@@ -29,6 +29,7 @@ from configuration.models import OllamaPull
 from configuration.services import (
     OllamaError,
     RemoteCatalogError,
+    cancel_pull,
     delete_ollama_model,
     effective_settings,
     get_setting,
@@ -41,6 +42,7 @@ from configuration.services import (
     ollama_version,
     pull_ollama_model,
     pull_status,
+    retry_pull,
     search_huggingface_models,
     test_ollama,
     update_settings,
@@ -1224,7 +1226,7 @@ class OllamaPullsView(APIView):
 
 
 class OllamaPullDetailView(APIView):
-    """One Ollama pull's progress (staff only)."""
+    """One Ollama pull's progress, plus retry/cancel (staff only)."""
 
     permission_classes = [IsStaff]
 
@@ -1233,3 +1235,41 @@ class OllamaPullDetailView(APIView):
         if pull is None:
             return Response({"detail": "Not found."}, status=HTTPStatus.NOT_FOUND)
         return Response(pull_status(pull))
+
+    def _pull(self, pk: int) -> OllamaPull | None:
+        return OllamaPull.objects.filter(pk=pk).first()
+
+    def post(self, request, pk: int):
+        """Dispatch a pull action posted to the detail route.
+
+        The body carries ``{"action": "retry"|"cancel"}``; the same actions are
+        also reachable on the ``/retry/`` and ``/cancel/`` sub-routes.
+        """
+        action = str((request.data or {}).get("action") or "").strip().lower()
+        pull = OllamaPull.objects.filter(pk=pk).first()
+        if pull is None:
+            return Response({"detail": "Not found."}, status=HTTPStatus.NOT_FOUND)
+        if action == "cancel":
+            return Response(pull_status(cancel_pull(pull)))
+        if action == "retry":
+            return Response(pull_status(retry_pull(pull)))
+        return Response(
+            {"detail": "Unknown action; expected 'retry' or 'cancel'."},
+            status=HTTPStatus.BAD_REQUEST,
+        )
+
+
+class OllamaPullActionView(APIView):
+    """``POST /api/v1/ollama/pulls/{id}/{action}/`` with action retry|cancel."""
+
+    permission_classes = [IsStaff]
+
+    def post(self, request, pk: int, action: str):
+        pull = OllamaPull.objects.filter(pk=pk).first()
+        if pull is None:
+            return Response({"detail": "Not found."}, status=HTTPStatus.NOT_FOUND)
+        if action == "cancel":
+            return Response(pull_status(cancel_pull(pull)))
+        if action == "retry":
+            return Response(pull_status(retry_pull(pull)))
+        return Response({"detail": "Unknown action."}, status=HTTPStatus.NOT_FOUND)

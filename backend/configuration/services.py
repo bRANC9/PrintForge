@@ -24,6 +24,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
@@ -40,9 +41,11 @@ from .tasks import pull_ollama_model_task
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "PULL_STALE_SECONDS",
     "SETTING_NAMES",
     "OllamaError",
     "RemoteCatalogError",
+    "cancel_pull",
     "delete_ollama_model",
     "effective_settings",
     "get_setting",
@@ -55,7 +58,9 @@ __all__ = [
     "model_recommendations",
     "ollama_version",
     "pull_ollama_model",
+    "pull_is_stale",
     "pull_status",
+    "retry_pull",
     "search_huggingface_models",
     "show_ollama_model",
     "test_ollama",
@@ -475,7 +480,75 @@ def list_pulls(limit: int = 20):
     return OllamaPull.objects.select_related("created_by").order_by("-created_at")[:limit]
 
 
-def pull_status(pull: OllamaPull) -> dict:
+#: A pull that has not progressed for this long is *stuck*: its worker is gone
+#: (container restart, OOM kill) or it was never picked up from the queue. Such a
+#: row is offered for retry instead of polling forever.
+PULL_STALE_SECONDS = 900
+
+
+def pull_is_stale(pull: OllamaPull) -> bool:
+    """Whether an unfinished pull looks abandoned and should be retried."""
+    if pull.status not in {OllamaPullStatus.PENDING, OllamaPullStatus.RUNNING}:
+        return False
+    reference = pull.started_at or pull.created_at
+    if reference is None:
+        return True
+    return (timezone.now() - reference).total_seconds() > PULL_STALE_SECONDS
+
+
+def cancel_pull(pull: OllamaPull) -> OllamaPull:
+    """Mark a pull cancelled so the worker aborts and the UI stops tracking it.
+
+    A pull that is already finished is left alone: cancelling it would rewrite
+    history of a download that actually completed.
+    """
+    if pull.status not in {OllamaPullStatus.PENDING, OllamaPullStatus.RUNNING}:
+        return pull
+    pull.status = OllamaPullStatus.CANCELLED
+    pull.error = ""
+    pull.detail = "Megszakítva a felhasználó által"[:300]
+    pull.completed_at = timezone.now()
+    pull.save(update_fields=["status", "error", "detail", "completed_at"])
+    return pull
+
+
+def retry_pull(pull: OllamaPull) -> OllamaPull:
+    """Re-enqueue a finished, failed, cancelled or stuck pull.
+
+    The row is reset to ``PENDING`` and the Celery task is handed the same id, so
+    the history keeps one entry per download attempt instead of piling up.
+    """
+    pull.status = OllamaPullStatus.PENDING
+    pull.error = ""
+    pull.detail = "Újraindítva"
+    pull.progress_percent = 0
+    pull.completed_bytes = 0
+    pull.total_bytes = 0
+    pull.started_at = None
+    pull.completed_at = None
+    pull.save(
+        update_fields=[
+            "status",
+            "error",
+            "detail",
+            "progress_percent",
+            "completed_bytes",
+            "total_bytes",
+            "started_at",
+            "completed_at",
+        ]
+    )
+    try:
+        pull_ollama_model_task.delay(pull.pk)
+    except Exception as exc:  # noqa: BLE001 - the broker can fail in many ways
+        pull.status = OllamaPullStatus.FAILED
+        pull.error = f"Nem sikerült újraindítani: {type(exc).__name__}: {exc}"[:1000]
+        pull.completed_at = timezone.now()
+        pull.save(update_fields=["status", "error", "completed_at"])
+    return pull
+
+
+def pull_status(pull: OllamaPull) -> dict[str, Any]:
     """Serialise an :class:`OllamaPull` for the API/UI."""
     return {
         "id": pull.pk,
@@ -486,6 +559,8 @@ def pull_status(pull: OllamaPull) -> dict:
         "completed_bytes": pull.completed_bytes,
         "total_bytes": pull.total_bytes,
         "error": pull.error,
+        # A stuck row is actionable: the UI offers retry/cancel for it.
+        "stale": pull_is_stale(pull),
         "created_at": pull.created_at.isoformat() if pull.created_at else None,
         "started_at": pull.started_at.isoformat() if pull.started_at else None,
         "completed_at": pull.completed_at.isoformat() if pull.completed_at else None,
@@ -509,13 +584,95 @@ OLLAMA_LIBRARY_URL = "https://ollama.com/api/tags"
 HUGGINGFACE_MODELS_URL = "https://huggingface.co/api/models"
 HUGGINGFACE_MODEL_URL = "https://huggingface.co/api/models/{repo}"
 
-#: GGUF quantization token at the end of a filename (``...-Q4_K_M.gguf``).
-_QUANT_TOKEN = re.compile(
-    r"(?:^|[-_/])"
-    r"(Q\d(?:_[A-Za-z0-9]+)*|IQ\d(?:_[A-Za-z0-9]+)*|BF16|FP16|F16|F32|MXFP4)"
-    r"\.gguf$",
+#: A GGUF filename stem is split on ``-``/``_``; these two decide which token run
+#: is the quantization label. The head starts it, the tail extends it.
+#:
+#: Repos put the quant anywhere in the name (``model-Q4_K_M.gguf``,
+#: ``model-NVFP4-MTP.gguf``, ``UD-IQ3_XXS-....gguf``), so the old
+#: "token just before .gguf" pattern missed NVFP4-only repos and the catalog
+#: offered their F16 sibling instead -- a 27B model at full precision is over
+#: 50 GB. Tokenising instead of one big regex also keeps filename noise out of
+#: the label: ``UD-IQ3_XXS-model`` yields ``UD-IQ3_XXS``, not
+#: ``UD-IQ3_XXS-M``.
+_QUANT_HEAD = re.compile(
+    r"^(?:NVFP4|MXFP4|FP4|FP16|BF16|F16|F32|FP32|EXL\d+|Q\d+|IQ\d+)$",
     re.IGNORECASE,
 )
+_QUANT_TAIL = re.compile(
+    r"^(?:XXS|XS|XLL|XL|XV|KV|KM|KS|KL|K|M|S|L|BIT|MTP|\d+)$",
+    re.IGNORECASE,
+)
+_UD_PREFIX = "ud"
+
+#: Full-precision builds are not quantizations and must never be suggested
+#: automatically.
+_FULL_PRECISION_QUANTS = frozenset({"BF16", "F16", "FP16", "F32", "FP32"})
+
+#: 1-2 bit quants are unusably degraded: still listed, never chosen.
+_UNUSABLE_QUANT_PREFIXES = ("IQ1_", "IQ2_")
+
+#: Preferred quantizations for a consumer GPU, best quality per size.
+_QUANT_PREFERENCE = (
+    "Q4_K_M",
+    "Q4_K_S",
+    "Q5_K_M",
+    "Q5_K_S",
+    "Q6_K",
+    "Q8_0",
+    "Q4_0",
+    "Q3_K_M",
+    "Q2_K",
+)
+
+#: A pull above this size does not fit a consumer GPU, so the size-based
+#: fallback prefers the largest file below it.
+_FITS_CONSUMER_GPU_BYTES = 24 * 10**9
+
+
+def _quant_label(stem: str) -> str:
+    """The quantization label inside a GGUF filename stem (``""`` when absent).
+
+    Splits the stem on ``-``/``_``, finds the first :data:`_QUANT_HEAD` token and
+    returns the original substring from there through the run of
+    :data:`_QUANT_TAIL` tokens, so the returned label is exactly the suffix the
+    repository used (that is the tag Ollama expects).
+    """
+    tokens = [
+        (match.group(0), match.start(), match.end()) for match in re.finditer(r"[^_-]+", stem)
+    ]
+    for index, (text, _start, _end) in enumerate(tokens):
+        if not _QUANT_HEAD.match(text):
+            continue
+        first = index
+        if index > 0 and tokens[index - 1][0].lower() == _UD_PREFIX:
+            first = index - 1  # keep the ``UD-`` prefix of UD-* quants
+        last = index
+        while last + 1 < len(tokens) and _QUANT_TAIL.match(tokens[last + 1][0]):
+            last += 1
+        # A sharded file appends ``-00001-of-00002``; that is a chunk index, not
+        # part of the quant, so cut the label there.
+        if last + 1 < len(tokens) and tokens[last + 1][0].lower() == "of":
+            for back in range(last, index - 1, -1):
+                if tokens[back][0].isdigit():
+                    last = back - 1
+                    break
+        if last < first:  # pragma: no cover - defensive
+            return ""
+        return stem[tokens[first][1] : tokens[last][2]]
+    return ""
+
+
+def _normalise_quant(quant: str) -> str:
+    """Upper-case a quant label with ``_`` separators, for comparisons."""
+    return str(quant or "").upper().replace("-", "_")
+
+
+def _is_usable_quant(quant: str) -> bool:
+    """Whether *quant* is a real (non full-precision, non 1-2 bit) quantization."""
+    normalised = _normalise_quant(quant)
+    if not normalised or normalised in _FULL_PRECISION_QUANTS:
+        return False
+    return not normalised.startswith(_UNUSABLE_QUANT_PREFIXES)
 
 
 def _remote_json(url: str, *, timeout: int = _REMOTE_TIMEOUT) -> Any:
@@ -562,32 +719,71 @@ def list_ollama_library_models(*, limit: int = 50) -> list[dict]:
     return result
 
 
-def _hf_quants(repo: str) -> list[str]:
-    """Extract the available GGUF quantization tags for a Hugging Face repo."""
+def _hf_quant_files(repo: str) -> list[dict[str, Any]]:
+    """Every quantized GGUF file of *repo* with its real byte size.
+
+    The detail request asks for ``blobs=true``: without it Hugging Face returns
+    the file list with **no sizes**, so the catalog could not tell a 4 GB Q4_K_M
+    from a 54 GB F16 and had to guess a quantization.
+    """
     try:
-        data = _remote_json(HUGGINGFACE_MODEL_URL.format(repo=repo))
+        data = _remote_json(f"{HUGGINGFACE_MODEL_URL.format(repo=repo)}?blobs=true")
     except RemoteCatalogError:
         return []
     siblings = data.get("siblings") if isinstance(data, dict) else None
     if not isinstance(siblings, list):
         return []
-    quants: list[str] = []
+    files: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for sibling in siblings:
-        filename = (sibling or {}).get("rfilename") or ""
-        match = _QUANT_TOKEN.search(filename)
-        if match:
-            quant = match.group(1).upper()
-            if quant not in quants:
-                quants.append(quant)
-    return quants
+        filename = str((sibling or {}).get("rfilename") or "")
+        if not filename.lower().endswith(".gguf"):
+            continue
+        quant = _quant_label(filename[: -len(".gguf")])
+        try:
+            size = int((sibling or {}).get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        key = _normalise_quant(quant) or filename
+        if key in seen:
+            continue
+        seen.add(key)
+        files.append(
+            {
+                "quant": quant,
+                "file": filename,
+                "size": size,
+                "size_human": _human_size(size),
+            }
+        )
+    return files
 
 
-def _preferred_quant(quants: list[str]) -> str:
-    """Prefer a good size/quality default, else the first available quant."""
-    for candidate in ("Q4_K_M", "Q4_K_S", "Q5_K_M", "Q8_0"):
-        if candidate in quants:
-            return candidate
-    return quants[0] if quants else ""
+def _pick_quant(files: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """Choose the file to pull from the quantized candidates.
+
+    Only real quantizations compete: a full-precision or 1-2 bit build is never
+    returned, so a repo that ships nothing usable simply has no pull candidate
+    instead of a 50 GB+ download. The fallback prefers the largest file that
+    still fits a consumer GPU, then the smallest one available.
+    """
+    usable = [item for item in files if _is_usable_quant(item.get("quant", ""))]
+    if not usable:
+        return None
+    for preferred in _QUANT_PREFERENCE:
+        for item in usable:
+            if _normalise_quant(item["quant"]) == preferred:
+                return item
+    by_size = sorted(usable, key=lambda item: int(item.get("size") or 0))
+    fitting = [
+        item for item in by_size if 0 < int(item.get("size") or 0) <= _FITS_CONSUMER_GPU_BYTES
+    ]
+    return (fitting or by_size)[-1]
+
+
+def _hf_quants(repo: str) -> list[str]:
+    """The usable quantization labels of *repo* (full precision excluded)."""
+    return [item["quant"] for item in _hf_quant_files(repo) if _is_usable_quant(item["quant"])]
 
 
 def search_huggingface_models(query: str = "", *, limit: int = 10) -> list[dict]:
@@ -626,14 +822,30 @@ def search_huggingface_models(query: str = "", *, limit: int = 10) -> list[dict]
 
     if result:
         with ThreadPoolExecutor(max_workers=min(4, len(result))) as pool:
-            for entry, quants in zip(
+            for entry, files in zip(
                 result,
-                pool.map(lambda e: _hf_quants(e["name"]), result),
+                pool.map(lambda e: _hf_quant_files(e["name"]), result),
                 strict=True,
             ):
-                entry["quants"] = quants
-                chosen = _preferred_quant(quants)
-                entry["pull_name"] = f"hf.co/{entry['name']}" + (f":{chosen}" if chosen else "")
+                quantized = [item for item in files if item["quant"]]
+                entry["quants"] = [
+                    item["quant"] for item in quantized if _is_usable_quant(item["quant"])
+                ]
+                # Sizes next to every quant so the UI can show what a pull costs.
+                entry["quant_sizes"] = {
+                    item["quant"]: item["size_human"]
+                    for item in quantized
+                    if _is_usable_quant(item["quant"])
+                }
+                chosen = _pick_quant(files)
+                if chosen is None:
+                    # Only full-precision / 1-2 bit builds: offer no download at
+                    # all rather than a 50 GB+ file.
+                    entry["pull_name"] = ""
+                    continue
+                entry["pull_name"] = f"hf.co/{entry['name']}:{chosen['quant']}"
+                entry["size"] = chosen["size"] or None
+                entry["size_human"] = chosen["size_human"]
     return result
 
 

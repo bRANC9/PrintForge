@@ -25,6 +25,7 @@ class OllamaPullStatus(models.TextChoices):
     RUNNING = "RUNNING", "Running"
     DONE = "DONE", "Done"
     FAILED = "FAILED", "Failed"
+    CANCELLED = "CANCELLED", "Cancelled"
 
 
 class AppSettings(models.Model):

@@ -42,6 +42,20 @@ _MAX_DETAIL_LENGTH = 300
 _NOTIFICATION_URL = "/settings/ollama/"
 
 
+class _PullCancelled(Exception):
+    """The row was cancelled while the pull was streaming."""
+
+
+def _cancelled(pull_id: int) -> bool:
+    """Whether the row was cancelled (or replaced) while we were streaming.
+
+    Ollama has no pull-cancel API, so the database row is the signal: the task
+    checks it on every progress write and aborts the stream.
+    """
+    status = OllamaPull.objects.filter(pk=pull_id).values_list("status", flat=True).first()
+    return status in {OllamaPullStatus.CANCELLED, None}
+
+
 @shared_task(name="configuration.pull_ollama_model")
 def pull_ollama_model_task(pull_id: int) -> dict[str, Any]:
     """Pull an Ollama model, persisting streamed progress on ``OllamaPull``."""
@@ -49,6 +63,8 @@ def pull_ollama_model_task(pull_id: int) -> dict[str, Any]:
     if pull is None:
         logger.warning("pull_ollama_model_task: OllamaPull %s not found", pull_id)
         return {"pull_id": pull_id, "status": "missing"}
+    if pull.status == OllamaPullStatus.CANCELLED:
+        return {"pull_id": pull_id, "status": "cancelled"}
 
     # Local import avoids a service <-> task import cycle.
     from .services import get_setting
@@ -63,6 +79,9 @@ def pull_ollama_model_task(pull_id: int) -> dict[str, Any]:
         if not base_url:
             raise RuntimeError("No Ollama base URL configured.")
         _stream_pull(pull, f"{base_url}/api/pull")
+    except _PullCancelled:
+        logger.info("Ollama pull %s cancelled by the user", pull.name)
+        return {"pull_id": pull.pk, "status": "cancelled"}
     except Exception as exc:  # noqa: BLE001 - persist *any* failure
         logger.warning("Ollama pull failed for %s: %s", pull.name, exc)
         _fail(pull, f"{type(exc).__name__}: {exc}")
@@ -110,6 +129,8 @@ def _stream_pull(pull: OllamaPull, url: str) -> None:
             if now - last_write >= _PROGRESS_WRITE_INTERVAL:
                 _persist_progress(pull)
                 last_write = now
+                if _cancelled(pull.pk):
+                    raise _PullCancelled
 
     _persist_progress(pull)
 

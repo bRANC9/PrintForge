@@ -125,13 +125,13 @@ def test_list_ollama_library_models_normalizes(monkeypatch):
 
 def test_search_huggingface_models_extracts_quant_tags(monkeypatch):
     def fake_json(url, **kwargs):
-        if "?" in url:  # the search request
+        if "/api/models?" in url:  # the search request
             return [{"id": "unsloth/x-GGUF", "downloads": 10, "likes": 1}]
         return {  # the per-repo file list
             "siblings": [
-                {"rfilename": "x-Q4_K_M.gguf"},
-                {"rfilename": "x-Q8_0.gguf"},
-                {"rfilename": "x-00001-of-00002.gguf"},
+                {"rfilename": "x-Q4_K_M.gguf", "size": 4 * 10**9},
+                {"rfilename": "x-Q8_0.gguf", "size": 8 * 10**9},
+                {"rfilename": "x-00001-of-00002.gguf", "size": 3 * 10**9},
             ]
         }
 
@@ -142,9 +142,18 @@ def test_search_huggingface_models_extracts_quant_tags(monkeypatch):
     assert models[0]["quants"] == ["Q4_K_M", "Q8_0"]
     assert models[0]["pull_name"] == "hf.co/unsloth/x-GGUF:Q4_K_M"
     assert models[0]["source"] == "huggingface"
+    # Real byte sizes ride along so the UI can show what a pull costs.
+    assert models[0]["quant_sizes"] == {"Q4_K_M": "3.7 GB", "Q8_0": "7.5 GB"}
 
 
 def test_search_huggingface_models_without_quants(monkeypatch):
+    """A repo with no usable quantization offers no download at all.
+
+    The bare repo name is not a valid pull target (``hf.co/u/plain-GGUF`` would
+    resolve to whatever default Ollama picks), so the catalog leaves
+    ``pull_name`` empty instead of guessing.
+    """
+
     def fake_json(url, **kwargs):
         if "?" in url:
             return [{"id": "u/plain-GGUF"}]
@@ -155,7 +164,7 @@ def test_search_huggingface_models_without_quants(monkeypatch):
     models = search_huggingface_models(limit=1)
 
     assert models[0]["quants"] == []
-    assert models[0]["pull_name"] == "hf.co/u/plain-GGUF"
+    assert models[0]["pull_name"] == ""
 
 
 def test_show_ollama_model_posts_the_name(monkeypatch):
@@ -257,10 +266,13 @@ def test_pull_status_shape(user):
     assert payload["completed_bytes"] == 420
     assert payload["total_bytes"] == 1000
     assert payload["error"] == ""
+    # A stuck row is flagged so the UI can offer retry/cancel for it.
+    assert payload["stale"] is False
     assert set(payload) == {
         "id",
         "name",
         "status",
+        "stale",
         "progress_percent",
         "detail",
         "completed_bytes",
