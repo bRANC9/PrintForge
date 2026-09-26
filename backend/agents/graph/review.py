@@ -28,7 +28,7 @@ from agents.llm import LLMError, LLMProvider
 from agents.spec import ReviewResult
 from designs.cad.preview import render_stl_preview
 
-from .consistency import consistency_issue
+from .consistency import consistency_issues
 from .state import WorkflowState, append_history
 from .textreview import run_text_review
 from .vision import reference_prompt_for
@@ -211,10 +211,10 @@ def make_review_node(
         issues = [str(issue) for issue in vision_review.issues]
         if text_review is not None and not text_review.matches:
             issues.extend(str(issue) for issue in text_review.issues)
-        guards = (
+        guards = [
             geometry_missing_issue(state),
-            consistency_issue(str(state.get("prompt") or ""), state.get("specification")),
-        )
+            *consistency_issues(str(state.get("prompt") or ""), state.get("specification")),
+        ]
         for guard_issue in guards:
             if guard_issue and guard_issue not in issues:
                 issues.append(guard_issue)

@@ -30,7 +30,7 @@ from .planner import (
     coerce_plan,
 )
 
-__all__ = ["REVISER_SYSTEM_PROMPT", "make_llm_reviser"]
+__all__ = ["LlmReviser", "REVISER_SYSTEM_PROMPT", "make_llm_reviser"]
 
 logger = logging.getLogger(__name__)
 
@@ -72,23 +72,31 @@ def _reviser_prompt(
     )
 
 
-def make_llm_reviser(provider: LLMProvider) -> SpecReviser:
-    """Return a :data:`~agents.graph.cad.SpecReviser` backed by *provider*.
+class LlmReviser:
+    """Callable :data:`~agents.graph.cad.SpecReviser` that records its exchange.
 
-    The returned callable has the ``(specification, errors, attempt) -> dict |
-    None`` signature the CAD node expects. It returns ``None`` on any
-    :class:`~agents.llm.LLMError` or validation failure, so a broken reviser can
-    never kill the run.
+    Beyond returning the corrected specification it keeps the last LLM call in
+    :attr:`last_exchange` (``{agent, attempt, system, prompt, response}``) so the
+    CAD node can append it to the workflow's ``llm_trace`` -- that is what makes
+    the reviser's input/output visible in the UI (docs/vision-self-check.md 5.).
     """
 
-    def reviser(
+    def __init__(self, provider: LLMProvider) -> None:
+        self._provider = provider
+        #: The most recent exchange, or ``None`` when the last call failed.
+        self.last_exchange: dict[str, Any] | None = None
+
+    def __call__(
+        self,
         specification: dict[str, Any],
         errors: list[str],
         attempt: int,
     ) -> dict[str, Any] | None:
+        """Return a corrected specification, or ``None`` on any failure."""
+        self.last_exchange = None
         prompt = _reviser_prompt(specification, errors, attempt)
         try:
-            payload = provider.structured(
+            payload = self._provider.structured(
                 prompt,
                 ModelSpecification,
                 system=REVISER_SYSTEM_PROMPT,
@@ -97,6 +105,23 @@ def make_llm_reviser(provider: LLMProvider) -> SpecReviser:
         except (LLMError, ValidationError) as exc:
             logger.warning("LLM reviser failed, retrying the unchanged spec: %s", exc)
             return None
-        return plan.specification.model_dump()
+        corrected = plan.specification.model_dump()
+        self.last_exchange = {
+            "agent": "reviser",
+            "attempt": int(attempt),
+            "system": REVISER_SYSTEM_PROMPT,
+            "prompt": prompt,
+            "response": corrected,
+        }
+        return corrected
 
-    return reviser
+
+def make_llm_reviser(provider: LLMProvider) -> SpecReviser:
+    """Return an :class:`LlmReviser` bound to *provider*.
+
+    The returned object has the ``(specification, errors, attempt) -> dict |
+    None`` signature the CAD node expects. It returns ``None`` on any
+    :class:`~agents.llm.LLMError` or validation failure, so a broken reviser can
+    never kill the run.
+    """
+    return LlmReviser(provider)

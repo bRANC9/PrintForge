@@ -118,48 +118,91 @@
             </div>
         </template>
     </section>
-    <section class="vision-panel" x-show="visionReviewVisible" x-cloak>
-        <header class="annotation-head">
-            <h3>Vision önellenőrzés</h3>
-            <span class="badge"
-                  :class="visionReview && visionReview.matches ? 'is-ok' : ''"
-                  x-text="visionReviewLabel(visionReview)"></span>
-        </header>
-        <template x-if="hasPreviewImage">
-            <figure class="vision-figure">
-                <img class="vision-preview"
-                     :src="previewImageUrl"
-                     alt="A vision modell által látott előnézet">
-                <figcaption class="muted">Ezt az előnézeti képet látta a vision modell.</figcaption>
-            </figure>
-        </template>
-        <p class="muted"
-           x-show="visionReview && visionReview.skipped"
-           x-text="'A self-check kimaradt: ' + (visionReview.reason || 'nincs megadott ok')"></p>
-        <p class="muted"
-           x-show="visionReview && visionReview.summary"
-           x-text="visionReview.summary"></p>
-        <template x-if="visionIssues.length">
-            <ul class="vision-issues">
-                <template x-for="(issue, index) in visionIssues" :key="index">
-                    <li x-text="issue"></li>
-                </template>
-            </ul>
-        </template>
-        <details class="vision-input" x-show="visionSpecificationText" x-cloak>
-            <summary>Amit kapott: specifikáció</summary>
-            <pre class="vision-spec" x-text="visionSpecificationText"></pre>
-        </details>
-        <p class="warning-box"
-           x-show="visionTraceGuardOverride"
-           x-cloak>A determinisztikus alak-guard felülírta a modell „egyezik" válaszát.</p>
-        <details class="vision-input" x-show="visionTracePrompt" x-cloak>
-            <summary>A modell teljes promptja (input)</summary>
-            <pre class="vision-spec" x-text="visionTracePrompt"></pre>
-        </details>
-        <details class="vision-input" x-show="visionTraceResponse" x-cloak>
-            <summary>A modell nyers válasza (output)</summary>
-            <pre class="vision-spec" x-text="visionTraceResponse"></pre>
-        </details>
-    </section>
+    {% comment %}
+        Keyed on the selected version: Alpine rebuilds the whole block on every
+        version switch, so no stale review/trace content can survive a click.
+        Everything inside reads `v` (the selected version object) directly.
+    {% endcomment %}
+    <template x-for="v in [selectedVersion]" :key="v ? 'v' + v.id : 'none'">
+        <section class="vision-panel" x-show="v && visionReviewVisible" x-cloak>
+            <header class="annotation-head">
+                <h3>Vision önellenőrzés</h3>
+                <span class="badge"
+                      :class="visionReviewFor(v) && visionReviewFor(v).matches ? 'is-ok' : ''"
+                      x-text="visionReviewLabel(visionReviewFor(v))"></span>
+            </header>
+            <template x-if="v && v.preview_image && v.id">
+                <figure class="vision-figure">
+                    <img class="vision-preview"
+                         :src="'/api/v1/versions/' + v.id + '/artifact/preview/'"
+                         alt="A vision modell által látott előnézet">
+                    <figcaption class="muted">Ezt az előnézeti képet látta a vision modell.</figcaption>
+                </figure>
+            </template>
+            <p class="muted"
+               x-show="visionReviewFor(v) && visionReviewFor(v).skipped"
+               x-text="'A self-check kimaradt: ' + (visionReviewFor(v).reason || 'nincs megadott ok')"></p>
+            <p class="muted"
+               x-show="visionReviewFor(v) && visionReviewFor(v).summary"
+               x-text="visionReviewFor(v).summary"></p>
+            <template x-if="visionReviewFor(v) && !visionReviewFor(v).matches && visionReviewFor(v).issues && visionReviewFor(v).issues.length">
+                <ul class="vision-issues">
+                    <template x-for="(issue, index) in visionReviewFor(v).issues" :key="index">
+                        <li x-text="issue"></li>
+                    </template>
+                </ul>
+            </template>
+            <p class="warning-box"
+               x-show="visionTraceFor(v) && visionTraceFor(v).guard_override"
+               x-cloak>A determinisztikus alak-guard felülírta a modell „egyezik" válaszát.</p>
+            <details class="vision-input" x-show="v && v.specification_json" x-cloak>
+                <summary>Amit kapott: specifikáció</summary>
+                <pre class="vision-spec" x-text="prettyJson(v.specification_json)"></pre>
+            </details>
+            <details class="vision-input"
+                     x-show="visionTraceFor(v) && visionTraceFor(v).prompt"
+                     x-cloak>
+                <summary>Review input (prompt, amit a vision modell kapott)</summary>
+                <pre class="vision-spec"
+                     x-text="visionTraceFor(v) ? visionTraceFor(v).prompt : ''"></pre>
+            </details>
+            <details class="vision-input"
+                     x-show="visionTraceFor(v) && visionTraceFor(v).response"
+                     x-cloak>
+                <summary>Review output (nyers válasz)</summary>
+                <pre class="vision-spec"
+                     x-text="visionTraceFor(v) ? prettyJson(visionTraceFor(v).response) : ''"></pre>
+            </details>
+            <details class="vision-input"
+                     x-show="visionTraceFor(v) && visionTraceFor(v).text_response"
+                     x-cloak>
+                <summary>Szöveges második vélemény (fő modell)</summary>
+                <pre class="vision-spec"
+                     x-text="visionTraceFor(v) ? prettyJson(visionTraceFor(v).text_response) : ''"></pre>
+            </details>
+        </section>
+    </template>
+    {% comment %}
+        Main generator trace: every LLM exchange the run made (planner + each
+        reviser retry), so "what ran and what it was told" is inspectable.
+    {% endcomment %}
+    <template x-for="v in [selectedVersion]" :key="'t' + (v ? v.id : 'none')">
+        <section class="vision-panel" x-show="llmTraceFor(v).length" x-cloak>
+            <header class="annotation-head">
+                <h3>Generátor trace</h3>
+                <span class="badge" x-text="llmTraceFor(v).length + ' hívás'"></span>
+            </header>
+            <p class="muted">A fő LLM hívások, sorrendben: mit kaptak bemenetként és mit adtak vissza.</p>
+            <template x-for="(entry, index) in llmTraceFor(v)"
+                      :key="llmTraceLabel(entry) + '-' + index">
+                <details class="vision-input">
+                    <summary x-text="llmTraceLabel(entry)"></summary>
+                    <p class="muted field-hint">Bemenet (prompt):</p>
+                    <pre class="vision-spec" x-text="prettyJson(entry.prompt)"></pre>
+                    <p class="muted field-hint">Kimenet (válasz):</p>
+                    <pre class="vision-spec" x-text="prettyJson(entry.response)"></pre>
+                </details>
+            </template>
+        </section>
+    </template>
 </section>

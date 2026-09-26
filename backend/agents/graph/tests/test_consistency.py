@@ -5,6 +5,7 @@ from __future__ import annotations
 from agents.graph.consistency import (
     SMALL_ITEM_MAX_MM,
     consistency_issue,
+    consistency_issues,
 )
 
 #: A rectangle profile: the shape the weak model actually produced.
@@ -70,6 +71,40 @@ def test_a_real_tree_outline_passes_the_silhouette_rule():
     assert consistency_issue("karácsony fa formájú kinyomó", produced) is None
 
 
+def test_a_box_instead_of_an_extrude_is_flagged():
+    """The live finding: the model answered with a plain box for a tree press.
+
+    The silhouette/press rules must also fire when there is **no** extrude at
+    all -- a box or cylinder cannot express a shaped outline.
+    """
+    produced = spec(
+        [{"type": "box", "role": "add", "width": 50.0, "depth": 30.0, "height": 10.0}],
+        object="cookie_cutter",
+    )
+
+    issue = consistency_issue("karácsony fa formájú gyurma kinyomó", produced)
+
+    assert issue is not None
+    assert "extrude" in issue
+
+
+def test_every_finding_is_returned_so_one_retry_can_fix_them_all():
+    """A rectangle profile *and* a missing wall are both reported at once.
+
+    Returning only the first issue would burn one bounded attempt per problem.
+    """
+    produced = spec(
+        [{"type": "extrude", "role": "add", "height": 200.0, "profile": RECTANGLE}],
+        object="karácsonyfa",
+    )
+
+    issues = consistency_issues("karácsonyfa formájú süti kinyomó", produced)
+
+    assert len(issues) == 2
+    assert any("rectangle" in item for item in issues)
+    assert any("wall_thickness" in item for item in issues)
+
+
 def test_press_without_a_wall_is_flagged():
     produced = spec(
         [{"type": "extrude", "role": "add", "height": 25.0, "profile": TREE}],
@@ -82,7 +117,10 @@ def test_press_without_a_wall_is_flagged():
 
 
 def test_requested_hole_without_a_subtraction_is_flagged():
-    produced = spec([{"type": "box", "role": "add", "width": 40.0, "depth": 30.0, "height": 5.0}])
+    produced = spec(
+        [{"type": "box", "role": "add", "width": 40.0, "depth": 30.0, "height": 5.0}],
+        object="wall_bracket",
+    )
 
     issue = consistency_issue("40x30 mm lap 4 mm lyukkal", produced)
 
@@ -95,7 +133,8 @@ def test_a_subtraction_satisfies_the_hole_rule():
         [
             {"type": "box", "role": "add", "width": 40.0, "depth": 30.0, "height": 5.0},
             {"type": "cylinder", "role": "subtract", "diameter": 4.0, "height": 10.0},
-        ]
+        ],
+        object="wall_bracket",
     )
 
     assert consistency_issue("40x30 mm lap 4 mm lyukkal", produced) is None

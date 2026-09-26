@@ -68,3 +68,32 @@ def test_reviser_returns_none_on_invalid_specification():
     reviser = make_llm_reviser(provider)
 
     assert reviser(DEFAULT_SPEC, ["boom"], 1) is None
+
+
+def test_reviser_records_its_exchange_for_the_trace():
+    """The reviser keeps the prompt + answer so the UI can show the run."""
+    provider = RecordingProvider(enriched=ENRICHED_SPEC)
+    reviser = make_llm_reviser(provider)
+
+    result = reviser(DEFAULT_SPEC, ["wall thickness is not printable"], 2)
+
+    assert result == ENRICHED_SPEC
+    exchange = reviser.last_exchange
+    assert exchange["agent"] == "reviser"
+    assert exchange["attempt"] == 2
+    assert exchange["system"] == REVISER_SYSTEM_PROMPT
+    assert "wall thickness is not printable" in exchange["prompt"]
+    assert exchange["response"] == ENRICHED_SPEC
+
+
+def test_reviser_clears_the_exchange_on_failure():
+    """A failed call must not leave a stale exchange behind."""
+
+    class BrokenProvider(FakeProvider):
+        def structured(self, prompt: str, schema: Any, **kwargs: Any) -> dict[str, Any]:
+            raise LLMError("reviser offline")
+
+    reviser = make_llm_reviser(BrokenProvider())
+
+    assert reviser(DEFAULT_SPEC, ["boom"], 1) is None
+    assert reviser.last_exchange is None

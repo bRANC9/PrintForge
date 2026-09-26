@@ -100,6 +100,11 @@ class WorkflowState(TypedDict, total=False):
     #: the system/user prompt the reviewer received and its raw JSON response.
     #: JSON-safe strings/dicts only -- never the preview image bytes.
     vision_trace: dict[str, Any]
+    #: Ordered record of every LLM exchange the pipeline made
+    #: (``{"agent": "planner"|"reviser", "attempt": n, "system", "prompt",
+    #: "response"}``), so the UI can show what the main generator received and
+    #: answered (docs/vision-self-check.md 5.). JSON-safe, never bytes.
+    llm_trace: list[dict[str, Any]]
     #: Whether the rendered preview was actually judged by a vision model.
     #: ``False`` when there was no STL, no vision support, or the review failed.
     vision_used: bool

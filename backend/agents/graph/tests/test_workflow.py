@@ -84,6 +84,84 @@ def _deps(provider: FakeProvider, cad: FakeCADBackend, **kwargs: Any) -> Workflo
     return WorkflowDeps(provider=provider, cad_backend=cad, **kwargs)
 
 
+def test_planner_reasks_once_on_a_schema_invalid_answer():
+    """A 2-point extrude must not kill the run: the planner asks again.
+
+    This is the live finding: mistral-nemo:12b answered a tree-cutter request
+    with an ``extrude`` whose profile had 2 points, the schema rejected it and
+    the whole generation failed. Re-asking produces a valid plan.
+    """
+    broken = {
+        "specification": {
+            **ModelSpecification.example(),
+            "primitives": [{"type": "extrude", "role": "add", "height": 20.0, "profile": []}],
+        },
+        "needs_research": False,
+        "research_query": None,
+    }
+
+    class FlakyProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.answers = [broken, {"specification": DEFAULT_SPEC}]
+
+        def structured(self, prompt, schema, **kwargs):  # type: ignore[no-untyped-def]
+            if getattr(schema, "__name__", "") == "PlannerPlan":
+                self.calls.append("PlannerPlan")
+                return self.answers.pop(0)
+            return super().structured(prompt, schema, **kwargs)
+
+    provider = FlakyProvider()
+    state = run_workflow("make a phone holder", deps=_deps(provider, FakeCADBackend()))
+
+    assert state["status"] == "done"
+    assert provider.calls.count("PlannerPlan") == 2
+    assert state["specification"]["object"] == "phone_holder"
+
+
+def test_planner_gives_up_after_the_retry_budget():
+    """Still-invalid answers fail the run (bounded, not an infinite loop)."""
+    broken = {
+        "specification": {
+            **ModelSpecification.example(),
+            "primitives": [{"type": "extrude", "role": "add", "height": 20.0, "profile": []}],
+        },
+        "needs_research": False,
+        "research_query": None,
+    }
+
+    class AlwaysBrokenProvider(FakeProvider):
+        def structured(self, prompt, schema, **kwargs):  # type: ignore[no-untyped-def]
+            if getattr(schema, "__name__", "") == "PlannerPlan":
+                self.calls.append("PlannerPlan")
+                return broken
+            return super().structured(prompt, schema, **kwargs)
+
+    provider = AlwaysBrokenProvider()
+    state = run_workflow("make a phone holder", deps=_deps(provider, FakeCADBackend()))
+
+    assert state["status"] == "failed"
+    assert provider.calls.count("PlannerPlan") == 2  # the retry budget
+    assert "at least 3 profile points" in (state.get("error") or "")
+
+
+def test_planner_does_not_retry_an_llm_error():
+    """A timeout is not worth re-asking: it would just wait twice as long."""
+
+    class TimeoutProvider(FakeProvider):
+        def structured(self, prompt, schema, **kwargs):  # type: ignore[no-untyped-def]
+            if getattr(schema, "__name__", "") == "PlannerPlan":
+                self.calls.append("PlannerPlan")
+                raise LLMError("timed out")
+            return super().structured(prompt, schema, **kwargs)
+
+    provider = TimeoutProvider()
+    state = run_workflow("make a phone holder", deps=_deps(provider, FakeCADBackend()))
+
+    assert state["status"] == "failed"
+    assert provider.calls.count("PlannerPlan") == 1
+
+
 # ---------------------------------------------------------------------------
 # Happy path / node boundaries
 # ---------------------------------------------------------------------------

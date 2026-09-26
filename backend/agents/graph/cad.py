@@ -55,6 +55,7 @@ def make_cad_node(
 
         validation = state.get("validation") or {}
         validation_errors = [str(error) for error in validation.get("errors") or []]
+        llm_trace = list(state.get("llm_trace") or [])
         if reviser is not None and validation_errors:
             try:
                 revised = reviser(specification, validation_errors, attempt)
@@ -65,6 +66,12 @@ def make_cad_node(
                 revision_note = "reviser applied" if revised else "reviser skipped"
             if isinstance(revised, dict) and revised:
                 specification = revised
+            # The LLM reviser records its exchange (prompt + answer) so the UI
+            # can show the main generator's input/output too
+            # (docs/vision-self-check.md 5.).
+            exchange = getattr(reviser, "last_exchange", None)
+            if isinstance(exchange, dict):
+                llm_trace.append(exchange)
         else:
             revision_note = None
 
@@ -81,6 +88,7 @@ def make_cad_node(
                 message = f"{type(exc).__name__}: {exc}"
                 return {
                     "specification": specification,
+                    "llm_trace": llm_trace,
                     "validation": {
                         "status": "invalid",
                         "attempt": attempt,
@@ -109,6 +117,7 @@ def make_cad_node(
             entry = f"{entry}, {revision_note}"
         return {
             "specification": specification,
+            "llm_trace": llm_trace,
             "scad_source": scad_source,
             "attempt": attempt,
             "status": "generated",

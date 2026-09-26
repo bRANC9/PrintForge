@@ -78,6 +78,10 @@ PREVIEW_FILENAME = "preview.png"
 #: 5.). Long specifications are clipped so a single review trace cannot bloat the
 #: run/version JSON.
 _VISION_TRACE_PROMPT_CHARS = 4000
+#: Same clipping for the recorded planner/reviser prompts.
+_LLM_TRACE_PROMPT_CHARS = 4000
+#: How many LLM exchanges (planner + reviser attempts) are kept.
+_MAX_LLM_TRACE_ENTRIES = 6
 
 
 def build_dependencies() -> WorkflowDeps:
@@ -293,6 +297,32 @@ def _vision_trace_summary(trace: Any) -> dict[str, Any]:
     }
 
 
+def _llm_trace_summary(entries: Any) -> list[dict[str, Any]]:
+    """Reduce ``llm_trace`` to a bounded, JSON-safe list (no bytes).
+
+    The planner and the reviser each record their system/user prompt and answer
+    so the UI can show what the main generator received and returned
+    (docs/vision-self-check.md 5.). Only the last few exchanges are kept and
+    every prompt is clipped, so a long specification cannot bloat the run or
+    version JSON.
+    """
+    summary: list[dict[str, Any]] = []
+    for entry in list(entries or [])[-_MAX_LLM_TRACE_ENTRIES:]:
+        if not isinstance(entry, dict):
+            continue
+        response = entry.get("response")
+        summary.append(
+            {
+                "agent": str(entry.get("agent") or ""),
+                "attempt": int(entry.get("attempt") or 0),
+                "system": str(entry.get("system") or "")[:_LLM_TRACE_PROMPT_CHARS],
+                "prompt": str(entry.get("prompt") or "")[:_LLM_TRACE_PROMPT_CHARS],
+                "response": response if isinstance(response, dict) else {},
+            }
+        )
+    return summary
+
+
 def _clarification_summary(items: Any) -> list[dict[str, str]]:
     """Reduce blocking questions to ``{question, field}`` (no assumed answer)."""
     summary: list[dict[str, str]] = []
@@ -390,6 +420,7 @@ def _summarise_state(
         "vision_used": bool(state.get("vision_used", False)),
         "vision_review": _vision_review_summary(state.get("vision_review")),
         "vision_trace": _vision_trace_summary(state.get("vision_trace")),
+        "llm_trace": _llm_trace_summary(state.get("llm_trace")),
         "validation": dict(state.get("validation") or {}),
         "scad_chars": len(scad_source),
         "stl_bytes": len(stl_bytes),
@@ -483,6 +514,11 @@ def _persist_version(
     vision_trace = _vision_trace_summary(state.get("vision_trace"))
     if vision_trace:
         validation_json["vision_trace"] = vision_trace
+    # The main generator's input/output (planner + reviser exchanges) so the UI
+    # can show what the LLM was told and answered, not only the review.
+    llm_trace = _llm_trace_summary(state.get("llm_trace"))
+    if llm_trace:
+        validation_json["llm_trace"] = llm_trace
     # Planner assumptions (docs/planner-clarification.md 4.): a run that made
     # its own guesses is marked for review and carries them on the version.
     assumptions = _assumption_summary(state.get("assumptions"))

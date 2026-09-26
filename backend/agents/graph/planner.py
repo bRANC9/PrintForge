@@ -13,6 +13,7 @@ mesh only exists after the Validator exports it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +25,8 @@ from agents.spec import Clarification, ModelSpecification
 from .skills import template_object_kind, with_skills
 from .state import WorkflowState, append_history, failure_state
 from .vision import reference_images, reference_prompt_for, structured_with_reference_image
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CLARIFICATION_PROMPT",
@@ -240,37 +243,85 @@ def make_planner_node(
     *,
     provider: LLMProvider,
     max_attempts: int,
+    planner_retries: int = 2,
 ) -> Callable[[WorkflowState], dict[str, Any]]:
     """Build the ``planner`` graph node bound to *provider*.
 
     The returned callable is a LangGraph node: it takes the running state and
     returns a partial state update. All LLM access goes through the injected
     ``LLMProvider``, so tests pass a fake and no live model is required.
+
+    ``planner_retries`` bounds how often a **schema-invalid** answer is re-asked
+    before the run fails. Small local models regularly emit a slightly malformed
+    structure (e.g. an ``extrude`` whose profile has 2 points instead of 3);
+    re-asking usually yields a valid answer, which beats failing the whole
+    generation. ``LLMError`` (timeout / transport) is never retried here -- it
+    would only double the wait for the same timeout.
     """
 
     def planner_node(state: WorkflowState) -> dict[str, Any]:
         # The Planner only ever asks for structured data. It must not be able
         # to produce a mesh: there is no mesh concept here at all.
         prompt = reference_prompt_for(provider, state)
-        try:
-            # The optional reference image (terv.md 27.) is attached here; the
-            # helper falls back to a text-only call and never fails the run
-            # because of vision.
-            raw, image_used, image_warning = structured_with_reference_image(
-                provider,
-                prompt,
-                PlannerPlan,
-                system=with_skills(PLANNER_SYSTEM_PROMPT, state.get("skills")),
-                images=reference_images(state),
-            )
-            plan = coerce_plan(raw)
-        except (LLMError, ValidationError) as exc:
+        system_prompt = with_skills(PLANNER_SYSTEM_PROMPT, state.get("skills"))
+        attempts = max(int(planner_retries), 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                # The optional reference image (terv.md 27.) is attached here; the
+                # helper falls back to a text-only call and never fails the run
+                # because of vision.
+                raw, image_used, image_warning = structured_with_reference_image(
+                    provider,
+                    prompt,
+                    PlannerPlan,
+                    system=system_prompt,
+                    images=reference_images(state),
+                )
+                plan = coerce_plan(raw)
+                break
+            except ValidationError as exc:
+                if attempt >= attempts:
+                    return failure_state(
+                        state,
+                        stage="planner",
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    )
+                # Malformed structured output: ask again before giving up.
+                logger.warning(
+                    "planner returned an invalid plan (attempt %d/%d): %s",
+                    attempt,
+                    attempts,
+                    exc,
+                )
+            except LLMError as exc:
+                return failure_state(
+                    state,
+                    stage="planner",
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
+        else:  # pragma: no cover - the loop always breaks or returns
             return failure_state(
                 state,
                 stage="planner",
-                error_type=type(exc).__name__,
-                message=str(exc),
+                error_type="ValidationError",
+                message="planner returned no plan",
             )
+
+        # Record the exchange so the UI can show what the planner was told and
+        # what it answered (docs/vision-self-check.md 5.).
+        llm_trace = [
+            *(state.get("llm_trace") or []),
+            {
+                "agent": "planner",
+                "attempt": 0,
+                "system": system_prompt,
+                "prompt": prompt,
+                "response": plan.specification.model_dump() if isinstance(raw, dict) else {},
+                "image_used": bool(image_used),
+            },
+        ]
 
         # Blocking questions under the "ask" policy stop the run before a
         # specification is finalised: no CAD, no STL (docs/planner-clarification.md 2.).
@@ -283,7 +334,7 @@ def make_planner_node(
             stage="planner",
         )
         if clarification is not None:
-            return clarification
+            return {**clarification, "llm_trace": llm_trace}
 
         assumptions, _blocking = split_clarifications(plan)
         specification = plan.specification.model_dump()
@@ -311,6 +362,7 @@ def make_planner_node(
             "assumptions": assumptions,
             "reference_image_used": image_used,
             "reference_image_warning": image_warning,
+            "llm_trace": llm_trace,
             "attempt": 0,
             "max_attempts": int(max_attempts),
             "status": "planned",

@@ -295,10 +295,32 @@ def test_geometry_guard_ignores_specs_with_primitives():
     """A spec that describes real geometry is never flagged by the guard."""
     provider = FakeVisionProvider(reviews=[{"matches": True, "issues": [], "summary": "ok"}])
     node = make_review_node(provider, render_preview=lambda _stl: PREVIEW_PNG)
+    # A shaped part needs an 'extrude' with a real outline: the guard is happy
+    # once the specification actually describes that geometry.
     spec = {
         "object": "christmas_tree",
         "dimensions": {"width": 40.0, "height": 50.0, "thickness": 4.0},
-        "primitives": [{"type": "box", "role": "add", "width": 40.0, "depth": 50.0, "height": 4.0}],
+        "primitives": [
+            {
+                "type": "extrude",
+                "role": "add",
+                "height": 12.0,
+                "wall_thickness": 1.2,
+                "profile": [
+                    {"x": 20.0, "y": 50.0},
+                    {"x": 5.0, "y": 30.0},
+                    {"x": 12.0, "y": 30.0},
+                    {"x": 0.0, "y": 10.0},
+                    {"x": 10.0, "y": 10.0},
+                    {"x": 10.0, "y": 0.0},
+                    {"x": 30.0, "y": 0.0},
+                    {"x": 30.0, "y": 10.0},
+                    {"x": 40.0, "y": 10.0},
+                    {"x": 28.0, "y": 30.0},
+                    {"x": 35.0, "y": 30.0},
+                ],
+            }
+        ],
     }
 
     result = node(_state(prompt="make a christmas tree clay stamp", specification=spec))

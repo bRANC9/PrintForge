@@ -72,6 +72,25 @@ def _install(monkeypatch, tmp_path, deps: WorkflowDeps) -> LocalStorage:
     return storage
 
 
+def test_task_persists_the_llm_trace(monkeypatch, tmp_path):
+    """The main generator's input/output is stored for the UI (llm_trace)."""
+    project = ProjectFactory()
+    provider = FakeProvider()
+    _install(monkeypatch, tmp_path, _deps(provider=provider))
+
+    run_id = run_agent_workflow(project.pk, "make a phone holder", project.created_by_id)
+
+    run = AgentRun.objects.get(pk=run_id)
+    trace = run.state_json["llm_trace"]
+    assert trace
+    assert trace[0]["agent"] == "planner"
+    assert "phone holder" in trace[0]["prompt"]
+    assert trace[0]["response"]["object"] == "phone_holder"
+
+    version = project.versions.get()
+    assert version.validation_json["llm_trace"][0]["agent"] == "planner"
+
+
 def test_task_persists_run_version_and_artifacts(monkeypatch, tmp_path):
     project = ProjectFactory()
     provider = FakeProvider()
@@ -79,7 +98,6 @@ def test_task_persists_run_version_and_artifacts(monkeypatch, tmp_path):
     storage = _install(monkeypatch, tmp_path, _deps(provider=provider, cad=cad))
 
     run_id = run_agent_workflow(project.pk, "make a phone holder", project.created_by_id)
-
     run = AgentRun.objects.get(pk=run_id)
     assert run.status == AgentRunStatus.DONE
     assert run.error == ""

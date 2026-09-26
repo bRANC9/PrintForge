@@ -255,6 +255,10 @@ REST_FRAMEWORK = {
 
 CELERY_BROKER_URL = env("REDIS_URL", default="redis://redis:6379/0")
 CELERY_RESULT_BACKEND = env("REDIS_URL", default="redis://redis:6379/0")
+# Run the tasks inline in the request instead of handing them to a broker. Only
+# useful for local development / tests (no Redis, no worker process); the queue
+# stays the default everywhere else.
+CELERY_TASK_ALWAYS_EAGER = env.bool("CELERY_TASK_ALWAYS_EAGER", default=False)
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
