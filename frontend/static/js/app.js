@@ -50,6 +50,8 @@
         ollamaModelUse: () => `${API_BASE}/ollama/models/use/`,
         ollamaModelPull: () => `${API_BASE}/ollama/models/pull/`,
         ollamaPulls: () => `${API_BASE}/ollama/pulls/`,
+        ollamaPullAction: (pullId, action) =>
+            `${API_BASE}/ollama/pulls/${encodeURIComponent(pullId)}/${encodeURIComponent(action)}/`,
         ollamaPull: (pullId) => `${API_BASE}/ollama/pulls/${encodeURIComponent(pullId)}/`,
         // Model advisor: VRAM recommendation + remote catalogs.
         ollamaRecommendations: () => `${API_BASE}/ollama/recommendations/`,
@@ -80,8 +82,10 @@
     const OLLAMA_POLL_MS = 2000;
     const POLL_INTERVAL_MS = 2000;
     const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+    // A cancelled pull is terminal: it is neither running nor a failure, and
+    // the user can restart it from the list.
     const PULL_PENDING_STATUSES = ["PENDING", "RUNNING"];
-    const PULL_TERMINAL_STATUSES = ["DONE", "FAILED"];
+    const PULL_TERMINAL_STATUSES = ["DONE", "FAILED", "CANCELLED"];
 
     const PENDING_STATUSES = [
         "",
@@ -269,6 +273,11 @@
         pullOllamaModel: (name) =>
             request(endpoints.ollamaModelPull(), { method: "POST", body: { name } }),
         listOllamaPulls: async () => unwrapList(await request(endpoints.ollamaPulls())),
+        // Stuck pulls (a dead worker, a lost queue entry) need a way out.
+        cancelOllamaPull: (pullId) =>
+            request(endpoints.ollamaPullAction(pullId, "cancel"), { method: "POST", body: {} }),
+        retryOllamaPull: (pullId) =>
+            request(endpoints.ollamaPullAction(pullId, "retry"), { method: "POST", body: {} }),
         deleteOllamaModel: (name) => request(endpoints.ollamaModelDelete(name), { method: "DELETE" }),
         useOllamaModel: (name) =>
             request(endpoints.ollamaModelUse(), { method: "POST", body: { name } }),
@@ -328,6 +337,7 @@
         const state = String(status || "").toUpperCase();
         if (state === "DONE") return "is-ok";
         if (state === "FAILED") return "is-danger";
+        if (state === "CANCELLED") return "is-muted";
         if (state === "RUNNING") return "is-active";
         return "is-muted";
     }
@@ -1218,6 +1228,8 @@
             pullName: "",
             pulling: false,
             pullError: "",
+            // Id of the pull row a cancel/retry is currently working on.
+            pullBusy: 0,
             pulls: [],
             busyModel: "",
             confirmDelete: "",
@@ -1374,6 +1386,57 @@
                 this.pulls = this.pulls.filter((item) => item.id !== pull.id);
             },
 
+            /** A pull whose worker is gone: the UI offers retry / cancel for it. */
+            isStale(pull) {
+                return Boolean(pull && pull.stale);
+            },
+
+            /** Stop a stuck/in-progress download so the row stops being tracked. */
+            async cancelPull(pull) {
+                if (!pull || this.pullBusy) return;
+                this.pullBusy = pull.id;
+                this.pullError = "";
+                this.notice = "";
+                try {
+                    const updated = await api.cancelOllamaPull(pull.id);
+                    this.notice = `Letöltés megszakítva: ${pull.name}`;
+                    if (updated && updated.id) {
+                        this.pulls = this.pulls.map((item) =>
+                            item.id === updated.id ? { ...item, ...updated } : item,
+                        );
+                    }
+                    this.ensurePolling();
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.pullError = error.message || String(error);
+                } finally {
+                    this.pullBusy = 0;
+                }
+            },
+
+            /** Re-enqueue a failed, cancelled or stuck download. */
+            async retryPull(pull) {
+                if (!pull || this.pullBusy) return;
+                this.pullBusy = pull.id;
+                this.pullError = "";
+                this.notice = "";
+                try {
+                    const updated = await api.retryOllamaPull(pull.id);
+                    this.notice = `Letöltés újraindítva: ${pull.name}`;
+                    if (updated && updated.id) {
+                        this.pulls = this.pulls.map((item) =>
+                            item.id === updated.id ? { ...item, ...updated } : item,
+                        );
+                    }
+                    this.ensurePolling();
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.pullError = error.message || String(error);
+                } finally {
+                    this.pullBusy = 0;
+                }
+            },
+
             // ---------------------------------------------------------------
             // Actions
             // ---------------------------------------------------------------
@@ -1483,15 +1546,24 @@
             remoteError: "",
             query: "",
             quantChoice: {},
+            // Installed models, so a catalog row can offer "Törlés" next to
+            // "Letöltés" instead of a download that would be a no-op.
+            installed: [],
+            confirmDeleteName: "",
 
             pulling: "",
+            deleting: "",
             notice: "",
             forbidden: false,
 
             formatBytes,
 
             async init() {
-                await Promise.all([this.loadRecommendations(), this.loadRemote()]);
+                await Promise.all([
+                    this.loadRecommendations(),
+                    this.loadRemote(),
+                    this.loadInstalled(),
+                ]);
             },
 
             setVram(value) {
@@ -1531,6 +1603,66 @@
                 }
             },
 
+            /** Installed model names, so catalog rows can offer a delete action. */
+            async loadInstalled() {
+                try {
+                    const payload = (await api.listOllamaModels()) || {};
+                    const models = Array.isArray(payload.models) ? payload.models : [];
+                    this.installed = models.map((model) => model.name).filter(Boolean);
+                } catch (error) {
+                    // Suggestions are a nicety: a failure just hides the badge.
+                    this.installed = [];
+                }
+            },
+
+            /**
+             * The installed model a catalog row refers to, or "".
+             *
+             * A Hugging Face repo is installed under ``hf.co/<repo>:<quant>``
+             * and the chosen quant can differ from the one the row defaults to,
+             * so a prefix match on the repo counts as installed.
+             */
+            installedNameFor(model) {
+                if (!model || !model.name) return "";
+                const name = String(model.name);
+                if (model.source === "huggingface") {
+                    const repo = `hf.co/${name}`;
+                    return (
+                        this.installed.find(
+                            (installed) =>
+                                installed === repo || installed.startsWith(`${repo}:`),
+                        ) || ""
+                    );
+                }
+                return this.installed.includes(name) ? name : "";
+            },
+
+            isInstalled(model) {
+                return Boolean(this.installedNameFor(model));
+            },
+
+            async deleteRemoteModel(model) {
+                const target = this.installedNameFor(model);
+                if (!target || this.deleting) return;
+                this.deleting = target;
+                this.notice = "";
+                this.remoteError = "";
+                try {
+                    await api.deleteOllamaModel(target);
+                    this.confirmDeleteName = "";
+                    this.notice = `Modell törölve: ${target}`;
+                    await Promise.all([this.loadInstalled(), this.loadRecommendations()]);
+                    // A deleted model drops out of the "installed" marks; the
+                    // page-level list refreshes on the same event.
+                    this.$dispatch("ollama-model-deleted");
+                } catch (error) {
+                    if (error.status === 403) this.forbidden = true;
+                    this.remoteError = error.message || String(error);
+                } finally {
+                    this.deleting = "";
+                }
+            },
+
             async loadRemote() {
                 this.remoteLoading = true;
                 this.remoteError = "";
@@ -1552,13 +1684,23 @@
                 }
             },
 
-            /** Default each HF repo to a sensible quantization. */
+            /**
+             * Default each HF repo to a sensible quantization.
+             *
+             * The backend already dropped full-precision and 1-2 bit builds from
+             * `quants` and shipped a `pull_name`, so the seed simply prefers the
+             * backend's own choice and only falls back to a local preference.
+             */
             seedQuantChoices() {
                 const choices = {};
                 for (const model of this.remote) {
                     const quants = Array.isArray(model.quants) ? model.quants : [];
-                    let chosen = HF_QUANT_PREFERENCE.find((q) => quants.includes(q));
-                    if (!chosen) chosen = quants[0] || "";
+                    const fromPull = (model.pull_name || "").split(":").pop();
+                    let chosen =
+                        (fromPull && quants.includes(fromPull) ? fromPull : "") ||
+                        HF_QUANT_PREFERENCE.find((q) => quants.includes(q)) ||
+                        quants[0] ||
+                        "";
                     choices[model.name] = chosen;
                 }
                 this.quantChoice = choices;
@@ -1590,6 +1732,12 @@
                 } finally {
                     this.pulling = "";
                 }
+            },
+
+            /** Label for the quant dropdown: name plus the real download size. */
+            quantLabel(model, quant) {
+                const size = model && model.quant_sizes ? model.quant_sizes[quant] : "";
+                return size ? `${quant} · ${size}` : quant;
             },
         };
     }

@@ -116,6 +116,17 @@
                                 <span class="status-badge"
                                       :class="pullStatusClass(item.status)"
                                       x-text="item.status"></span>
+                                <span class="badge is-danger" x-show="isStale(item)">elakadt</span>
+                                <button type="button"
+                                        class="link-btn"
+                                        x-show="isPending(item)"
+                                        :disabled="pullBusy === item.id"
+                                        @click="cancelPull(item)">Megszakítás</button>
+                                <button type="button"
+                                        class="link-btn"
+                                        x-show="!isPending(item)"
+                                        :disabled="pullBusy === item.id"
+                                        @click="retryPull(item)">Újra</button>
                                 <button type="button"
                                         class="link-btn"
                                         x-show="!isPending(item)"
@@ -306,18 +317,44 @@
                                             x-show="model.quants && model.quants.length"
                                             x-model="quantChoice[model.name]">
                                         <template x-for="quant in model.quants" :key="quant">
-                                            <option :value="quant" x-text="quant"></option>
+                                            <option :value="quant" x-text="quantLabel(model, quant)"></option>
                                         </template>
                                     </select>
-                                    <span class="muted" x-show="!model.quants || !model.quants.length">—</span>
+                                    <span class="muted"
+                                          x-show="!model.quants || !model.quants.length">nincs letölthető kvant</span>
                                 </td>
                                 <td class="row-actions">
                                     <button type="button"
                                             class="btn btn-small"
+                                            x-show="!installedNameFor(model)"
                                             @click="pullModel(remotePullName(model))"
                                             :disabled="pulling === remotePullName(model)"
                                             x-text="pulling === remotePullName(model) ? 'Indítás…' : 'Letöltés'">
                                     </button>
+                                    <template x-if="installedNameFor(model)">
+                                        <span class="confirm-inline">
+                                            <span class="badge is-ok">telepítve</span>
+                                            <template x-if="confirmDeleteName !== installedNameFor(model)">
+                                                <button type="button"
+                                                        class="btn btn-small btn-danger"
+                                                        :disabled="deleting === installedNameFor(model)"
+                                                        @click="confirmDeleteName = installedNameFor(model)">Törlés</button>
+                                            </template>
+                                            <template x-if="confirmDeleteName === installedNameFor(model)">
+                                                <span>
+                                                    <button type="button"
+                                                            class="btn btn-small btn-danger"
+                                                            :disabled="deleting === installedNameFor(model)"
+                                                            @click="deleteRemoteModel(model)"
+                                                            x-text="deleting === installedNameFor(model) ? 'Törlés…' : 'Igen, töröld'">
+                                                    </button>
+                                                    <button type="button"
+                                                            class="btn btn-small"
+                                                            @click="confirmDeleteName = ''">Mégse</button>
+                                                </span>
+                                            </template>
+                                        </span>
+                                    </template>
                                 </td>
                             </tr>
                         </template>
