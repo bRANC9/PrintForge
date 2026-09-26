@@ -196,6 +196,13 @@ class OllamaProvider(LLMProvider):
         options = kwargs.pop("options", None)
         if options:
             payload["options"] = options
+        # Reasoning ("thinking") models spend minutes per call on a thinking
+        # phase whose tokens the grammar-constrained structured decoding cannot
+        # use: measured on this deployment, ``think: false`` made a planner call
+        # 3.4x-5.5x faster (qwen3:30b: 1500s timeout -> 313s) and turned two
+        # unusable models into usable ones. A caller can still opt back in by
+        # passing ``think=True``.
+        payload.setdefault("think", bool(kwargs.pop("think", False)))
         payload.update(kwargs)
 
         result = self._post("/api/chat", payload)

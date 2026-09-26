@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
@@ -43,11 +44,30 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("prompt")
     parser.add_argument("--model", default=os.environ.get("PROBE_MODEL", "mistral-nemo:12b"))
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.environ.get("PROBE_TIMEOUT", "120")),
+        help="Ollama request timeout in seconds (default 120).",
+    )
+    parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=int(os.environ.get("PROBE_NUM_CTX", "0")),
+        help="Request options.num_ctx; use it when the model's baked-in context "
+        "is too small for the prompt (0 = leave the model default).",
+    )
+    parser.add_argument(
+        "--no-think",
+        action="store_true",
+        help='Send "think": false, so a reasoning model skips its thinking phase '
+        "(it otherwise burns minutes per structured call).",
+    )
     parser.add_argument("--json", action="store_true", help="print the raw specification only")
     args = parser.parse_args()
 
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://192.168.1.250:11434")
-    provider = OllamaProvider(base_url=base_url, model=args.model)
+    provider = OllamaProvider(base_url=base_url, model=args.model, timeout=args.timeout)
 
     state = {
         "prompt": args.prompt,
@@ -56,6 +76,23 @@ def main() -> int:
         "max_attempts": 3,
         "history": [],
     }
+    # Optional request overrides: num_ctx for small-context models, think=false
+    # for reasoning models. The workflow calls `provider.structured(...)` without
+    # them, so they are injected here to keep the probe a faithful harness.
+    overrides: dict[str, Any] = {}
+    if args.num_ctx:
+        overrides["options"] = {"num_ctx": args.num_ctx}
+    if args.no_think:
+        overrides["think"] = False
+    if overrides:
+        original = provider.structured
+
+        def with_overrides(prompt, schema, **kwargs):  # type: ignore[no-untyped-def]
+            merged = dict(overrides)
+            merged.update(kwargs)
+            return original(prompt, schema, **merged)
+
+        provider.structured = with_overrides  # type: ignore[method-assign]
     node = make_planner_node(provider=provider, max_attempts=3)
     result = node(state)
 

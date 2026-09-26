@@ -265,14 +265,20 @@ def make_planner_node(
         prompt = reference_prompt_for(provider, state)
         system_prompt = with_skills(PLANNER_SYSTEM_PROMPT, state.get("skills"))
         attempts = max(int(planner_retries), 1)
+        repair_hint = ""
         for attempt in range(1, attempts + 1):
+            # The re-ask repeats the *question* plus the concrete complaint, so
+            # the model can actually repair itself. A blind repeat returns the
+            # same malformed structure: measured, granite4.2 / deepseek-r1 always
+            # emit an 'extrude' with an empty profile.
+            ask = f"{prompt}\n\n{repair_hint}" if repair_hint else prompt
             try:
                 # The optional reference image (terv.md 27.) is attached here; the
                 # helper falls back to a text-only call and never fails the run
                 # because of vision.
                 raw, image_used, image_warning = structured_with_reference_image(
                     provider,
-                    prompt,
+                    ask,
                     PlannerPlan,
                     system=system_prompt,
                     images=reference_images(state),
@@ -287,7 +293,11 @@ def make_planner_node(
                         error_type=type(exc).__name__,
                         message=str(exc),
                     )
-                # Malformed structured output: ask again before giving up.
+                # Malformed structured output: re-ask with the complaint.
+                repair_hint = (
+                    "Your previous answer was rejected by the schema. Fix exactly this "
+                    f"problem and return the complete object again:\n{exc}"
+                )
                 logger.warning(
                     "planner returned an invalid plan (attempt %d/%d): %s",
                     attempt,
