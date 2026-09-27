@@ -108,6 +108,12 @@
                     <span class="badge is-active" x-show="hasPendingPulls">folyamatban</span>
                 </h2>
                 <p class="muted" x-show="!pulls.length">Nincs letöltés.</p>
+                <p class="muted" x-show="!pulls.length && hiddenPullCount" x-cloak>
+                    <button type="button"
+                            class="link-btn"
+                            @click="showHiddenPulls()"
+                            x-text="hiddenPullCount + ' elrejtett letöltés megjelenítése'"></button>
+                </p>
                 <ul class="pull-list" x-show="pulls.length">
                     <template x-for="item in pulls" :key="item.id">
                         <li class="pull-item">

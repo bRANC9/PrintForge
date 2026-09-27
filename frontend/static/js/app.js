@@ -1230,6 +1230,8 @@
             pullError: "",
             // Id of the pull row a cancel/retry is currently working on.
             pullBusy: 0,
+            // Ids of the downloads hidden with "Elrejtés" (survive the poll).
+            hiddenPullIds: [],
             pulls: [],
             busyModel: "",
             confirmDelete: "",
@@ -1293,7 +1295,11 @@
              */
             async refreshPulls() {
                 try {
-                    this.pulls = await api.listOllamaPulls();
+                    const all = await api.listOllamaPulls();
+                    // A dismissed sor a 2 s-os poll-lal nem jön vissza: a
+                    // elrejtett id-kat kiszűrjük minden betöltéskor.
+                    const hidden = new Set(this.hiddenPullIds || []);
+                    this.pulls = all.filter((pull) => !hidden.has(pull.id));
                     return true;
                 } catch (error) {
                     if (error.status === 403) this.forbidden = true;
@@ -1382,8 +1388,26 @@
                 return parts.length ? parts.join(" · ") : "—";
             },
 
+            /**
+             * Hide one finished download. The id is remembered so the 2 s poll
+             * (which only runs while something is pending) does not resurrect it.
+             */
             dismiss(pull) {
+                if (!pull) return;
+                this.hiddenPullIds = [...new Set([...(this.hiddenPullIds || []), pull.id])];
                 this.pulls = this.pulls.filter((item) => item.id !== pull.id);
+                this.ensurePolling();
+            },
+
+            /** Show the downloads hidden with "Elrejtés" again. */
+            async showHiddenPulls() {
+                this.hiddenPullIds = [];
+                await this.refreshPulls();
+                this.ensurePolling();
+            },
+
+            get hiddenPullCount() {
+                return (this.hiddenPullIds || []).length;
             },
 
             /** A pull whose worker is gone: the UI offers retry / cancel for it. */
@@ -1423,6 +1447,10 @@
                 try {
                     const updated = await api.retryOllamaPull(pull.id);
                     this.notice = `Letöltés újraindítva: ${pull.name}`;
+                    // A restarted download must not stay behind "Elrejtés".
+                    this.hiddenPullIds = (this.hiddenPullIds || []).filter(
+                        (id) => id !== pull.id,
+                    );
                     if (updated && updated.id) {
                         this.pulls = this.pulls.map((item) =>
                             item.id === updated.id ? { ...item, ...updated } : item,
@@ -1451,8 +1479,7 @@
                     this.pullName = "";
                     if (created && created.id) {
                         this.pulls = [created].concat(this.pulls.filter((item) => item.id !== created.id));
-                    }
-                    this.notice = `Letöltés elindítva: ${name}`;
+                    }                    this.notice = `Letöltés elindítva: ${name}`;
                     await this.refreshPulls();
                     this.ensurePolling();
                 } catch (error) {
