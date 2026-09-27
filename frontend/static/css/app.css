@@ -2065,17 +2065,24 @@ ul.error-box {
 .auth-page {
     max-width: 24rem;
     margin-inline: auto;
-    padding-top: clamp(1rem, 6vh, 4rem);
 }
 
 .auth-page h1 {
     margin: 0 0 var(--sp-4);
 }
 
+/* The login form is capped and centred rather than stretched: on a 32" QHD
+   display an uncapped form is a narrow column stranded against the left
+   gutter. The cap sits on `.auth-form` itself, not only on a page wrapper, so
+   it holds whatever the template happens to wrap the form in. */
 .auth-form {
     display: flex;
     flex-direction: column;
     gap: var(--sp-3);
+    width: 100%;
+    max-width: 24rem;
+    margin-inline: auto;
+    padding-top: clamp(1rem, 6vh, 4rem);
 }
 
 /* ``form.as_p`` emits bare <input> elements (no ``.input`` class), so the
@@ -2249,6 +2256,28 @@ ul.error-box {
     .filter-panel .form-row {
         flex: 1 1 14rem;
         max-width: 22rem;
+    }
+}
+
+/* Ultrawide (3440x1440 and wider).
+   Not the 32" QHD target, but the track sizes above would put seven cards in a
+   row and a 3.4:1 canvas here, so one more step keeps the density sane. The
+   canvas is deliberately *not* capped in width: extra viewport around a model
+   is usable (OrbitControls pans), whereas a narrow column is not. */
+@media (min-width: 200rem) {
+    .project-grid,
+    .workspace-grid,
+    .skill-grid {
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 30rem), 1fr));
+    }
+
+    .printer-grid {
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr));
+    }
+
+    .meta-grid,
+    .settings-form {
+        max-width: 120rem;
     }
 }
 
