@@ -480,11 +480,21 @@ code {
 }
 
 .user {
+    display: inline-block;
     color: var(--muted);
     max-width: 12ch;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    /* A flex item cannot overflow; this is what actually clips the ellipsis. */
+    min-width: 0;
+}
+
+.user:hover,
+.user[aria-current="page"] {
+    color: var(--accent-2);
 }
 
 .nav-account form {
@@ -526,6 +536,9 @@ code {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
+    /* A touch lighter than `.panel`: cards are smaller and sit in a grid, so
+       the extra inset compounds across a whole row. */
+    padding: clamp(0.9rem, 0.85rem + 0.3vw, 1.25rem);
     background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
@@ -550,8 +563,9 @@ code {
 
 .card h2 {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 1.1rem;
     font-weight: 620;
+    letter-spacing: -0.01em;
 }
 
 .card footer {
@@ -589,7 +603,10 @@ code {
 .workspace-grid,
 .skill-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+    /* 24rem is the narrowest a card stays comfortable at: a title, a two-line
+       description and a badge row all need room to breathe. Below this the
+       text starts wrapping into a ribbon. */
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr));
     gap: var(--sp-4);
 }
 
@@ -986,6 +1003,14 @@ input[type="checkbox"] {
     flex-wrap: wrap;
 }
 
+/* Side-by-side numeric fields: the mesh upload rotation angles, where a 100%
+   wide input each would just wrap. */
+.form-row.is-inline .input {
+    width: auto;
+    max-width: 10rem;
+    flex: 0 1 auto;
+}
+
 .field-hint {
     margin: 0.15rem 0 0;
     color: var(--muted);
@@ -1008,6 +1033,19 @@ input[type="checkbox"] {
     gap: var(--sp-2);
     /* A form column stays readable even though the page is full width. */
     max-width: 42rem;
+}
+
+/* The mesh upload sits directly under the prompt form as a second form; the
+   rule keeps the two apart without an extra heading level. */
+.mesh-upload-form {
+    margin-top: var(--sp-3);
+    padding-top: var(--sp-3);
+    border-top: 1px solid var(--border);
+}
+
+.mesh-upload-form h3 {
+    margin: 0;
+    font-size: 0.95rem;
 }
 
 .stack-form label,
@@ -1941,6 +1979,34 @@ ul.error-box {
     font-size: 0.8rem;
 }
 
+/* Source-mesh preview (read-only). A second, smaller canvas under the model
+   canvas; the tint is deliberate so it never reads as the annotatable view. */
+.source-mesh-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-3);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+}
+
+.viewer-canvas-source {
+    height: clamp(12rem, 34vh, 22rem);
+    background: radial-gradient(circle at 50% 30%, #1a1f26 0%, #0b0e13 70%);
+}
+
+.source-mesh-foot {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.source-mesh-warnings {
+    margin: 0.4rem 0 0;
+    padding-left: 1.2rem;
+    font-size: 0.85rem;
+}
+
 /* Annotation / vision panels ---------------------------------------------- */
 
 .annotation-panel,
@@ -2200,6 +2266,167 @@ ul.error-box {
     font-size: 0.85rem;
 }
 
+/* Profile ----------------------------------------------------------------- */
+
+/* Two account forms side by side, then the two read-only panels across the
+   full row. An explicit two-up (not `auto-fit`) keeps each form panel from
+   stretching to a third of a 32" display. */
+.profile-layout {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--sp-4);
+    align-items: start;
+    max-width: 90rem;
+}
+
+.profile-stats,
+.profile-activity {
+    grid-column: 1 / -1;
+}
+
+.stat-groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+    gap: var(--sp-4);
+}
+
+.stat-group h3 {
+    margin: 0 0 var(--sp-2);
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 620;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 1fr));
+    gap: var(--sp-2);
+}
+
+.stat-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+    padding: 0.6rem 0.7rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.stat-value {
+    color: var(--text);
+    font-size: 1.3rem;
+    font-weight: 650;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.3;
+}
+
+.stat-tile.is-accent .stat-value {
+    color: var(--accent-2);
+}
+
+.stat-tile.is-ok .stat-value {
+    color: var(--ok);
+}
+
+.stat-tile.is-danger .stat-value {
+    color: var(--danger);
+}
+
+/* Activity: a grouped bar chart, pure CSS -- no chart library for six bars. */
+.activity {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(2.5rem, 1fr);
+    align-items: stretch;
+    gap: var(--sp-3);
+    height: 11rem;
+    margin-top: var(--sp-4);
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.activity-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    height: 100%;
+    min-width: 0;
+}
+
+.activity-bars {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 3px;
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+}
+
+.activity-bar {
+    flex: 1;
+    max-width: 1.1rem;
+    min-height: 2px;
+    border-radius: 3px 3px 0 0;
+    transition: height 200ms var(--ease);
+}
+
+.activity-bar.is-jobs {
+    background: var(--accent);
+}
+
+.activity-bar.is-downloads {
+    background: var(--ok);
+}
+
+.activity-label {
+    flex: none;
+    color: var(--muted);
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.activity-legend {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    flex-wrap: wrap;
+    margin: var(--sp-3) 0 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.activity-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.activity-key i {
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 3px;
+}
+
+.activity-key i.is-jobs {
+    background: var(--accent);
+}
+
+.activity-key i.is-downloads {
+    background: var(--ok);
+}
+
 /* 5. Responsive ------------------------------------------------------------
    One layer, at the bottom: every rule above is the wide-screen default and
    is progressively relaxed here. Breakpoints are the two that the layout
@@ -2418,6 +2645,20 @@ ul.error-box {
     .meta-grid,
     .settings-form {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .profile-layout {
+        grid-template-columns: minmax(0, 1fr);
+        max-width: none;
+    }
+
+    .stat-groups {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .activity {
+        height: 9rem;
+        gap: var(--sp-2);
     }
 
     [data-ollama-advisor] {

@@ -95,7 +95,9 @@
                                 </div>
                             </div>
                         </div>
-                        <span class="user">{{ user }}</span>
+                        <a class="user"
+                           href="{% url 'profile' %}"
+                           {% if request.resolver_match.url_name == 'profile' %}aria-current="page"{% endif %}>{{ user }}</a>
                         <form method="post" action="{% url 'logout' %}">
                             {% csrf_token %}
                             <button type="submit" class="link-btn">Kilépés</button>

@@ -5,6 +5,8 @@ from .views import (
     AgentRunViewSet,
     BuildPlateViewSet,
     CommunityProjectViewSet,
+    MePasswordView,
+    MeView,
     ModelVersionViewSet,
     NotificationViewSet,
     OllamaModelPullView,
@@ -41,6 +43,8 @@ router.register("notifications", NotificationViewSet, basename="notification")
 
 urlpatterns = [
     path("health/", health, name="api-health"),
+    path("me/", MeView.as_view(), name="api-me"),
+    path("me/password/", MePasswordView.as_view(), name="api-me-password"),
     path("settings/", SettingsAPIView.as_view(), name="api-settings"),
     path("settings/test-ollama/", TestOllamaView.as_view(), name="api-settings-test-ollama"),
     path("ollama/models/", OllamaModelsView.as_view(), name="api-ollama-models"),

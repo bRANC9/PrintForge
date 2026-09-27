@@ -22,7 +22,8 @@ from agents.spec import ModelSpecification
 from designs.models import ModelVersion
 from notifications.models import Notification
 from printers.models import Printer, PrintJob, PrintJobStatus
-from projects.models import Project
+from projects.models import ModelDownload, Project, ProjectPrint, ProjectShare, Rating
+from skills.models import Skill
 from slicers.models import FilamentProfile, PrinterProfile, ProcessProfile
 from workspaces.models import Workspace, WorkspaceMember, WorkspaceRole
 
@@ -175,3 +176,65 @@ class NotificationFactory(factory.django.DjangoModelFactory):
     message = factory.Sequence(lambda n: f"notification {n}")
     url = ""
     is_read = False
+
+
+# ---------------------------------------------------------------------------
+# Profile statistics: the rows `accounts.services.user_stats` aggregates over
+# ---------------------------------------------------------------------------
+
+
+class SkillFactory(factory.django.DjangoModelFactory):
+    """A workspace skill. ``created_by`` defaults to the workspace owner."""
+
+    class Meta:
+        model = Skill
+
+    name = factory.Sequence(lambda n: f"Skill {n}")
+    description = ""
+    created_by = factory.SelfAttribute("workspace.owner")
+    workspace = factory.SubFactory(WorkspaceFactory)
+
+
+class RatingFactory(factory.django.DjangoModelFactory):
+    """A 1-5 star rating of a project."""
+
+    class Meta:
+        model = Rating
+
+    project = factory.SubFactory(ProjectFactory)
+    user = factory.SubFactory(UserFactory)
+    score = 4
+
+
+class ProjectShareFactory(factory.django.DjangoModelFactory):
+    """A project shared with a user (token empty), which is the user-share form."""
+
+    class Meta:
+        model = ProjectShare
+
+    project = factory.SubFactory(ProjectFactory)
+    shared_with = factory.SubFactory(UserFactory)
+    created_by = factory.SelfAttribute("project.created_by")
+    token = ""
+
+
+class ModelDownloadFactory(factory.django.DjangoModelFactory):
+    """A logged download event (``user`` set, so no visitor dedup)."""
+
+    class Meta:
+        model = ModelDownload
+
+    project = factory.SubFactory(ProjectFactory)
+    user = factory.SelfAttribute("project.created_by")
+    visitor_id = ""
+
+
+class ProjectPrintFactory(factory.django.DjangoModelFactory):
+    """A "I printed this" mark on a project."""
+
+    class Meta:
+        model = ProjectPrint
+
+    project = factory.SubFactory(ProjectFactory)
+    user = factory.SelfAttribute("project.created_by")
+    visitor_id = ""

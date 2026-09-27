@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Profil – PrintForge{% endblock %}
+{% block content %}
+    <div data-profile-page x-data="profilePage">
+        <header class="page-head">
+            <div>
+                <h1>Profil</h1>
+                <p class="muted">Fiók adatai, jelszó és az összesített aktivitásod.</p>
+            </div>
+            <div class="page-head-actions">
+                <button type="button"
+                        class="btn"
+                        @click="load()"
+                        :disabled="loading"
+                        x-text="loading ? 'Betöltés…' : 'Frissítés'"></button>
+            </div>
+        </header>
+        <template x-if="error">
+            <p class="error-box" x-text="error"></p>
+        </template>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <p class="muted" x-show="loading">Betöltés…</p>
+        <template x-if="profile">
+            <div class="profile-layout">
+                <section class="panel">
+                    <h2>Fiók adatai</h2>
+                    <form class="stack-form" @submit.prevent="saveProfile()">
+                        <label for="profile-username">Felhasználónév</label>
+                        <input id="profile-username"
+                               class="input"
+                               type="text"
+                               :value="profile.username"
+                               disabled>
+                        <p class="muted field-hint">A felhasználónév a bejelentkezési azonosító, ezért itt nem módosítható.</p>
+                        <label for="profile-display-name">Megjelenített név</label>
+                        <input id="profile-display-name"
+                               class="input"
+                               type="text"
+                               maxlength="150"
+                               x-model="form.display_name"
+                               :disabled="savingProfile"
+                               placeholder="Pl. Műhely gazda">
+                        <label for="profile-email">E-mail</label>
+                        <input id="profile-email"
+                               class="input"
+                               type="email"
+                               x-model="form.email"
+                               :disabled="savingProfile">
+                        <div class="coord-row">
+                            <div>
+                                <label for="profile-first-name">Keresztnév</label>
+                                <input id="profile-first-name"
+                                       class="input"
+                                       type="text"
+                                       maxlength="150"
+                                       x-model="form.first_name"
+                                       :disabled="savingProfile">
+                            </div>
+                            <div>
+                                <label for="profile-last-name">Vezetéknév</label>
+                                <input id="profile-last-name"
+                                       class="input"
+                                       type="text"
+                                       maxlength="150"
+                                       x-model="form.last_name"
+                                       :disabled="savingProfile">
+                            </div>
+                        </div>
+                        <p class="field-hint">
+                            <span x-text="'Regisztrált: ' + formatDate(profile.date_joined)"></span>
+                            <span x-show="profile.last_login"
+                                  x-text="' · Utolsó belépés: ' + formatDate(profile.last_login)"></span>
+                        </p>
+                        <p class="field-hint" x-show="profile.is_staff">
+                            <span class="badge is-active">Adminisztrátor</span>
+                        </p>
+                        <div class="form-actions">
+                            <button type="submit"
+                                    class="btn btn-primary"
+                                    :disabled="savingProfile"
+                                    x-text="savingProfile ? 'Mentés…' : 'Profil mentése'"></button>
+                        </div>
+                    </form>
+                </section>
+                <section class="panel">
+                    <h2>Jelszó</h2>
+                    <form class="stack-form" @submit.prevent="savePassword()">
+                        <label for="password-old">Jelenlegi jelszó</label>
+                        <input id="password-old"
+                               class="input"
+                               type="password"
+                               autocomplete="current-password"
+                               required
+                               x-model="password.old_password"
+                               :disabled="savingPassword">
+                        <label for="password-new">Új jelszó</label>
+                        <input id="password-new"
+                               class="input"
+                               type="password"
+                               autocomplete="new-password"
+                               required
+                               x-model="password.new_password1"
+                               :disabled="savingPassword">
+                        <p class="muted field-hint">A jelszó legyen legalább 8 karakter, és ne legyen túl közvetlen.</p>
+                        <label for="password-new2">Új jelszó megerősítése</label>
+                        <input id="password-new2"
+                               class="input"
+                               type="password"
+                               autocomplete="new-password"
+                               required
+                               x-model="password.new_password2"
+                               :disabled="savingPassword">
+                        <div class="form-actions">
+                            <button type="submit"
+                                    class="btn btn-primary"
+                                    :disabled="savingPassword"
+                                    x-text="savingPassword ? 'Mentés…' : 'Jelszó módosítása'"></button>
+                        </div>
+                    </form>
+                </section>
+                <section class="panel profile-stats">
+                    <h2>Statisztika</h2>
+                    <div class="stat-groups">
+                        <template x-for="group in groups" :key="group.title">
+                            <div class="stat-group">
+                                <h3 x-text="group.title"></h3>
+                                <div class="stat-grid">
+                                    <template x-for="tile in group.tiles" :key="tile.key">
+                                        <div class="stat-tile" :class="tile.kind ? 'is-' + tile.kind : ''">
+                                            <span class="stat-value" x-text="tileValue(tile)"></span>
+                                            <span class="stat-label" x-text="tile.label"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </section>
+                <section class="panel profile-activity">
+                    <h2>Aktivitás</h2>
+                    <p class="muted">Az utolsó 6 hónap nyomtatási feladatai és modellletöltései.</p>
+                    <p class="muted" x-show="!activity.length">Még nincs aktivitás.</p>
+                    <div class="activity" x-show="activity.length" x-cloak>
+                        <template x-for="row in activity" :key="row.month">
+                            <div class="activity-col" :title="row.fullLabel">
+                                <div class="activity-bars">
+                                    <div class="activity-bar is-jobs"
+                                         :style="'height: ' + barHeight(row.print_jobs) + '%'"
+                                         :title="row.print_jobs + ' nyomtatási feladat'"></div>
+                                    <div class="activity-bar is-downloads"
+                                         :style="'height: ' + barHeight(row.downloads) + '%'"
+                                         :title="row.downloads + ' letöltés'"></div>
+                                </div>
+                                <span class="activity-label" x-text="row.label"></span>
+                            </div>
+                        </template>
+                    </div>
+                    <p class="activity-legend" x-show="activity.length" x-cloak>
+                        <span class="activity-key"><i class="is-jobs"></i>Nyomtatás</span>
+                        <span class="activity-key"><i class="is-downloads"></i>Letöltés</span>
+                    </p>
+                </section>
+            </div>
+        </template>
+    </div>
+{% endblock %}
+{% block extra_js %}
+    <script src="{% static 'js/profile.js' %}"></script>
+{% endblock %}
