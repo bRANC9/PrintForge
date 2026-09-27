@@ -15,9 +15,6 @@
     </head>
     <body>
         <a class="skip-link" href="#main">Ugrás a tartalomra</a>
-        {# The nav collapses into a disclosure panel below the 60rem breakpoint
-           in `app.css`; `open` is the only state it needs, so it is inlined
-           here rather than registered as an Alpine component. #}
         <header class="site-header"
                 x-data="{ open: false }"
                 @keydown.escape.window="open = false">
@@ -42,9 +39,6 @@
                     <span class="nav-toggle-bars" aria-hidden="true"></span>
                     <span class="visually-hidden">Menü</span>
                 </button>
-                {# The account cluster stays in the top bar at every width: the
-                   notification dropdown must never be collapsed away by the
-                   navigation disclosure. #}
                 <div class="nav-account">
                     {% if user.is_authenticated %}
                         <div class="notif" x-data="notificationsBell" @click.outside="close()">
