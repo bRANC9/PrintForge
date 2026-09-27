@@ -18,8 +18,8 @@ class ModelVersionOrigin(models.TextChoices):
 class ModelVersion(models.Model):
     """One immutable version of a project's generated model.
 
-    Files (scad/stl/glb/preview) are stored via the storage backend; the DB
-    only keeps the relative paths.
+    Files (scad/stl/glb/source mesh/preview) are stored via the storage backend;
+    the DB only keeps the relative paths.
     """
 
     project = models.ForeignKey(
@@ -54,6 +54,14 @@ class ModelVersion(models.Model):
     scad_file = models.FileField(upload_to=model_artifact_path, blank=True)
     stl_file = models.FileField(upload_to=model_artifact_path, blank=True)
     glb_file = models.FileField(upload_to=model_artifact_path, blank=True)
+    # Optional externally generated mesh (.stl/.obj/.glb) used by the mesh-import
+    # CAD backend instead of a parametric OpenSCAD CSG source. Empty for every
+    # version produced by the openscad pipeline.
+    source_mesh = models.FileField(
+        upload_to=model_artifact_path,
+        blank=True,
+        help_text="Optional source mesh (.stl/.obj/.glb) for the mesh-import CAD backend.",
+    )
     preview_image = models.ImageField(upload_to=model_artifact_path, blank=True)
     # Opcionális referencia fotó a prompt mellett (terv.md 27. fejezet).
     reference_image = models.ImageField(upload_to=model_artifact_path, blank=True)

@@ -11,6 +11,14 @@
     The read-only stored-annotation list uses `storedAnnotations` (the selected
     version's `annotations_json`) and the shared `annotationKindLabel` /
     `annotationPointLabel` helpers.
+
+    The optional source-mesh preview below the STL canvas needs `sourceMeshOpen`,
+    `sourceMeshAvailable`, `sourceMeshUrl`, `sourceMeshFormat`,
+    `sourceMeshFormatLabel`, `sourceMeshState`, `sourceMeshMessage`,
+    `sourceMeshWarnings` and `handleSourceMeshState` from the same component. It
+    is mounted with `readOnly: true`, so the annotatable model is the top canvas
+    only -- see the note in static/js/viewer.js `setReadOnly` for why a raw source
+    mesh must never accept an annotation.
 {% endcomment %}
 <section class="panel viewer-panel">
     <header class="viewer-toolbar">
@@ -29,6 +37,13 @@
                     @click="toggleAnnotationMode()"
                     :disabled="!selectedVersionId"
                     x-text="annotationMode ? 'Annotáció mód be' : 'Annotáció mód'"></button>
+            <button type="button"
+                    class="btn"
+                    x-show="sourceMeshAvailable"
+                    x-cloak
+                    :aria-pressed="sourceMeshOpen ? 'true' : 'false'"
+                    @click="toggleSourceMesh()"
+                    x-text="sourceMeshOpen ? 'Forrásháló bezárása' : 'Forrásháló megtekintése'"></button>
             <a class="btn"
                :href="stlUrl || '#'"
                :aria-disabled="stlUrl ? 'false' : 'true'"
@@ -52,6 +67,53 @@
     <p class="viewer-hint muted" x-show="annotationMode" x-cloak>
         Bal kattintás: felület kijelölése · Shift+kattintás: további polygon hozzáadása · Üres terület: kijelölés törlése
     </p>
+    {% comment %}
+        Read-only source-mesh preview. Rendered only while it is open, so the
+        second WebGL context exists exactly as long as it is on screen (Alpine
+        `x-if` removal runs the same directive cleanup that disposes the main
+        canvas). `readOnly: true` is the part that matters: a raw upload is in its
+        own units -- the backend applies `transform.scale_mm` when it converts it
+        to the millimetre STL -- so an annotation placed here would be in the
+        wrong coordinate space (docs/visual-editing.md 2./6.). The canvas
+        therefore refuses the annotation mode itself; the panel never offers it.
+    {% endcomment %}
+    <template x-if="sourceMeshAvailable && sourceMeshOpen">
+        <section class="source-mesh-panel"
+                 @viewer-state="handleSourceMeshState($event)">
+            <header class="annotation-head">
+                <h3>Forrásháló (feltöltött fájl)</h3>
+                <span class="badge" x-text="sourceMeshFormatLabel(sourceMeshFormat)"></span>
+                <span class="badge">Csak olvasható</span>
+            </header>
+            <p class="warning-box">
+                Ez a feltöltött fájl nyersen, saját egységeiben látszik. A backend a
+                méretarány (scale_mm) transzformációval milliméterbe skálázza, ezért
+                itt nincs annotálás és nincs kijelölés: az annotációk milliméterben, az
+                eredeti modell világkoordinátáiban értendők.
+            </p>
+            <div class="viewer-canvas viewer-canvas-source"
+                 x-stl-viewer="{ stlUrl: sourceMeshUrl, modelFormat: sourceMeshFormat, readOnly: true }">
+                <div class="viewer-overlay" x-show="sourceMeshState !== 'ready'" x-cloak>
+                    <span class="spinner"
+                          x-show="sourceMeshState === 'loading'"
+                          aria-hidden="true"></span>
+                    <span x-text="sourceMeshMessage || 'Nincs megjeleníthető forrásháló.'"></span>
+                </div>
+            </div>
+            <p class="viewer-hint muted">Bal gomb: forgatás · Görgő: zoom · Jobb gomb: eltolás</p>
+            <div class="source-mesh-foot">
+                <a class="btn btn-small" :href="sourceMeshUrl" download>Forrásháló letöltése</a>
+            </div>
+            <div class="warning-box" x-show="sourceMeshWarnings.length" x-cloak>
+                <strong>Ellenőrzési megjegyzések a feltöltött hálóról</strong>
+                <ul class="source-mesh-warnings">
+                    <template x-for="(warning, index) in sourceMeshWarnings" :key="index">
+                        <li x-text="warning"></li>
+                    </template>
+                </ul>
+            </div>
+        </section>
+    </template>
     <section class="annotation-panel"
              x-show="annotationMode || annotations.length"
              x-cloak>

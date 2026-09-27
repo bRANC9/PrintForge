@@ -49,7 +49,7 @@ The full design lives in [`terv.md`](./terv.md).
 | AI | Ollama (Qwen3-Coder 30B-A3B; fallback Qwen2.5-Coder 7B); optional OpenAI-compatible provider (`openai` SDK) |
 | Embedding | bge-m3 (fallback nomic-embed-text) |
 | Web search | optional self-hosted SearXNG (JSON) + `trafilatura` |
-| CAD | OpenSCAD CLI (CSG primitives incl. 2D `extrude`; later CadQuery, build123d, FreeCAD) |
+| CAD | OpenSCAD CLI (CSG primitives incl. 2D `extrude`), or mesh import (`.stl`/`.obj`/`.glb` → in-process `trimesh`); later CadQuery, build123d, FreeCAD |
 | Slicing | PrusaSlicer CLI (MVP), OrcaSlicer later |
 | Storage | local filesystem (default) or S3/MinIO via `django-storages` + `boto3` |
 | MCP | in-process, official `mcp` SDK (stdio / streamable HTTP) |
@@ -104,6 +104,16 @@ variables from `.env.example`.
   to one image). PrusaSlicer remains the default and the Orca image is only
   pulled when a job selects this backend. See
   [`docker/slicer-orca/README.md`](docker/slicer-orca/README.md).
+- **Mesh-import CAD backend (opt-in)** — a second CAD backend that imports an
+  externally generated mesh (`.stl`/`.obj`/`.glb`, e.g. from an image-to-3D
+  model) instead of rendering a parametric OpenSCAD CSG source. It needs
+  **no AI model and no sandbox image**: `trimesh` parses, repairs, decimates
+  and exports the mesh in-process in the Django worker. Enable it with
+  `MESH_BACKEND=mesh`; the default empty value keeps the OpenSCAD-only
+  pipeline. Over-budget meshes are decimated to `MESH_TARGET_FACES` (default
+  `50000`) — raise it to trade fidelity for smaller STLs (slicing, 3MF
+  embedding, browser preview), or set `MESH_DEFAULT_SCALE_MM` to change the
+  imported print size. See [`workers/cad/README.md`](workers/cad/README.md).
 
 ### TrueNAS SCALE 25.10 (Goldeye)
 

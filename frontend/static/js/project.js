@@ -3,6 +3,7 @@
 //   GET/PATCH /api/v1/projects/{id}/                       (metadata + license + tags)
 //   GET/POST  /api/v1/projects/{id}/versions/              (POST is multipart, #27)
 //   GET       /api/v1/versions/{id}/status/
+//   POST      /api/v1/projects/{id}/versions/from-mesh/      (multipart mesh upload)
 //   POST      /api/v1/projects/{id}/publish/ | /unpublish/
 //   POST      /api/v1/projects/{id}/download/
 //   POST      /api/v1/projects/{id}/rate/  (DELETE to clear)
@@ -16,7 +17,9 @@
 //
 // Reuses the vendored Three.js viewer through `x-stl-viewer` (app.js) with the
 // same `stlUrl` / `viewerToken` contract as the original component, plus the
-// `annotationMode` flag (docs/visual-editing.md 3.6).
+// `annotationMode` flag (docs/visual-editing.md 3.6), the optional explicit
+// `modelFormat` (the source-mesh download URL has no extension) and the
+// `readOnly` flag of the source-mesh preview.
 (function () {
     "use strict";
 
@@ -116,6 +119,27 @@
             dimensions: "",
             viewerToken: 0,
 
+            // Read-only preview of the uploaded source mesh of the selected
+            // version. Annotation is NOT available here: the raw mesh is in its
+            // own units, annotations are in millimetres (docs/visual-editing.md
+            // 2./6.). The viewer refuses it too (viewer.js `setReadOnly`).
+            sourceMeshOpen: false,
+            sourceMeshState: "empty",
+            sourceMeshMessage: "",
+
+            // Mesh upload (POST /projects/{id}/versions/from-mesh/).
+            meshFile: null,
+            meshForm: {
+                scaleMm: "",
+                rotateX: "",
+                rotateY: "",
+                rotateZ: "",
+                repair: false,
+                note: "",
+            },
+            uploadingMesh: false,
+            meshError: "",
+
             // Visual-prompt annotations (docs/visual-editing.md 3.6).
             annotations: [],
             annotationMode: false,
@@ -144,7 +168,10 @@
             },
 
             get busy() {
-                return this.creatingVersion || this.polling;
+                // A mesh upload is a render like any other: including it here
+                // keeps the prompt form, the version list and the annotation
+                // panel from starting a second one while it runs.
+                return this.creatingVersion || this.uploadingMesh || this.polling;
             },
 
             get hasManualMeta() {
@@ -256,6 +283,80 @@
                 return this.hasPreviewImage
                     ? PF.endpoints.artifact(this.selectedVersionId, "preview")
                     : "";
+            },
+
+            // -------------------------------------------------------------
+            // Source mesh (read-only preview)
+            // -------------------------------------------------------------
+
+            /**
+             * True when the selected version was built from an uploaded mesh and
+             * that mesh can be downloaded. A generated version has neither.
+             */
+            get sourceMeshAvailable() {
+                const version = this.selectedVersion;
+                return Boolean(
+                    version && version.source_mesh_available && version.source_mesh_url
+                );
+            },
+
+            get sourceMeshUrl() {
+                return this.sourceMeshAvailable ? this.selectedVersion.source_mesh_url : "";
+            },
+
+            /**
+             * Container format of the stored source mesh, exactly as the
+             * serializer reports it (`"stl" | "obj" | "glb" | ""`). Required:
+             * `source_mesh_url` is `/api/v1/versions/{id}/source-mesh/`, which
+             * carries no extension, so the viewer cannot guess the parser.
+             */
+            get sourceMeshFormat() {
+                const version = this.selectedVersion;
+                const format = version ? String(version.source_mesh_format || "") : "";
+                return format.toLowerCase();
+            },
+
+            sourceMeshFormatLabel(format) {
+                const value = String(format || "").toLowerCase();
+                if (value === "stl") return "STL";
+                if (value === "obj") return "OBJ";
+                if (value === "glb" || value === "gltf") return "GLB";
+                return "formátum nélkül";
+            },
+
+            /**
+             * Non-blocking meshcheck findings recorded at import (multiple
+             * bodies, extents outside the print envelope, thin edges). The
+             * blocking problems cannot appear here: a mesh that is not printable
+             * is refused with a 400 at upload time and never becomes a version.
+             */
+            get sourceMeshWarnings() {
+                const version = this.selectedVersion;
+                const warnings = version ? version.source_mesh_warnings : null;
+                if (!Array.isArray(warnings)) return [];
+                return warnings.filter((warning) => typeof warning === "string" && warning);
+            },
+
+            toggleSourceMesh() {
+                if (!this.sourceMeshAvailable) return;
+                this.sourceMeshOpen = !this.sourceMeshOpen;
+                // The canvas is created fresh each time it is opened, so the
+                // previous instance's state must not survive it.
+                if (this.sourceMeshOpen) {
+                    this.sourceMeshState = "empty";
+                    this.sourceMeshMessage = "";
+                }
+            },
+
+            /**
+             * `viewer-state` of the source-mesh canvas. The page's root listens
+             * on `.document`, so the same events also reach `handleViewerState`;
+             * that one ignores the read-only canvases, this one keeps them.
+             */
+            handleSourceMeshState(event) {
+                const detail = event.detail || {};
+                this.sourceMeshState = detail.state || "empty";
+                this.sourceMeshMessage = detail.message || "";
             },
 
             /** Parse a stored JSON payload (spec/response) for display. */
@@ -536,9 +637,22 @@
                 if (String(version.id) !== String(this.selectedVersionId)) {
                     // Annotations belong to a single base version.
                     this.clearAnnotations();
+                    this.closeSourceMeshIfAbsent(version);
                 }
                 this.selectedVersionId = version.id;
                 this.showStoredAnnotations(version);
+            },
+
+            /**
+             * The source-mesh preview is per version: switching to a version
+             * without an upload closes the panel instead of leaving the previous
+             * version's mesh on screen under the new version's name.
+             */
+            closeSourceMeshIfAbsent(version) {
+                if (version && version.source_mesh_available && version.source_mesh_url) return;
+                this.sourceMeshOpen = false;
+                this.sourceMeshState = "empty";
+                this.sourceMeshMessage = "";
             },
 
             /**
@@ -1020,6 +1134,125 @@
                 );
             },
 
+            // -------------------------------------------------------------
+            // Mesh import (POST /projects/{id}/versions/from-mesh/)
+            // -------------------------------------------------------------
+
+            onMeshChange(event) {
+                const input = event && event.target;
+                const file = input && input.files && input.files[0] ? input.files[0] : null;
+                this.meshFile = file || null;
+                this.meshError = "";
+            },
+
+            clearMesh() {
+                this.meshFile = null;
+                this.meshForm = {
+                    scaleMm: "",
+                    rotateX: "",
+                    rotateY: "",
+                    rotateZ: "",
+                    repair: false,
+                    note: "",
+                };
+                // The <input type="file"> keeps its own value, so it is reset
+                // here; otherwise picking the same file again fires no change
+                // event and the form looks empty while it is not.
+                const input = this.$refs && this.$refs.meshFile;
+                if (input) input.value = "";
+            },
+
+            /**
+             * The server's own rejection reason, never a generic "failed".
+             *
+             * `designs.services` answers a bad upload with a readable message:
+             * an unsupported suffix (naming `stl, obj, glb`), an empty file, a
+             * payload over `mesh_max_source_bytes`, or - the case that matters
+             * most - the blocking meshcheck problems of a mesh that is not
+             * printable. That text is the only place the user learns *why* their
+             * mesh was refused, so it is shown verbatim behind a Hungarian lead
+             * instead of being replaced.
+             */
+            meshErrorText(error) {
+                const detail = (error && error.message) || String(error);
+                if (error && ext.isPermissionError(error)) {
+                    return "Nincs jogosultságod a mesh feltöltéséhez.";
+                }
+                if (error && error.status === 400) {
+                    return `A mesh elutasítva: ${detail}`;
+                }
+                return `A mesh feltöltése sikertelen: ${detail}`;
+            },
+
+            /**
+             * Create the next version from the chosen mesh. Mirrors the
+             * non-agent branch of `submitVersion`: the endpoint answers with the
+             * new version (`status: "queued"`), the render is enqueued, so the
+             * version is polled and the viewer token bumped afterwards.
+             */
+            async submitMesh() {
+                if (this.uploadingMesh) return;
+                if (!this.meshFile) {
+                    // A zero-byte file is left to the server: only "nothing is
+                    // chosen" is rejected here.
+                    this.meshError = "Válassz ki egy mesh fájlt (STL, OBJ vagy GLB).";
+                    return;
+                }
+
+                this.uploadingMesh = true;
+                this.meshError = "";
+                this.error = "";
+                this.errors = [];
+                this.notice = "";
+                this.statusText = "Mesh feltöltése…";
+                try {
+                    const formData = new FormData();
+                    formData.append("file", this.meshFile);
+                    // Optional transform. Omitting a key is meaningful: the
+                    // backend then applies the mesh backend's own default (and
+                    // the `mesh_*` setting) instead of a value hardcoded here.
+                    const scale = Number.parseFloat(this.meshForm.scaleMm);
+                    if (Number.isFinite(scale)) formData.append("scale_mm", String(scale));
+                    // `rotate_deg` is a three-item list; a multipart QueryDict
+                    // carries a list as repeated keys, which is what DRF's
+                    // ListField reads. All three or none - a partial rotation
+                    // is not a request the API can express.
+                    const rotation = ["rotateX", "rotateY", "rotateZ"].map((key) =>
+                        Number.parseFloat(this.meshForm[key])
+                    );
+                    if (rotation.every((angle) => Number.isFinite(angle))) {
+                        rotation.forEach((angle) => formData.append("rotate_deg", String(angle)));
+                    }
+                    if (this.meshForm.repair) formData.append("repair", "true");
+                    const note = (this.meshForm.note || "").trim();
+                    if (note) formData.append("reference_note", note);
+
+                    const created = await ext.requestForm(
+                        ext.endpoints.versionFromMesh(this.projectId),
+                        formData
+                    );
+                    this.clearMesh();
+
+                    await this.loadVersions();
+                    const versionId = (created && created.id)
+                        || (this.versions.length ? this.versions[0].id : null);
+                    if (versionId) {
+                        this.selectedVersionId = versionId;
+                        await this.pollVersion(versionId);
+                        // The STL usually only exists once the worker is done.
+                        this.viewerToken += 1;
+                    }
+                    await this.loadVersions();
+                    if (versionId) {
+                        this.notice = "A meshből készült az új verzió.";
+                    }
+                } catch (error) {
+                    this.meshError = this.meshErrorText(error);
+                } finally {
+                    this.uploadingMesh = false;
+                }
+            },
+
             /** Highest agent-run id already recorded for this project. */
             async latestAgentRunId() {
                 try {
@@ -1308,9 +1541,18 @@
             // -------------------------------------------------------------
             // Visual-prompt annotations (docs/visual-editing.md 3.6)
             // -------------------------------------------------------------
+            /**
+             * The annotatable (rendered STL) viewer instance.
+             *
+             * The panel also hosts the read-only source-mesh canvas, so the
+             * selector must exclude it: `querySelector` returns the first match
+             * in document order and every canvas carries `x-stl-viewer`.
+             */
             viewerInstance() {
                 if (!window.PrintForgeViewer || !this.$el) return null;
-                const canvas = this.$el.querySelector("[x-stl-viewer], .viewer-canvas");
+                const canvas = this.$el.querySelector(
+                    ".viewer-canvas:not(.viewer-canvas-source)"
+                );
                 return canvas ? window.PrintForgeViewer.get(canvas) : null;
             },
 
@@ -1644,6 +1886,11 @@
 
             handleViewerState(event) {
                 const detail = event.detail || {};
+                // The listener sits on `document`, so the read-only source-mesh
+                // canvas reports through here too. It has its own state
+                // (`handleSourceMeshState`); letting it through would overwrite
+                // the main viewer's state and dimension readout.
+                if (detail.readOnly) return;
                 this.viewerState = detail.state || "empty";
                 this.viewerMessage = detail.message || "";
                 this.dimensions = detail.dimensions

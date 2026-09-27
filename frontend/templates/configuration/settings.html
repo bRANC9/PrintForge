@@ -191,6 +191,68 @@
                 </div>
             </section>
             <section class="panel">
+                <h2>CAD (mesh import)</h2>
+                <p class="muted field-hint">Külsőleg generált mesh (.stl/.obj/.glb) feldolgozása parametrikus CSG helyett. Üres backend mellett csak az OpenSCAD útvonal aktív.</p>
+                <div class="form-row">
+                    <label for="setting-mesh-backend">Mesh backend <span class="badge"
+       :class="'source-' + source('mesh_backend')"
+       x-text="source('mesh_backend')"></span></label>
+                    <select id="setting-mesh-backend"
+                            class="input"
+                            x-model="form.mesh_backend"
+                            :disabled="saving">
+                        <option value="">(nincs felülírás)</option>
+                        <option value="mesh">mesh</option>
+                    </select>
+                </div>
+                <div class="form-row is-inline">
+                    <label for="setting-mesh-repair">Mesh javítás engedélyezve <span class="badge"
+       :class="'source-' + source('mesh_repair_enabled')"
+       x-text="source('mesh_repair_enabled')"></span></label>
+                    <input id="setting-mesh-repair"
+                           type="checkbox"
+                           x-model="form.mesh_repair_enabled"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-mesh-target-faces">Cél felületek (faces) <span class="badge"
+       :class="'source-' + source('mesh_target_faces')"
+       x-text="source('mesh_target_faces')"></span></label>
+                    <input id="setting-mesh-target-faces"
+                           class="input"
+                           type="number"
+                           min="0"
+                           placeholder="50000"
+                           x-model.number="form.mesh_target_faces"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-mesh-scale">Alapméret (mm) <span class="badge"
+       :class="'source-' + source('mesh_default_scale_mm')"
+       x-text="source('mesh_default_scale_mm')"></span></label>
+                    <input id="setting-mesh-scale"
+                           class="input"
+                           type="number"
+                           step="0.1"
+                           min="0"
+                           placeholder="120.0"
+                           x-model.number="form.mesh_default_scale_mm"
+                           :disabled="saving">
+                </div>
+                <div class="form-row">
+                    <label for="setting-mesh-max-bytes">Max forrásméret (byte) <span class="badge"
+       :class="'source-' + source('mesh_max_source_bytes')"
+       x-text="source('mesh_max_source_bytes')"></span></label>
+                    <input id="setting-mesh-max-bytes"
+                           class="input"
+                           type="number"
+                           min="0"
+                           placeholder="67108864"
+                           x-model.number="form.mesh_max_source_bytes"
+                           :disabled="saving">
+                </div>
+            </section>
+            <section class="panel">
                 <h2>Slicing</h2>
                 <div class="form-row">
                     <label for="setting-slicer-mode">Mód <span class="badge"

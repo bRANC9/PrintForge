@@ -76,6 +76,10 @@
         // Visual-prompt model editing (docs/visual-editing.md 3.4/3.6).
         annotationEdit: (versionId) =>
             `${API_BASE}/versions/${encodeURIComponent(versionId)}/annotations/`,
+        // Mesh import: the next version is created from an uploaded
+        // .stl/.obj/.glb instead of a prompt (multipart, MEMBER+).
+        versionFromMesh: (projectId) =>
+            `${API_BASE}/projects/${encodeURIComponent(projectId)}/versions/from-mesh/`,
         // Build plates (#28).
         buildPlates: (params) => withQuery(`${API_BASE}/build-plates/`, params),
         buildPlate: (id) => `${API_BASE}/build-plates/${encodeURIComponent(id)}/`,

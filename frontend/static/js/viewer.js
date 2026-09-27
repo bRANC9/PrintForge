@@ -14,10 +14,26 @@
 // The module exposes `window.PrintForgeViewer` so the classic Alpine code in
 // app.js can drive it without a build step.
 //
+// Mesh formats: the loader is normally picked from the extension of the
+// artifact URL, so a version can be previewed from an externally imported mesh
+// (`.obj`, `.glb`) just as well as from the rendered STL. A caller that knows the
+// format can also pass it explicitly (`apply({modelFormat})` / `load(url, format)`),
+// which is what the source-mesh preview needs: its URL
+// (`/api/v1/versions/{id}/source-mesh/`) has no file extension, so the format
+// comes from the serializer's read-only `source_mesh_format` instead.
+// Everything downstream of `load` still works on one non-indexed
+// `BufferGeometry`; a scene graph is flattened into one (see
+// `flattenToGeometry`) so the centring/resting transform and the annotation face
+// indices behave identically for every format.
+//
+// Read-only mode (`apply({readOnly: true})`) is used by the source-mesh preview.
+// See the note on `setReadOnly` for why annotation must never be enabled there.
+//
 // Annotation mode (docs/visual-editing.md 3.6): the user clicks the model
 // surface to place a visual prompt. Clicks are ray-cast against the mesh and
-// the hit is mapped back to the original STL / OpenSCAD coordinate space
-// (`modelPoint = hit.point - viewerOffset`). Shift+click grows the active
+// the hit is mapped back to the original model coordinate space (STL, OpenSCAD
+// or imported mesh) via `modelPoint = hit.point - viewerOffset`.
+// Shift+click grows the active
 // annotation into a multi-triangle region; clicking empty space clears the
 // current selection. Every change is broadcast as a bubbling CustomEvent on
 // the container (`viewer-annotation-*`, `viewer-selection-changed`).
@@ -29,10 +45,23 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 const MODEL_COLOR = 0x4c8dff;
 const GRID_MAJOR = 0x3a4652;
 const GRID_MINOR = 0x232b33;
+
+// URL extension -> loader key. An unknown or missing extension stays on STL,
+// the only format the viewer understood before imported meshes were supported.
+const MODEL_FORMATS = { stl: "stl", obj: "obj", gltf: "gltf", glb: "gltf" };
+// The same table for a format the *caller* named instead of the URL. Kept
+// separate so the two lookups stay symmetric: the wire values are the file
+// extensions (`source_mesh_format` is exactly that), so they cannot drift.
+const EXPLICIT_MODEL_FORMATS = { stl: "stl", obj: "obj", gltf: "gltf", glb: "gltf" };
+const DEFAULT_MODEL_FORMAT = "stl";
+const FORMAT_LABELS = { stl: "STL", obj: "OBJ", gltf: "glTF/GLB" };
 
 const ANNOTATION_COLOR = 0xffb020;
 const ANNOTATION_ACTIVE_COLOR = 0x6fe3ff;
@@ -78,6 +107,106 @@ function disposeObject(root) {
         if (node.geometry) node.geometry.dispose();
         if (node.material) disposeMaterial(node.material);
     });
+}
+
+/** Lowercase file extension of a URL, ignoring any query string or fragment. */
+function urlExtension(url) {
+    const path = String(url || "").split("#")[0].split("?")[0];
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const dot = name.lastIndexOf(".");
+    return dot === -1 ? "" : name.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * Resolve the loader key for `url`, with `format` as an explicit override.
+ *
+ * Precedence, highest first:
+ *
+ *   1. the explicit `format` argument, normalised (lowercased, an optional
+ *      leading dot stripped) and looked up in `EXPLICIT_MODEL_FORMATS`;
+ *   2. the URL extension, looked up in `MODEL_FORMATS`;
+ *   3. `DEFAULT_MODEL_FORMAT` (STL).
+ *
+ * An explicit format that is not recognised is *ignored* rather than rejected:
+ * the value falls through to the extension guess (2, then 3), so a payload
+ * carrying a format this build does not know still renders exactly the way it
+ * always did instead of throwing. Omitting `format` leaves the resolution at
+ * (2)/(3) — the behaviour every existing caller has.
+ */
+function resolveModelFormat(url, format) {
+    const explicit = String(format || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^\./, "");
+    if (explicit && EXPLICIT_MODEL_FORMATS[explicit]) {
+        return EXPLICIT_MODEL_FORMATS[explicit];
+    }
+    return MODEL_FORMATS[urlExtension(url)] || DEFAULT_MODEL_FORMAT;
+}
+
+/**
+ * The scene graph a loader result carries, if any: glTF wraps one in a
+ * `{ scene, ... }` envelope, OBJ hands back the root `Object3D` itself, and
+ * STL hands back a bare geometry. Returns `null` for the geometry case.
+ */
+function loadedScene(result) {
+    if (!result) return null;
+    if (result.isObject3D) return result;
+    return result.scene || null;
+}
+
+/** Free a loader result: a scene graph, or a bare geometry. */
+function disposeLoadResult(result) {
+    if (!result) return;
+    const scene = loadedScene(result);
+    if (scene) {
+        disposeObject(scene);
+        return;
+    }
+    result.dispose();
+}
+
+/**
+ * Collapse a loaded scene graph into the single non-indexed `BufferGeometry`
+ * the rest of the viewer assumes. Every mesh is baked into world space and
+ * trimmed to position + normal, so the merged result is interchangeable with
+ * the triangle soup `STLLoader` returns: a face still occupies the vertices at
+ * `3 * faceIndex`, which is exactly what the annotation code indexes. Materials
+ * and textures are dropped on purpose -- a print preview is a flat silhouette,
+ * `setGeometry` supplies its own material, and honouring embedded PBR maps would
+ * misrepresent what actually gets printed.
+ *
+ * Throws when the graph carries no printable mesh or the parts cannot be merged;
+ * the caller turns that into the ordinary "setup failed" error state.
+ */
+function flattenToGeometry(root) {
+    root.updateMatrixWorld(true);
+    const parts = [];
+    root.traverse((node) => {
+        // `isMesh` skips the Points/Line nodes an OBJ or glTF may carry too.
+        if (!node.isMesh || !node.geometry || !node.geometry.attributes.position) return;
+        // A fresh copy per node: the world matrix is baked in below, and one
+        // geometry can be shared by several nodes.
+        const part = node.geometry.index
+            ? node.geometry.toNonIndexed()
+            : node.geometry.clone();
+        part.applyMatrix4(node.matrixWorld);
+        if (!part.attributes.normal) part.computeVertexNormals();
+        Object.keys(part.attributes).forEach((name) => {
+            if (name !== "position" && name !== "normal") part.deleteAttribute(name);
+        });
+        Object.keys(part.morphAttributes).forEach((name) => {
+            delete part.morphAttributes[name];
+        });
+        parts.push(part);
+    });
+    if (!parts.length) throw new Error("a betöltött fájl nem tartalmaz hálót");
+    const merged = parts.length === 1 ? parts[0] : mergeGeometries(parts, false);
+    parts.forEach((part) => {
+        if (part !== merged) part.dispose();
+    });
+    if (!merged) throw new Error("a háló összefűzése nem sikerült");
+    return merged;
 }
 
 function round(value) {
@@ -147,6 +276,7 @@ class StlViewer {
     constructor(container) {
         this.container = container;
         this.currentUrl = null;
+        this.currentFormat = null;
         this.token = 0;
         this.requestToken = 0;
         this.mesh = null;
@@ -156,6 +286,10 @@ class StlViewer {
         // inverse maps a raycast hit back to original STL/OpenSCAD coordinates.
         this.viewerOffset = new THREE.Vector3();
         this.annotationScale = 1;
+
+        // Read-only canvases (the source-mesh preview) never accept an
+        // annotation; see `setReadOnly`.
+        this.readOnly = false;
 
         // Annotation state (docs/visual-editing.md 3.6).
         this.annotationMode = false;
@@ -215,7 +349,13 @@ class StlViewer {
         this.annotationGroup = new THREE.Group();
         this.scene.add(this.annotationGroup);
 
-        this.loader = new STLLoader();
+        // One loader per supported mesh format; `load` picks by the explicit
+        // format when the caller gives one, else by the URL extension.
+        this.loaders = {
+            stl: new STLLoader(),
+            obj: new OBJLoader(),
+            gltf: new GLTFLoader(),
+        };
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(container);
 
@@ -247,48 +387,78 @@ class StlViewer {
 
     apply(config) {
         const settings = config || {};
+        // `stlUrl` is the frozen config key of the `x-stl-viewer` directive; the
+        // URL it carries may now point at an OBJ or GLB artifact as well.
         const stlUrl = settings.stlUrl || "";
         const token = settings.token === undefined || settings.token === null ? 0 : settings.token;
+        // Optional explicit format (e.g. `source_mesh_format`). Omitted for the
+        // STL artifact, whose extension-less URL already resolves to STL.
+        const format = settings.modelFormat || "";
+        const resolved = resolveModelFormat(stlUrl, format);
 
-        if (settings.annotationMode !== undefined) {
-            this.setAnnotationMode(settings.annotationMode);
-        }
+        // `readOnly` before `annotationMode`: turning read-only on switches the
+        // annotation mode off, so a stale `annotationMode: true` in the config
+        // cannot re-enable it.
+        if (settings.readOnly !== undefined) this.setReadOnly(settings.readOnly);
+        if (settings.annotationMode !== undefined) this.setAnnotationMode(settings.annotationMode);
 
         if (!stlUrl) {
             this.requestToken += 1;
             this.currentUrl = null;
+            this.currentFormat = null;
             this.token = token;
             this.clearStoredAnnotations();
             this.clearModel();
-            emit(this.container, "empty", "Nincs STL ehhez a verzióhoz.");
+            this.emitState("empty", "Nincs modell ehhez a verzióhoz.");
             return;
         }
-        if (stlUrl === this.currentUrl && token === this.token) return;
+        // The resolved format is part of the identity of the loaded model: the
+        // source mesh is a different URL from the STL, but a caller that
+        // re-uses one URL across formats must still get a reload.
+        if (stlUrl === this.currentUrl && token === this.token && resolved === this.currentFormat) {
+            return;
+        }
         // A new version invalidates the previous version's stored markers; the
         // page re-applies them through `setStoredAnnotations` on selection.
         this.clearStoredAnnotations();
         this.token = token;
-        this.load(stlUrl);
+        this.load(stlUrl, format);
     }
 
-    load(url) {
+    /** `emit` with this instance's read-only flag attached to the detail. */
+    emitState(state, message, extra) {
+        emit(this.container, state, message, Object.assign({ readOnly: this.readOnly }, extra));
+    }
+
+    /**
+     * Load `url`. `format` is optional and, when given, wins over the URL
+     * extension (see `resolveModelFormat`); an unrecognised value is ignored.
+     */
+    load(url, format) {
         const token = ++this.requestToken;
+        const resolved = resolveModelFormat(url, format);
         this.currentUrl = url;
-        emit(this.container, "loading", "STL betöltése…");
-        this.loader.load(
+        this.currentFormat = resolved;
+        this.emitState("loading", FORMAT_LABELS[resolved] + " betöltése…");
+        this.loaderFor(resolved).load(
             url,
-            (geometry) => {
+            (result) => {
                 if (token !== this.requestToken) {
-                    geometry.dispose();
+                    disposeLoadResult(result);
                     return;
                 }
+                let geometry = null;
                 try {
+                    geometry = this.geometryFromLoad(result);
                     this.setGeometry(geometry);
-                    emit(this.container, "ready", "", { dimensions: this.dimensions });
+                    this.emitState("ready", "", { dimensions: this.dimensions });
                 } catch (error) {
-                    geometry.dispose();
+                    // A failed flatten already released the source graph, so only
+                    // what it handed over is disposed here.
+                    if (geometry) geometry.dispose();
                     this.currentUrl = null;
-                    emit(this.container, "error", "A modell feldolgozása sikertelen.");
+                    this.currentFormat = null;
+                    this.emitState("error", "A modell feldolgozása sikertelen.");
                     console.error("PrintForge viewer: geometry setup failed", error);
                 }
             },
@@ -296,11 +466,32 @@ class StlViewer {
             (error) => {
                 if (token !== this.requestToken) return;
                 this.currentUrl = null;
+                this.currentFormat = null;
                 this.clearModel();
-                emit(this.container, "error", "Az STL nem tölthető be (hiányzó fájl vagy jogosultság).");
-                console.error("PrintForge viewer: STL load failed", error);
+                this.emitState("error", "A modell nem tölthető be (hiányzó fájl vagy jogosultság).");
+                console.error("PrintForge viewer: " + resolved + " load failed", error);
             }
         );
+    }
+
+    loaderFor(format) {
+        return this.loaders[format] || this.loaders[DEFAULT_MODEL_FORMAT];
+    }
+
+    /**
+     * Reduce a loader result to the geometry `setGeometry` expects. Only STL
+     * already hands one over; an OBJ group and a glTF scene are both flattened
+     * into a single geometry and then released, which the merged result is
+     * independent of.
+     */
+    geometryFromLoad(result) {
+        const scene = loadedScene(result);
+        if (!scene) return result;
+        try {
+            return flattenToGeometry(scene);
+        } finally {
+            disposeObject(scene);
+        }
     }
 
     setGeometry(geometry) {
@@ -384,11 +575,49 @@ class StlViewer {
     }
 
     // ------------------------------------------------------------------
+    // Read-only mode (source-mesh preview)
+    // ------------------------------------------------------------------
+
+    /**
+     * Put the viewer in (or out of) read-only mode.
+     *
+     * DO NOT re-enable annotation for the source-mesh preview. It is shown to
+     * confirm what the user uploaded, and `designs/cad/mesh.py` applies
+     * `transform.scale_mm` while converting the upload into the millimetre-based
+     * STL -- so a *raw* source mesh is in its own units, while an annotation is
+     * specified in millimetres in the original model space
+     * (docs/visual-editing.md 2./6.). A click on the source mesh would therefore
+     * report a coordinate in the wrong space, and the editor agent would act on
+     * it as if it were millimetres. Enabling annotation here is a correctness
+     * bug, not a missing feature.
+     *
+     * Enforced in the viewer rather than only in the page, so a mistake in the
+     * Alpine layer cannot produce an annotation either: entering the mode is
+     * refused, any live selection is dropped, and the pointer handlers below
+     * refuse clicks while read-only. Stored annotations are refused for the same
+     * reason (they are millimetre coordinates of the STL, not of this mesh).
+     */
+    setReadOnly(enabled) {
+        const next = Boolean(enabled);
+        if (this.readOnly === next) return;
+        this.readOnly = next;
+        if (!next) return;
+        this.setAnnotationMode(false);
+        this.clearAnnotations();
+        this.clearStoredAnnotations();
+        if (this.renderer && this.renderer.domElement) {
+            this.renderer.domElement.style.cursor = "";
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Annotation mode
     // ------------------------------------------------------------------
 
     setAnnotationMode(enabled) {
         const next = Boolean(enabled);
+        // A read-only model is never annotatable (see `setReadOnly`).
+        if (this.readOnly && next) return;
         if (this.annotationMode === next) return;
         this.annotationMode = next;
         if (next) {
@@ -461,7 +690,9 @@ class StlViewer {
     }
 
     handlePointerDown(event) {
-        if (!this.annotationMode || event.button !== 0) return;
+        // `readOnly` is checked alongside the mode: a read-only canvas must not
+        // even arm a placement click, whatever the page asked for.
+        if (this.readOnly || !this.annotationMode || event.button !== 0) return;
         this.pointerDown = {
             x: event.clientX,
             y: event.clientY,
@@ -474,7 +705,7 @@ class StlViewer {
     }
 
     handlePointerUp(event) {
-        if (!this.annotationMode || event.button !== 0) return;
+        if (this.readOnly || !this.annotationMode || event.button !== 0) return;
         const down = this.pointerDown;
         this.pointerDown = null;
         if (!down) return;
@@ -498,6 +729,7 @@ class StlViewer {
     }
 
     handleAnnotationClick(event, shiftKey) {
+        if (this.readOnly) return;
         const hit = this.raycast(event);
         if (!hit) {
             this.clearSelection();
@@ -677,9 +909,14 @@ class StlViewer {
      * `STORED_ANNOTATION_COLOR`, with no raycast/editing and no events. The
      * markers persist while orbiting because they are static scene objects.
      * Repeated calls replace the previous stored set.
+     *
+     * Refused on a read-only canvas: stored annotations are millimetre
+     * coordinates of the *rendered* model, which a raw source mesh (shown in
+     * its own units) would misplace. See `setReadOnly`.
      */
     setStoredAnnotations(annotations) {
         this.clearStoredAnnotations();
+        if (this.readOnly) return 0;
         const list = Array.isArray(annotations) ? annotations : [];
         this.storedAnnotations = list.map((raw, index) => normalizeStoredAnnotation(raw, index));
         this.storedAnnotations.forEach((annotation) => this.addStoredAnnotationVisual(annotation));
@@ -859,8 +1096,9 @@ const viewerApi = {
     },
 
     mount(container, config) {
+        const readOnly = Boolean(config && config.readOnly);
         if (!viewerApi.supported()) {
-            emit(container, "error", "A böngésző nem támogatja a WebGL-t.");
+            emit(container, "error", "A böngésző nem támogatja a WebGL-t.", { readOnly });
             return null;
         }
 
@@ -870,7 +1108,12 @@ const viewerApi = {
                 viewer = new StlViewer(container);
             } catch (error) {
                 console.error("PrintForge viewer: init failed", error);
-                emit(container, "error", "A 3D nézet nem indítható el ebben a böngészőben.");
+                // `readOnly` is echoed even here: the page distinguishes the two
+                // canvases by it, and a source-mesh preview that failed to mount
+                // must not overwrite the main viewer's state.
+                emit(container, "error", "A 3D nézet nem indítható el ebben a böngészőben.", {
+                    readOnly,
+                });
                 return null;
             }
             instances.set(container, viewer);

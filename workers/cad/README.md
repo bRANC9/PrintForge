@@ -1,8 +1,15 @@
 # CAD worker
 
-The CAD worker transforms a `designs.ModelVersion` specification into an STL
-using OpenSCAD. It runs **out of process**, behind Celery/Redis, so a long or
-hostile model can never block the web worker (terv.md 9., 20. fejezet).
+The CAD worker transforms a `designs.ModelVersion` specification into an STL.
+It runs **out of process**, behind Celery/Redis, so a long or hostile model can
+never block the web worker (terv.md 9., 20. fejezet).
+
+Two backends are selectable at runtime through `MESH_BACKEND`:
+
+| `MESH_BACKEND` | Backend | Artifacts |
+| --- | --- | --- |
+| `""` (default) | `OpenSCADBackend` — parametric OpenSCAD CLI | `model.scad` + `model.stl` |
+| `"mesh"` | `MeshCADBackend` — adopts `ModelVersion.source_mesh` | `model.stl` only |
 
 ## Contract
 
@@ -22,6 +29,10 @@ hostile model can never block the web worker (terv.md 9., 20. fejezet).
 `version_id: int` — the primary key of a `designs.ModelVersion`. The worker
 reads `specification_json`; it does **not** import `agents.spec` (the CAD
 package stays decoupled from `llm-provider`).
+
+The mesh backend additionally reads the source mesh named by
+`specification_json["mesh"]["source"]` (a relative storage path, normally
+`ModelVersion.source_mesh`) — see `backend/designs/cad/mesh.py`.
 
 ### Status (polled by the API)
 
@@ -53,6 +64,10 @@ queued  ->  running  ->  done
 * On success `scad_file` / `stl_file` are also written and `stage=done`.
 * On any failure the error is persisted first, then the exception is re-raised
   so Celery records the failure and can retry.
+
+A mesh render produces no source code, so `scad_file` is **absent** from
+`validation_json` (and `ModelVersion.scad_file` stays empty); `stl_file` and
+`stl_bytes` are written exactly as above. No key is ever renamed or removed.
 
 The API exposes this by returning `version.validation_json` for the version.
 
@@ -90,3 +105,23 @@ locked-down container (`OPENSCAD_MODE=docker`, production) with:
 plus a hard `OPENSCAD_TIMEOUT_SEC` timeout. `import()` / `surface()` / `include`
 / `use` are rejected before execution; `subprocess` is always called with a list
 of arguments and `shell=False`. See `docker/openscad/README.md`.
+
+## Mesh backend
+
+`MeshCADBackend` does **not** shell out, so none of the sandbox flags apply: it
+reads the source mesh bytes from storage, parses them with `trimesh` and writes
+the transformed mesh back. It is bounded by:
+
+* `MESH_MAX_SOURCE_BYTES` — the source mesh above this size is rejected
+  (`MeshCheckError`) before parsing.
+* `MESH_REPAIR_ENABLED`, `MESH_TARGET_FACES` — repair is best effort: a step
+  whose optional trimesh extra is missing is logged in the manifest as a
+  warning instead of failing the job. Decimation is skipped (with a warning)
+  when neither `fast-simplification` nor `open3d` is installed.
+* `MESH_DEFAULT_SCALE_MM` — target size of the **largest bounding-box edge**,
+  in millimetres.
+
+Output is Z-up with `min Z = 0` (resting on the build plate), matching the
+parametric backend. Printability of the result is reported by
+`designs.cad.meshcheck.check_mesh`; blocking problems fail the job exactly like
+an OpenSCAD validation failure.

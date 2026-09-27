@@ -308,6 +308,13 @@ OPENSCAD_TIMEOUT_SEC = env.int("OPENSCAD_TIMEOUT_SEC", default=60)
 OPENSCAD_MEMORY_LIMIT = env("OPENSCAD_MEMORY_LIMIT", default="1g")
 OPENSCAD_CPU_LIMIT = env("OPENSCAD_CPU_LIMIT", default="1.0")
 
+# Mesh-import CAD backend (external .stl/.obj/.glb instead of parametric CSG)
+MESH_BACKEND = env("MESH_BACKEND", default="")  # "" = only openscad; "mesh" = MeshCADBackend
+MESH_REPAIR_ENABLED = env("MESH_REPAIR_ENABLED", default=True)
+MESH_TARGET_FACES = env("MESH_TARGET_FACES", default=50000)
+MESH_DEFAULT_SCALE_MM = env("MESH_DEFAULT_SCALE_MM", default=120.0)
+MESH_MAX_SOURCE_BYTES = env("MESH_MAX_SOURCE_BYTES", default=64 * 1024 * 1024)
+
 # Agent workflow (see terv.md 6-7. fejezet)
 AGENT_MAX_ATTEMPTS = env.int("AGENT_MAX_ATTEMPTS", default=3)
 

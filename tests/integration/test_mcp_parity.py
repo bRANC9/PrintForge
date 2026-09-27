@@ -9,6 +9,7 @@ tool's return value against the direct service call.
 
 from __future__ import annotations
 
+import base64
 from unittest.mock import patch
 
 import pytest
@@ -27,8 +28,11 @@ from agents.tasks import run_agent_workflow
 from designs.models import ModelVersion
 from designs.services import (
     artifact_path,
+    attach_source_mesh_to_version,
     create_annotation_edit,
     create_next_version,
+    create_next_version_from_mesh,
+    source_mesh_path,
     start_render,
     version_status,
 )
@@ -81,6 +85,10 @@ PARITY_TOOLS = {
     "create_build_plate",
     "add_plate_item",
     "enqueue_print_job",
+    # Mesh import: the MCP twins of the source-mesh endpoints.
+    "create_version_from_mesh",
+    "attach_source_mesh_to_version",
+    "get_source_mesh",
 }
 
 
@@ -926,3 +934,236 @@ def test_generate_project_description_tool_respects_manual_provenance():
 
     assert result["applied"] is False
     assert result["reason"] == "manual"
+
+
+# ---------------------------------------------------------------------------
+# Mesh import (terv.md 26.3): the MCP twins of the source-mesh endpoints.
+#
+# MCP speaks JSON, so the upload arrives base64-encoded; decoding it is a
+# transport concern of the tool layer, and everything after that -- the format /
+# size / printability gate, the storage layout, the version row -- must be the
+# same ``designs.services`` call the HTTP endpoint makes. ``backend/mcp/tests/
+# test_tools_mesh.py`` covers the same tools from the MCP package's own side;
+# these are the cross-cutting parity entries the registry guard above requires.
+# ---------------------------------------------------------------------------
+
+
+def _box_stl() -> bytes:
+    """A watertight 10x20x30 mm box as binary STL bytes."""
+    import trimesh
+
+    # ``file_type`` is required: trimesh 5 treats a bare ``export("stl")`` as a
+    # file object and writes a junk file named ``stl`` into the cwd.
+    return bytes(trimesh.creation.box(extents=(10.0, 20.0, 30.0)).export(file_type="stl"))
+
+
+def _open_box_stl() -> bytes:
+    """A box with one triangle removed: parses, but is not watertight."""
+    import trimesh
+
+    box = trimesh.creation.box(extents=(10.0, 10.0, 10.0))
+    holed = trimesh.Trimesh(vertices=box.vertices.copy(), faces=box.faces[:-1], process=False)
+    return bytes(holed.export(file_type="stl"))
+
+
+def _b64(payload: bytes) -> str:
+    return base64.b64encode(payload).decode("ascii")
+
+
+def test_create_version_from_mesh_tool_delegates_to_services(queued, settings, tmp_path):
+    settings.MEDIA_ROOT = str(tmp_path)
+    project = ProjectFactory()
+    payload = _box_stl()
+
+    with (
+        patch(
+            "mcp.tools_impl.create_next_version_from_mesh",
+            wraps=create_next_version_from_mesh,
+        ) as create,
+        patch("mcp.tools_impl.start_render", wraps=start_render) as render,
+    ):
+        result = call(
+            "create_version_from_mesh",
+            project_id=project.id,
+            user_id=project.created_by_id,
+            filename="generated.stl",
+            mesh_base64=_b64(payload),
+            scale_mm=42.0,
+        )
+
+    # The base64 is decoded by the tool layer and the *bytes* reach the service.
+    create.assert_called_once_with(
+        project=project,
+        mesh_bytes=payload,
+        filename="generated.stl",
+        created_by=project.created_by,
+        scale_mm=42.0,
+        rotate_deg=None,
+        repair=None,
+        reference_note="",
+    )
+    version = ModelVersion.objects.get(pk=result["version_id"])
+    render.assert_called_once_with(version)
+    assert queued == [version.id]
+
+    assert result == {
+        "version_id": version.id,
+        "project_id": project.id,
+        "version": 1,
+        "status": "queued",
+        "source_mesh": source_mesh_path(version),
+        "warnings": [],
+    }
+    assert version_status(version)["status"] == "queued"
+    assert version.specification_json["generator"] == "mesh"
+    assert LocalStorage().read_bytes(version.source_mesh.name) == payload
+
+
+def test_attach_source_mesh_to_version_tool_delegates_to_service(queued, settings, tmp_path):
+    settings.MEDIA_ROOT = str(tmp_path)
+    version = ModelVersionFactory()
+    payload = _box_stl()
+
+    with (
+        patch(
+            "mcp.tools_impl.attach_source_mesh_to_version",
+            wraps=attach_source_mesh_to_version,
+        ) as service,
+        patch("mcp.tools_impl.start_render", wraps=start_render) as render,
+    ):
+        result = call(
+            "attach_source_mesh_to_version",
+            version_id=version.id,
+            user_id=version.project.created_by_id,
+            filename="box.stl",
+            mesh_base64=_b64(payload),
+            rotate_deg=[0.0, 0.0, 90.0],
+            repair=True,
+        )
+
+    service.assert_called_once_with(
+        version=version,
+        mesh_bytes=payload,
+        filename="box.stl",
+        scale_mm=None,
+        rotate_deg=[0.0, 0.0, 90.0],
+        repair=True,
+        reference_note="",
+    )
+    version.refresh_from_db()
+    render.assert_called_once_with(version)
+    assert queued == [version.id]
+
+    assert result["version_id"] == version.id
+    assert result["source_mesh"] == f"projects/{version.project_id}/v{version.version}/source.stl"
+    assert version.specification_json["transform"] == {"rotate_deg": [0.0, 0.0, 90.0]}
+    assert version.specification_json["repair"] == {"enabled": True}
+    # The version keeps its identity: a re-import is not a new version.
+    assert ModelVersion.objects.filter(pk=version.pk).count() == 1
+
+
+def test_get_source_mesh_tool_matches_the_storage_reader(settings, tmp_path):
+    settings.MEDIA_ROOT = str(tmp_path)
+    project = ProjectFactory()
+    payload = _box_stl()
+    version = create_next_version_from_mesh(
+        project=project, mesh_bytes=payload, filename="box.stl"
+    )
+
+    result = call("get_source_mesh", version_id=version.id, user_id=project.created_by_id)
+
+    # Same reader the API route uses, and the same shape ``export_model_stl``
+    # reports for an output artifact.
+    assert result == {
+        "path": source_mesh_path(version),
+        "exists": True,
+        "size": len(payload),
+    }
+    # The source mesh is an input, so it is deliberately *not* reachable through
+    # the artifact registry -- that is what the two readers prove together.
+    assert result["path"] == f"projects/{project.pk}/v1/source.stl"
+    assert artifact_path(version, "source_mesh") is None
+
+
+def test_get_source_mesh_tool_matches_a_version_without_a_mesh():
+    version = ModelVersionFactory()
+
+    result = call(
+        "get_source_mesh", version_id=version.id, user_id=version.project.created_by_id
+    )
+
+    assert source_mesh_path(version) is None
+    assert result == {"path": None, "exists": False, "size": 0}
+
+
+def test_get_source_mesh_tool_matches_a_deleted_file(settings, tmp_path):
+    settings.MEDIA_ROOT = str(tmp_path)
+    project = ProjectFactory()
+    version = create_next_version_from_mesh(
+        project=project, mesh_bytes=_box_stl(), filename="box.stl"
+    )
+    LocalStorage().delete(version.source_mesh.name)
+
+    result = call("get_source_mesh", version_id=version.id, user_id=project.created_by_id)
+
+    assert result == {"path": source_mesh_path(version), "exists": False, "size": 0}
+
+
+def test_mesh_tools_reject_a_non_member(queued, settings, tmp_path):
+    """The same MEMBER/VIEWER gate the API endpoints enforce (terv.md 20.)."""
+    settings.MEDIA_ROOT = str(tmp_path)
+    project = ProjectFactory()
+    version = ModelVersionFactory(project=project)
+    outsider = UserFactory()
+
+    with pytest.raises(PermissionDenied):
+        call(
+            "create_version_from_mesh",
+            project_id=project.id,
+            user_id=outsider.id,
+            filename="box.stl",
+            mesh_base64=_b64(_box_stl()),
+        )
+    with pytest.raises(PermissionDenied):
+        call(
+            "attach_source_mesh_to_version",
+            version_id=version.id,
+            user_id=outsider.id,
+            filename="box.stl",
+            mesh_base64=_b64(_box_stl()),
+        )
+    with pytest.raises(PermissionDenied):
+        call("get_source_mesh", version_id=version.id, user_id=outsider.id)
+
+    # The gate runs before any work: nothing was written and nothing was queued.
+    version.refresh_from_db()
+    assert not version.source_mesh.name
+    assert queued == []
+
+
+def test_mesh_write_tools_reject_a_mesh_the_api_would_also_reject(queued, settings, tmp_path):
+    """A 400-worthy upload raises ``ValueError`` here, with nothing persisted."""
+    settings.MEDIA_ROOT = str(tmp_path)
+    project = ProjectFactory()
+    version = ModelVersionFactory(project=project)
+
+    with pytest.raises(ValueError, match="not watertight"):
+        call(
+            "create_version_from_mesh",
+            project_id=project.id,
+            user_id=project.created_by_id,
+            filename="broken.stl",
+            mesh_base64=_b64(_open_box_stl()),
+        )
+    with pytest.raises(ValueError, match="not watertight"):
+        call(
+            "attach_source_mesh_to_version",
+            version_id=version.id,
+            user_id=project.created_by_id,
+            filename="broken.stl",
+            mesh_base64=_b64(_open_box_stl()),
+        )
+
+    version.refresh_from_db()
+    assert not version.source_mesh.name
+    assert queued == []

@@ -65,6 +65,15 @@ services:
       # used only by the agent self-check review. Leave empty to use OLLAMA_MODEL.
       OLLAMA_VISION_MODEL: ""
       MEDIA_ROOT: /data/media
+      # Mesh-import CAD backend. "" (default) keeps the OpenSCAD-only pipeline;
+      # set to "mesh" to also allow importing an external .stl/.obj/.glb. It
+      # runs in-process (trimesh), so it needs no sandbox image. "worker"
+      # inherits these through the anchor.
+      MESH_BACKEND: ""
+      MESH_REPAIR_ENABLED: true
+      MESH_TARGET_FACES: 50000
+      MESH_DEFAULT_SCALE_MM: 120.0
+      MESH_MAX_SOURCE_BYTES: 67108864
     # Resolve the Docker host by name on Linux (TrueNAS); used by OLLAMA_BASE_URL.
     extra_hosts:
       - "host.docker.internal:host-gateway"

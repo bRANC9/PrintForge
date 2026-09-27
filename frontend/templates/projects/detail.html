@@ -255,6 +255,103 @@
                             :disabled="busy || (!prompt.trim() && !referenceImage)"
                             x-text="busy ? 'Feldolgozás…' : 'Generálás'"></button>
                 </form>
+                {% comment %}
+                    Mesh import, the sibling of the prompt form: instead of a
+                    prompt the next version is built from an uploaded
+                    .stl/.obj/.glb. The endpoint answers 400 with a readable
+                    reason (unsupported suffix, empty file, over the
+                    `mesh_max_source_bytes` bound, or the blocking meshcheck
+                    problems of a mesh that is not printable), so the message is
+                    shown verbatim in `meshError` -- the user must learn why the
+                    mesh was refused, not only that it was.
+                {% endcomment %}
+                <form class="prompt-form mesh-upload-form"
+                      enctype="multipart/form-data"
+                      @submit.prevent="submitMesh()">
+                    <h3>Mesh feltöltése (STL / OBJ / GLB)</h3>
+                    <p class="muted field-hint">
+                        A feltöltött hálóból készül az új verzió: a backend
+                        milliméterbe skálázza, majd ugyanazt a renderelést futtatja,
+                        mint a promptból generált modellnél. A blokkoló hibákat
+                        (nem zárt háló, ellentétes körüljárás, nulla térfogat)
+                        már a feltöltéskor elutasítja.
+                    </p>
+                    <label for="mesh-file">Mesh fájl</label>
+                    <input id="mesh-file"
+                           x-ref="meshFile"
+                           class="input"
+                           type="file"
+                           accept=".stl,.obj,.glb"
+                           @change="onMeshChange($event)"
+                           :disabled="busy">
+                    <template x-if="meshFile">
+                        <p class="reference-preview">
+                            <span class="badge" x-text="meshFile.name"></span>
+                            <button type="button"
+                                    class="link-btn"
+                                    @click="clearMesh()"
+                                    :disabled="busy">Eltávolítás</button>
+                        </p>
+                    </template>
+                    <label for="mesh-scale-mm">Legnagyobb él (mm)</label>
+                    <input id="mesh-scale-mm"
+                           class="input"
+                           type="number"
+                           step="any"
+                           min="0"
+                           placeholder="üres = a mesh backend alapértelmezettje"
+                           x-model="meshForm.scaleMm"
+                           :disabled="busy">
+                    <p class="muted field-hint">
+                        A legnagyobb befoglaló él milliméterben. Üresen a
+                        <code>mesh_default_scale_mm</code> beállítás érvényesül.
+                    </p>
+                    <label for="mesh-rotate-x">Forgatás (fok, X / Y / Z)</label>
+                    <div class="form-row is-inline">
+                        <input id="mesh-rotate-x"
+                               class="input"
+                               type="number"
+                               step="any"
+                               placeholder="X"
+                               x-model="meshForm.rotateX"
+                               :disabled="busy">
+                        <input class="input"
+                               type="number"
+                               step="any"
+                               placeholder="Y"
+                               aria-label="Forgatás Y tengely körül"
+                               x-model="meshForm.rotateY"
+                               :disabled="busy">
+                        <input class="input"
+                               type="number"
+                               step="any"
+                               placeholder="Z"
+                               aria-label="Forgatás Z tengely körül"
+                               x-model="meshForm.rotateZ"
+                               :disabled="busy">
+                    </div>
+                    <p class="muted field-hint">Mindhárom mező kitöltve küldődik el; üresen nincs forgatás.</p>
+                    <label class="checkbox-inline">
+                        <input type="checkbox" x-model="meshForm.repair" :disabled="busy">
+                        Hálójavítás engedélyezése
+                    </label>
+                    <p class="muted field-hint">
+                        Kitalált vagy sérült geometria esetén érdemes bekapcsolni;
+                        a <code>mesh_repair_enabled</code> beállítás az alapértelkezett.
+                    </p>
+                    <label for="mesh-note">Megjegyzés</label>
+                    <input id="mesh-note"
+                           class="input"
+                           type="text"
+                           placeholder="Pl. képből generált, 1:1 méretben"
+                           x-model="meshForm.note"
+                           :disabled="busy">
+                    <p class="error-box" x-show="meshError" x-cloak x-text="meshError"></p>
+                    <button type="submit"
+                            class="btn btn-primary"
+                            :disabled="busy || !meshFile"
+                            x-text="uploadingMesh ? 'Feltöltés…' : 'Mesh feltöltése'"></button>
+                </form>
                 <p class="status-line" x-show="statusText">
                     <span class="spinner" x-show="polling" aria-hidden="true"></span>
                     <span x-text="statusText"></span>

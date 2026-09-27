@@ -420,6 +420,11 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 
 The same flags apply to PrusaSlicer (`docker/slicer`, `--memory 2g --cpus 2.0`).
 
+The **mesh-import CAD backend** (`MESH_BACKEND=mesh`) is the one exception: it
+converts an external `.stl`/`.obj`/`.glb` in-process with `trimesh`, so it starts
+no sandbox container and needs no image, mount or extra host path. It is off by
+default.
+
 ### Images
 
 | Image | Built from | Purpose |
@@ -491,6 +496,14 @@ Everything the sandbox needs is baked into the images and the compose files:
   **Slicing mód = docker** on the app's Settings page after install (see A5). The
   sandbox image names already default to the published GHCR images, so no env is
   needed for them.
+- **CAD backend** — `MESH_BACKEND` selects the CAD path and is independent of the
+  sandbox modes. Empty (the default) is the OpenSCAD-only pipeline; `mesh`
+  additionally allows importing an external mesh, which runs in-process and
+  therefore needs no sandbox image. It is also overridable at runtime on the
+  Settings page. Set it in `.env` on Path B, or in the `web` environment of the
+  pasted YAML on Path A (`worker` inherits it through the anchor). `MESH_*`
+  tuning — decimation budget, default print size, upload limit — is documented
+  in `.env.example`.
 
 If a model/slice fails, check in this order:
 

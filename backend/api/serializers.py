@@ -4,10 +4,12 @@ from django.urls import NoReverseMatch, reverse
 from rest_framework import serializers
 
 from accounts.models import User
+from accounts.services import PROFILE_FIELDS, user_stats
 from agents.models import AgentRun
 from configuration import model_catalog
 from configuration.services import SETTING_NAMES
 from designs.models import ModelVersion
+from designs.services import source_mesh_format, source_mesh_path, source_mesh_warnings
 from notifications.models import Notification
 from printers.models import Printer, PrintJob, PrintJobStatus
 from projects.models import Project, ProjectShare, Rating, Tag
@@ -293,6 +295,15 @@ class ModelVersionSerializer(serializers.ModelSerializer):
     parent_version = serializers.IntegerField(
         source="parent_version_id", read_only=True, allow_null=True
     )
+    # Mesh import. ``source_mesh`` is deliberately NOT a writable FileField: the
+    # mesh goes through ``designs.services`` (which validates it and writes it to
+    # storage) like every other file field on this serializer, so only its
+    # download URL, its presence, its container format and the meshcheck findings
+    # are exposed. The format matters because the download URL has no extension.
+    source_mesh_url = serializers.SerializerMethodField()
+    source_mesh_available = serializers.SerializerMethodField()
+    source_mesh_warnings = serializers.SerializerMethodField()
+    source_mesh_format = serializers.SerializerMethodField()
 
     class Meta:
         model = ModelVersion
@@ -315,6 +326,10 @@ class ModelVersionSerializer(serializers.ModelSerializer):
             "reference_image",
             "reference_note",
             "status",
+            "source_mesh_url",
+            "source_mesh_available",
+            "source_mesh_warnings",
+            "source_mesh_format",
             "created_by",
             "created_at",
         ]
@@ -337,6 +352,10 @@ class ModelVersionSerializer(serializers.ModelSerializer):
             "reference_image",
             "reference_note",
             "status",
+            "source_mesh_url",
+            "source_mesh_available",
+            "source_mesh_warnings",
+            "source_mesh_format",
             "created_by",
             "created_at",
         ]
@@ -349,6 +368,32 @@ class ModelVersionSerializer(serializers.ModelSerializer):
 
     def get_review_required(self, obj: ModelVersion) -> bool:
         return bool((obj.validation_json or {}).get("review_required", False))
+
+    def get_source_mesh_available(self, obj: ModelVersion) -> bool:
+        return bool(source_mesh_path(obj))
+
+    def get_source_mesh_url(self, obj: ModelVersion) -> str | None:
+        """Download URL of the source mesh, or ``None`` when there is none."""
+        if not source_mesh_path(obj):
+            return None
+        try:
+            return reverse("version-source-mesh", kwargs={"pk": obj.pk})
+        except NoReverseMatch:  # pragma: no cover - URLconf always provides this route
+            return None
+
+    def get_source_mesh_warnings(self, obj: ModelVersion) -> list:
+        """Non-blocking meshcheck findings recorded when the mesh was imported."""
+        return source_mesh_warnings(obj)
+
+    def get_source_mesh_format(self, obj: ModelVersion) -> str:
+        """Container format of the stored source mesh (``""`` when there is none).
+
+        ``"stl"``/``"obj"``/``"glb"``. The source mesh is served from a URL with
+        no file extension, so a client cannot pick a parser from it; the format
+        comes from the stored file name via ``designs.services`` instead of being
+        duplicated here.
+        """
+        return source_mesh_format(obj)
 
 
 class AnnotationSerializer(serializers.Serializer):
@@ -436,6 +481,63 @@ class VersionRegenerateSerializer(serializers.Serializer):
 
     prompt = serializers.CharField(required=False, allow_blank=True, default="")
     specification_json = serializers.JSONField(required=False)
+
+
+class SourceMeshFileField(serializers.FileField):
+    """A mesh upload that accepts a zero-byte file, so the service refuses it.
+
+    DRF's own empty-file check is a per-field, *translatable* error
+    (``{"file": ["The submitted file is empty."]}``) raised during validation --
+    before the view's ``except ValueError`` ever runs -- which would make an
+    empty upload the one mesh rejection on this surface that answers something
+    other than ``{"detail": ...}``, in whatever language the server is running.
+    :func:`designs.services.create_next_version_from_mesh` already refuses a
+    zero-byte payload with a plain :class:`ValueError` -- the same path as a bad
+    suffix, an oversized file or a mesh that is not printable -- so this field
+    only stops pre-empting it.
+
+    A *missing* part is still a field error (``no file was submitted``): that is a
+    malformed payload, not a rejected upload, and every other serializer on this
+    API answers it the same way.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("allow_empty_file", True)
+        super().__init__(**kwargs)
+
+
+class SourceMeshUploadSerializer(serializers.Serializer):
+    """Write payload for the mesh-import endpoints (multipart).
+
+    ``file`` is a plain :class:`~rest_framework.fields.FileField`, never an
+    ``ImageField``: the payload is triangle geometry, so no image validation may
+    touch it. Whether it is empty, which suffix it has and how big it is are not
+    checked here either -- all three belong to
+    :func:`designs.services.create_next_version_from_mesh`, which rejects a bad
+    upload with a readable ``400`` naming the accepted formats. See
+    :class:`SourceMeshFileField` for why the zero-byte case is left to the
+    service as well.
+
+    ``scale_mm`` / ``rotate_deg`` / ``repair`` are optional and are passed
+    through untouched: an omitted key means "the mesh backend's own default
+    (and therefore the ``mesh_*`` setting) applies". ``repair=False`` is a real
+    request rather than an omission, hence the nullable boolean instead of a
+    default.
+    """
+
+    file = SourceMeshFileField()
+    scale_mm = serializers.FloatField(required=False, allow_null=True)
+    rotate_deg = serializers.ListField(
+        child=serializers.FloatField(),
+        required=False,
+        allow_null=True,
+        min_length=3,
+        max_length=3,
+    )
+    repair = serializers.BooleanField(required=False, allow_null=True)
+    reference_note = serializers.CharField(
+        required=False, allow_blank=True, default="", max_length=2000
+    )
 
 
 class ClarificationAnswerSerializer(serializers.Serializer):
@@ -664,6 +766,50 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = ["id", "kind", "message", "url", "is_read", "created_at"]
         read_only_fields = fields
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    """The caller's own account, plus their aggregated statistics.
+
+    ``stats`` is folded into the same payload as the account fields so the
+    profile page needs a single request, and so a ``PATCH`` can return the
+    recomputed numbers together with the saved profile. It is a
+    ``SerializerMethodField`` rather than a second endpoint for the same reason.
+    """
+
+    stats = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "username",
+            "display_name",
+            "email",
+            "first_name",
+            "last_name",
+            "is_staff",
+            "date_joined",
+            "last_login",
+            "stats",
+        ]
+        read_only_fields = fields
+
+    def get_stats(self, obj) -> dict:
+        return user_stats(obj)
+
+
+class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    """Writable subset of the profile.
+
+    Built from :data:`accounts.services.PROFILE_FIELDS` so the write surface is
+    defined in one place. ``username`` is not part of it (see ``PROFILE_FIELDS``)
+    and the unique constraint on ``email`` comes from the model, so a collision
+    is a 400 with a field-keyed message rather than an IntegrityError.
+    """
+
+    class Meta:
+        model = User
+        fields = list(PROFILE_FIELDS)
 
 
 class SettingsUpdateSerializer(serializers.Serializer):

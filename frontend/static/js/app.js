@@ -1127,6 +1127,11 @@
                 openscad_timeout_sec: "",
                 openscad_memory_limit: "",
                 openscad_cpu_limit: "",
+                mesh_backend: "",
+                mesh_repair_enabled: false,
+                mesh_target_faces: "",
+                mesh_default_scale_mm: "",
+                mesh_max_source_bytes: "",
                 slicer_mode: "",
                 slicer_timeout_sec: "",
                 storage_backend: "",
@@ -1152,6 +1157,21 @@
                         : data.openscad_timeout_sec,
                 openscad_memory_limit: data.openscad_memory_limit || "",
                 openscad_cpu_limit: data.openscad_cpu_limit || "",
+                mesh_backend: data.mesh_backend || "",
+                mesh_repair_enabled: Boolean(data.mesh_repair_enabled),
+                mesh_target_faces:
+                    data.mesh_target_faces === null || data.mesh_target_faces === undefined
+                        ? ""
+                        : data.mesh_target_faces,
+                mesh_default_scale_mm:
+                    data.mesh_default_scale_mm === null || data.mesh_default_scale_mm === undefined
+                        ? ""
+                        : data.mesh_default_scale_mm,
+                mesh_max_source_bytes:
+                    data.mesh_max_source_bytes === null ||
+                    data.mesh_max_source_bytes === undefined
+                        ? ""
+                        : data.mesh_max_source_bytes,
                 slicer_mode: data.slicer_mode || "",
                 slicer_timeout_sec:
                     data.slicer_timeout_sec === null || data.slicer_timeout_sec === undefined

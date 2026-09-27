@@ -15,12 +15,20 @@ the web user (terv.md 20., 25.3). Only ``create_workspace`` (open creation, like
 the gate or re-enable shell access; ``allow_shell`` stays forbidden.
 """
 
+import base64
+import binascii
+
 from accounts.models import User
 from designs.models import ModelVersion
 from designs.services import (
+    MESH_SOURCE_FORMATS,
     artifact_path,
+    attach_source_mesh_to_version,
     create_annotation_edit,
     create_next_version,
+    create_next_version_from_mesh,
+    source_mesh_path,
+    source_mesh_warnings,
     start_render,
     version_status,
 )
@@ -114,6 +122,20 @@ def _version_viewer(*, version_id: int, user_id: int, **_kwargs) -> None:
 def _version_member(*, base_version_id: int, user_id: int, **_kwargs) -> None:
     require_version_role(
         version_id=base_version_id,
+        user_id=user_id,
+        minimum=WorkspaceRole.MEMBER,
+    )
+
+
+def _version_member_by_id(*, version_id: int, user_id: int, **_kwargs) -> None:
+    """MEMBER+ gate keyed on ``version_id`` (the detail routes' parameter name).
+
+    Same rule as :func:`_version_member`, just for the tools that name their
+    version parameter ``version_id`` like ``get_model_version`` /
+    ``export_model_stl`` do.
+    """
+    require_version_role(
+        version_id=version_id,
         user_id=user_id,
         minimum=WorkspaceRole.MEMBER,
     )
@@ -263,6 +285,157 @@ def edit_model_from_annotations_tool(
         "project_id": version.project_id,
         "queued": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# Mesh import: adopt an externally generated .stl/.obj/.glb as a version's source
+# ---------------------------------------------------------------------------
+#
+# MCP speaks JSON, so the upload travels base64-encoded in ``mesh_base64`` while
+# the HTTP endpoints take the same bytes as a multipart file. Both hand them to
+# the same ``designs.services`` functions, which own the format / size /
+# printability gate and the storage layout -- a rejected mesh raises
+# ``ValueError`` (``MeshNotPrintableError``) here exactly as the endpoints answer
+# ``400``, and nothing is written or queued in that case. ``RenderEnqueueError``
+# propagates, mirroring the API's ``503``.
+#
+# That includes the zero-byte mesh: ``base64.b64decode("")`` is a valid decode of
+# empty bytes, so ``mesh_base64=""`` is a plausible client mistake and reaches the
+# *same* service-level empty-file ``ValueError`` (and therefore the same English
+# message) the HTTP endpoints now answer with ``{"detail": ...}``.
+
+#: Accepted extensions as they read in a sentence (``.stl, .obj, .glb``), built
+#: from the registry so a tool description cannot advertise a format the gate
+#: rejects -- or omit one it accepts.
+_MESH_FORMATS_LABEL = ", ".join(f".{fmt}" for fmt in MESH_SOURCE_FORMATS)
+
+
+def _mesh_bytes(mesh_base64: str) -> bytes:
+    """Decode the base64 upload into raw mesh bytes (transport concern only)."""
+    try:
+        return base64.b64decode(str(mesh_base64 or ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("mesh_base64 must be base64-encoded mesh bytes") from exc
+
+
+def _mesh_version_payload(version: ModelVersion) -> dict:
+    """The version fields the mesh tools return, shaped like the API payload."""
+    return {
+        "version_id": version.id,
+        "project_id": version.project_id,
+        "version": version.version,
+        "status": version_status(version)["status"],
+        "source_mesh": source_mesh_path(version),
+        "warnings": source_mesh_warnings(version),
+    }
+
+
+@register(
+    "create_version_from_mesh",
+    (
+        f"Create the next model version of a project from an uploaded {_MESH_FORMATS_LABEL} "
+        "mesh (base64 in mesh_base64) and enqueue its render (requires MEMBER)"
+    ),
+    authorize=_project_member,
+)
+def create_version_from_mesh_tool(
+    *,
+    project_id: int,
+    user_id: int,
+    filename: str,
+    mesh_base64: str,
+    scale_mm: float | None = None,
+    rotate_deg: list[float] | None = None,
+    repair: bool | None = None,
+    reference_note: str = "",
+) -> dict:
+    """Mirror ``POST /api/v1/projects/{id}/versions/from-mesh/``.
+
+    Thin wrapper over :func:`designs.services.create_next_version_from_mesh`
+    followed by the shared :func:`designs.services.start_render` enqueue, so the
+    tool and the endpoint persist the same ``manual`` version with the same
+    ``generator: mesh`` specification. Omitted ``scale_mm`` / ``rotate_deg`` /
+    ``repair`` stay out of the specification, so the mesh backend's own defaults
+    apply.
+    """
+    project = Project.objects.get(pk=project_id)
+    user = User.objects.get(pk=user_id)
+    version = create_next_version_from_mesh(
+        project=project,
+        mesh_bytes=_mesh_bytes(mesh_base64),
+        filename=filename,
+        created_by=user,
+        scale_mm=scale_mm,
+        rotate_deg=rotate_deg,
+        repair=repair,
+        reference_note=reference_note,
+    )
+    start_render(version)
+    return _mesh_version_payload(version)
+
+
+@register(
+    "attach_source_mesh_to_version",
+    (
+        f"Replace a model version's source mesh with an uploaded {_MESH_FORMATS_LABEL} mesh "
+        "(base64 in mesh_base64) and re-render it (requires MEMBER)"
+    ),
+    authorize=_version_member_by_id,
+)
+def attach_source_mesh_to_version_tool(
+    *,
+    version_id: int,
+    user_id: int,
+    filename: str,
+    mesh_base64: str,
+    scale_mm: float | None = None,
+    rotate_deg: list[float] | None = None,
+    repair: bool | None = None,
+    reference_note: str = "",
+) -> dict:
+    """Mirror ``POST /api/v1/versions/{id}/source-mesh/``.
+
+    Thin wrapper over :func:`designs.services.attach_source_mesh_to_version`
+    plus the enqueue: the version keeps its id and history, its specification is
+    rewritten for the mesh backend and the previous mesh file is removed.
+    ``user_id`` only identifies the caller for the workspace-role gate (as in
+    ``get_model_version`` / ``export_model_stl``); the row already records who
+    created it.
+    """
+    version = ModelVersion.objects.get(pk=version_id)
+    version = attach_source_mesh_to_version(
+        version=version,
+        mesh_bytes=_mesh_bytes(mesh_base64),
+        filename=filename,
+        scale_mm=scale_mm,
+        rotate_deg=rotate_deg,
+        repair=repair,
+        reference_note=reference_note,
+    )
+    start_render(version)
+    return _mesh_version_payload(version)
+
+
+@register(
+    "get_source_mesh",
+    "Return a model version's source mesh (path, exists, size) (requires VIEWER)",
+    authorize=_version_viewer,
+)
+def get_source_mesh_tool(*, version_id: int, user_id: int) -> dict:
+    """Mirror ``GET /api/v1/versions/{id}/source-mesh/`` (path/exists/size).
+
+    The same shape as :func:`export_model_stl_tool` for the *input* mesh: the
+    source mesh is not an artifact, so it is read through
+    :func:`designs.services.source_mesh_path` instead of ``artifact_path``.
+    """
+    version = ModelVersion.objects.get(pk=version_id)
+    relative_path = source_mesh_path(version)
+    if not relative_path:
+        return {"path": None, "exists": False, "size": 0}
+
+    storage = get_storage()
+    size = storage.size(relative_path)
+    return {"path": relative_path, "exists": size is not None, "size": size or 0}
 
 
 # ---------------------------------------------------------------------------

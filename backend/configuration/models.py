@@ -18,6 +18,8 @@ from django.db import models
 
 MODE_CHOICES = [("local", "local"), ("docker", "docker")]
 STORAGE_BACKEND_CHOICES = [("local", "local"), ("s3", "s3")]
+#: Non-empty mesh-import backends. Empty means "OpenSCAD only" (the default).
+MESH_BACKEND_CHOICES = [("mesh", "mesh")]
 
 
 class OllamaPullStatus(models.TextChoices):
@@ -60,6 +62,15 @@ class AppSettings(models.Model):
     openscad_timeout_sec = models.PositiveIntegerField(null=True, blank=True)
     openscad_memory_limit = models.CharField(max_length=20, blank=True)
     openscad_cpu_limit = models.CharField(max_length=20, blank=True)
+    # Mesh-import CAD backend (an externally generated .stl/.obj/.glb instead of
+    # a parametric CSG source). Empty keeps the OpenSCAD-only pipeline; "mesh"
+    # selects the mesh backend. The remaining fields are its import knobs and
+    # mirror the ``MESH_*`` environment variables.
+    mesh_backend = models.CharField(max_length=20, blank=True, choices=MESH_BACKEND_CHOICES)
+    mesh_repair_enabled = models.BooleanField(null=True, blank=True)
+    mesh_target_faces = models.PositiveIntegerField(null=True, blank=True)
+    mesh_default_scale_mm = models.FloatField(null=True, blank=True)
+    mesh_max_source_bytes = models.PositiveBigIntegerField(null=True, blank=True)
     slicer_mode = models.CharField(max_length=20, blank=True, choices=MODE_CHOICES)
     slicer_timeout_sec = models.PositiveIntegerField(null=True, blank=True)
     storage_backend = models.CharField(

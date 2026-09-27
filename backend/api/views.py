@@ -14,14 +14,17 @@ import uuid
 from http import HTTPStatus
 
 from django.conf import settings
+from django.contrib.auth import update_session_auth_hash
+from django.contrib.auth.forms import PasswordChangeForm
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.services import update_profile
 from agents.models import AgentRun
 from agents.services import runs_accessible_to
 from agents.tasks import run_agent_workflow
@@ -53,11 +56,15 @@ from designs.services import (
     ClarificationError,
     RenderEnqueueError,
     answer_clarifications,
+    attach_source_mesh_to_version,
     create_annotation_edit,
     create_next_version,
+    create_next_version_from_mesh,
     delete_version,
     read_artifact,
+    read_source_mesh,
     regenerate_version,
+    source_mesh_format,
     start_render,
     version_status,
     versions_accessible_to,
@@ -140,7 +147,10 @@ from .serializers import (
     RatingWriteSerializer,
     SettingsUpdateSerializer,
     SkillSerializer,
+    SourceMeshUploadSerializer,
     TagSerializer,
+    UserProfileSerializer,
+    UserProfileUpdateSerializer,
     VersionCreateSerializer,
     VersionRegenerateSerializer,
     WorkspaceSerializer,
@@ -206,6 +216,43 @@ def _store_reference_upload(project, uploaded) -> str:
     uploaded.seek(0)
     get_storage().write_bytes(key, uploaded.read())
     return key
+
+
+#: ``Content-Type`` of a downloaded source mesh, keyed by container format (the
+#: suffix of the stored ``source.<ext>`` name, as reported by
+#: ``designs.services.source_mesh_format``). A name outside :data:`MESH_SOURCE_FORMATS
+#: <designs.services.MESH_SOURCE_FORMATS>` keeps the opaque fallback so the bytes
+#: are never re-interpreted by the browser.
+_SOURCE_MESH_CONTENT_TYPE = {
+    "stl": "model/stl",
+    "obj": "model/obj",
+    "glb": "model/gltf-binary",
+}
+_SOURCE_MESH_CONTENT_TYPE_FALLBACK = "application/octet-stream"
+
+
+def _uploaded_mesh(uploaded) -> tuple[bytes, str]:
+    """Read an uploaded source mesh as ``(bytes, filename)``.
+
+    The upload is read once, into memory, and the view never writes it: storing
+    and validating the mesh belongs to ``designs.services``.
+    """
+    uploaded.seek(0)
+    return uploaded.read(), getattr(uploaded, "name", "") or ""
+
+
+def _imported_mesh_response(version: ModelVersion, *, status: int) -> Response:
+    """Queue the render of a freshly imported mesh and serialise the version.
+
+    Same contract as the manual-specification path of ``/projects/{id}/versions/``:
+    the CAD work is only *enqueued* (the web process never shells out) and a
+    broker failure is a retryable ``503`` instead of a 500.
+    """
+    try:
+        start_render(version)
+    except RenderEnqueueError as exc:
+        return Response({"detail": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+    return Response(ModelVersionSerializer(version).data, status=status)
 
 
 class WorkspaceViewSet(viewsets.ModelViewSet):
@@ -367,6 +414,42 @@ class ProjectViewSet(viewsets.ModelViewSet):
             {"status": "queued", "mode": "agent"},
             status=HTTPStatus.ACCEPTED,
         )
+
+    @action(detail=True, methods=["post"], url_path="versions/from-mesh")
+    def versions_from_mesh(self, request, pk=None):
+        """Create the next version from an uploaded mesh (MEMBER+).
+
+        The mesh counterpart of ``POST /projects/{id}/versions/`` with an explicit
+        specification: an externally generated ``.stl``/``.obj``/``.glb`` (an
+        image-to-3D model, say) becomes the source of a ``manual`` version that
+        the mesh CAD backend renders.
+
+        The upload is validated and stored by ``designs.services`` *before* the
+        render is queued, so a mesh that is not printable is a ``400`` here
+        instead of a failed job in the worker. The render is only enqueued.
+        """
+        project = self.get_object()
+        payload = SourceMeshUploadSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        mesh_bytes, filename = _uploaded_mesh(data["file"])
+        try:
+            version = create_next_version_from_mesh(
+                project=project,
+                mesh_bytes=mesh_bytes,
+                filename=filename,
+                created_by=request.user,
+                scale_mm=data.get("scale_mm"),
+                rotate_deg=data.get("rotate_deg"),
+                repair=data.get("repair"),
+                reference_note=data.get("reference_note", ""),
+            )
+        except ValueError as exc:
+            # An unsupported suffix, an empty/oversized upload or a mesh that is
+            # not printable; the message names the accepted formats or the
+            # blocking problems.
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        return _imported_mesh_response(version, status=HTTPStatus.CREATED)
 
     @action(detail=True, methods=["post"], url_path="publish")
     def publish(self, request, pk=None):
@@ -606,7 +689,7 @@ class ModelVersionViewSet(
     mixins.DestroyModelMixin,
     viewsets.GenericViewSet,
 ):
-    """Version detail, manual delete, job status and artifact download.
+    """Version detail, manual delete, job status, source mesh and artifact download.
 
     Only the detail route is registered (no top-level list; versions are listed
     per project via ``/projects/{id}/versions/``).
@@ -702,6 +785,57 @@ class ModelVersionViewSet(
             {"queued": True, "parent_version": version.pk},
             status=HTTPStatus.ACCEPTED,
         )
+
+    @action(detail=True, methods=["get", "post"], url_path="source-mesh")
+    def source_mesh(self, request, pk=None):
+        """Download (GET, VIEWER+) or attach (POST, MEMBER+) the source mesh.
+
+        The source mesh is the version's *input*, not a render artifact, so it
+        has its own route instead of living under ``/artifact/<kind>/``.
+
+        POST replaces the version's mesh and its specification and re-renders it
+        in place (the version keeps its id and history). The bytes are validated
+        and stored by ``designs.services``, so a mesh that is not printable is a
+        ``400`` here rather than a failed job in the worker.
+        """
+        version = self.get_object()
+
+        if request.method == "GET":
+            result = read_source_mesh(version)
+            if result is None:
+                return Response(
+                    {"detail": "Source mesh not found."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+            relative_path, data = result
+            content_type = _SOURCE_MESH_CONTENT_TYPE.get(
+                source_mesh_format(version), _SOURCE_MESH_CONTENT_TYPE_FALLBACK
+            )
+            response = HttpResponse(data, content_type=content_type)
+            filename = relative_path.rsplit("/", 1)[-1]
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        payload = SourceMeshUploadSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        mesh_bytes, filename = _uploaded_mesh(data["file"])
+        try:
+            version = attach_source_mesh_to_version(
+                version=version,
+                mesh_bytes=mesh_bytes,
+                filename=filename,
+                scale_mm=data.get("scale_mm"),
+                rotate_deg=data.get("rotate_deg"),
+                repair=data.get("repair"),
+                reference_note=data.get("reference_note", ""),
+            )
+        except ValueError as exc:
+            # An unsupported suffix, an empty/oversized upload or a mesh that is
+            # not printable; the message names the accepted formats or the
+            # blocking problems.
+            return Response({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        return _imported_mesh_response(version, status=HTTPStatus.OK)
 
     @action(detail=True, methods=["get"], url_path=r"artifact/(?P<kind>[^/.]+)")
     def artifact(self, request, pk=None, kind=None):
@@ -1303,6 +1437,53 @@ class OllamaPullDetailView(APIView):
             {"detail": "Unknown action; expected 'retry' or 'cancel'."},
             status=HTTPStatus.BAD_REQUEST,
         )
+
+
+class MeView(APIView):
+    """The caller's own account: read it, and edit the editable fields.
+
+    Own-only, so this deliberately does **not** use
+    ``WorkspaceScopePermission`` -- a profile belongs to no workspace. It does
+    tighten the project default of ``IsAuthenticatedOrReadOnly`` to
+    ``IsAuthenticated``, because an anonymous ``GET`` must not be a 200.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(UserProfileSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = UserProfileUpdateSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        user = update_profile(request.user, **serializer.validated_data)
+        # Re-serialise so the caller gets recomputed statistics alongside the
+        # saved profile instead of needing a second round trip.
+        return Response(UserProfileSerializer(user).data)
+
+
+class MePasswordView(APIView):
+    """Change the caller's own password (``POST /api/v1/me/password/``).
+
+    Django's ``PasswordChangeForm`` does the work rather than a hand-rolled
+    check, because it is the only thing that verifies the current password and
+    runs the configured ``AUTH_PASSWORD_VALIDATORS``.
+
+    The form is driven from the view rather than from ``accounts.services`` on
+    purpose: finishing the change needs the request, and services are HTTP-free
+    by convention. ``update_session_auth_hash`` is what keeps the caller signed
+    in -- without it, changing your own password would log you out.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        form = PasswordChangeForm(user=request.user, data=request.data)
+        if not form.is_valid():
+            return Response(form.errors.get_json_data(), status=HTTPStatus.BAD_REQUEST)
+        form.save()
+        update_session_auth_hash(request, form.user)
+        return Response({"detail": "A jelszó frissítve."})
 
 
 class OllamaPullActionView(APIView):

@@ -84,7 +84,8 @@ class SettingSpec(NamedTuple):
 
 
 #: name -> registry entry. The ``default``'s type also drives coercion
-#: (``bool`` for ``rag_enabled``, ``int`` for ``*_sec``).
+#: (``bool`` for ``rag_enabled``, ``int`` for ``*_sec``, ``float`` for
+#: ``mesh_default_scale_mm``).
 _SETTING_SPECS: dict[str, SettingSpec] = {
     "ollama_base_url": SettingSpec("OLLAMA_BASE_URL", "http://localhost:11434"),
     "ollama_model": SettingSpec("OLLAMA_MODEL", "qwen3-coder:30b"),
@@ -102,6 +103,11 @@ _SETTING_SPECS: dict[str, SettingSpec] = {
     "openscad_timeout_sec": SettingSpec("OPENSCAD_TIMEOUT_SEC", 60),
     "openscad_memory_limit": SettingSpec("OPENSCAD_MEMORY_LIMIT", "1g"),
     "openscad_cpu_limit": SettingSpec("OPENSCAD_CPU_LIMIT", "1.0"),
+    "mesh_backend": SettingSpec("MESH_BACKEND", ""),
+    "mesh_repair_enabled": SettingSpec("MESH_REPAIR_ENABLED", True),
+    "mesh_target_faces": SettingSpec("MESH_TARGET_FACES", 50000),
+    "mesh_default_scale_mm": SettingSpec("MESH_DEFAULT_SCALE_MM", 120.0),
+    "mesh_max_source_bytes": SettingSpec("MESH_MAX_SOURCE_BYTES", 64 * 1024 * 1024),
     "slicer_mode": SettingSpec("SLICER_MODE", "local"),
     "slicer_timeout_sec": SettingSpec("SLICER_TIMEOUT_SEC", 300),
     "storage_backend": SettingSpec("STORAGE_BACKEND", "local"),
@@ -153,19 +159,24 @@ def _coerce(name: str, value: Any) -> Any:
             return int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name} must be an integer") from exc
+    if isinstance(default, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
     return str(value)
 
 
 def _store_value(name: str, value: Any) -> Any:
     """Value to persist for a field: ``None``/``""`` means "fall back".
 
-    Clearing is type-consistent: nullable bool/int fields store ``None``,
+    Clearing is type-consistent: nullable bool/int/float fields store ``None``,
     non-null CharFields store ``""``. Both are treated as "no override".
     """
     if value is None or value == "":
         default = _SETTING_SPECS[name].default
-        # Nullable fields (bool/int) use None; non-null CharFields use "".
-        return None if isinstance(default, (bool, int)) else ""
+        # Nullable fields (bool/int/float) use None; non-null CharFields use "".
+        return None if isinstance(default, (bool, int, float)) else ""
     return _coerce(name, value)
 
 
