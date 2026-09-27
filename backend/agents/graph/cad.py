@@ -72,6 +72,9 @@ def make_cad_node(
             exchange = getattr(reviser, "last_exchange", None)
             if isinstance(exchange, dict):
                 llm_trace.append(exchange)
+                rejected = exchange.get("rejected")
+                if rejected:
+                    revision_note = f"reviser elutasítva ({'; '.join(rejected)})"
         else:
             revision_note = None
 

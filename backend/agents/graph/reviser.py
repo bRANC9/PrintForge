@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import ValidationError
@@ -51,10 +52,76 @@ REVISER_SYSTEM_PROMPT = (
     "geometry), add the 'primitives' that build the requested object instead of "
     "leaving the list empty; for a flat 2D shape use a single 'extrude' with a "
     "polygon 'profile'. "
+    "NEVER shrink the part to satisfy a bound. If a value is below a minimum, "
+    "RAISE that value (and its printable sibling) and leave every other "
+    "dimension at the size the user asked for: a part made several times "
+    "smaller is not a fix, and the requested size is what the user wants. If the "
+    "errors are about shape, fix the shape - not the size. "
     "Keep dimensions, primitives and operations printable, keep the part "
     "resting on the build plate (min Z = 0) and never emit OpenSCAD code, "
     "G-code or STL data - only the structured specification."
 )
+
+#: A revised dimension below this fraction of the original counts as a collapse.
+_REVISION_SHRINK_RATIO = 0.5
+
+#: The declared bounding-box fields a revision must not shrink on its own.
+_SIZE_FIELDS = ("width", "height", "thickness")
+
+
+def revision_regressions(
+    previous: dict[str, Any],
+    revised: dict[str, Any],
+    errors: Sequence[str],
+) -> list[str]:
+    """Why ``revised`` is a regression instead of a fix of ``previous``.
+
+    A reviser that makes the part several times smaller to clear a minimum
+    bound produces a technically valid, practically useless blob: the measured
+    case was a 150x30x5 mm part turned into 10x5x0.5 mm. These checks are
+    deterministic (no model involved), so a small local model cannot slip a
+    collapse past them.
+
+    Returns a list of human-readable reasons; empty means the revision is
+    acceptable.
+    """
+    reasons: list[str] = []
+    complaint = " ".join(str(error) for error in errors).lower()
+
+    before = previous.get("dimensions") if isinstance(previous.get("dimensions"), dict) else {}
+    after = revised.get("dimensions") if isinstance(revised.get("dimensions"), dict) else {}
+    for field in _SIZE_FIELDS:
+        old = before.get(field)
+        new = after.get(field)
+        if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
+            continue
+        if old <= 0 or new >= old * _REVISION_SHRINK_RATIO:
+            continue
+        # A shrink is only legitimate for the field the complaint names (e.g.
+        # "dimensions.height must be >= 5"): a *growth* is always fine.
+        if field in complaint or f"dimensions.{field}" in complaint:
+            continue
+        reasons.append(
+            f"dimensions.{field} shrank from {old:g} mm to {new:g} mm "
+            f"(no error asked for a smaller part)"
+        )
+
+    before_primitives = [
+        item for item in (previous.get("primitives") or []) if isinstance(item, dict)
+    ]
+    after_primitives = [
+        item for item in (revised.get("primitives") or []) if isinstance(item, dict)
+    ]
+    if before_primitives and not after_primitives:
+        reasons.append("the revision removed every primitive, leaving no geometry")
+
+    def _extrudes(items: list[dict[str, Any]]) -> int:
+        return sum(1 for item in items if str(item.get("type") or "") == "extrude")
+
+    if _extrudes(before_primitives) > _extrudes(after_primitives):
+        reasons.append("the revision dropped the 'extrude' outline that carried the shape")
+
+    return reasons
 
 
 def _reviser_prompt(
@@ -92,7 +159,13 @@ class LlmReviser:
         errors: list[str],
         attempt: int,
     ) -> dict[str, Any] | None:
-        """Return a corrected specification, or ``None`` on any failure."""
+        """Return a corrected specification, or ``None`` on any failure.
+
+        A revision that *regresses* (shrinks the part several times to clear a
+        bound, drops every primitive or loses the ``extrude`` outline) is refused:
+        the caller retries the unchanged specification, which is a smaller,
+        honest part rather than a valid-looking blob.
+        """
         self.last_exchange = None
         prompt = _reviser_prompt(specification, errors, attempt)
         try:
@@ -106,6 +179,7 @@ class LlmReviser:
             logger.warning("LLM reviser failed, retrying the unchanged spec: %s", exc)
             return None
         corrected = plan.specification.model_dump()
+        regressions = revision_regressions(specification, corrected, errors)
         self.last_exchange = {
             "agent": "reviser",
             "attempt": int(attempt),
@@ -113,6 +187,14 @@ class LlmReviser:
             "prompt": prompt,
             "response": corrected,
         }
+        if regressions:
+            logger.warning(
+                "LLM reviser regressed the specification (attempt %d), keeping the original: %s",
+                attempt,
+                "; ".join(regressions),
+            )
+            self.last_exchange["rejected"] = regressions
+            return None
         return corrected
 
 
