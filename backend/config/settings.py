@@ -212,6 +212,20 @@ STATICFILES_DIRS = [REPO_ROOT / "frontend" / "static"]
 # The forgiving subclass keeps that behaviour but falls back to the original
 # filename when the manifest is absent (tests, fresh checkout, CI), instead of
 # raising "Missing staticfiles manifest entry" on every template render.
+#
+# The vendored Three.js tree is the one thing that depends on this staying the
+# way it is. `viewer.js` imports its addons as bare specifiers through a browser
+# import map whose prefix is `{% static 'vendor/three/addons/' %}` -- a
+# *directory*, which has no manifest entry, so the forgiving `stored_name` hands
+# it back unhashed. `GLTFLoader.js` in turn imports `../utils/...` relatively,
+# and collectstatic does not rewrite literals inside JavaScript, so that import
+# resolves against the unhashed URL. All of it therefore only works because
+# whitenoise's `WHITENOISE_KEEP_ONLY_HASHED_FILES` is unset (it defaults to
+# False), which leaves the unhashed originals in STATIC_ROOT next to the hashed
+# copies. Setting that to True -- a plausible hardening step to stop serving
+# unhashed assets -- deletes every unhashed original while the import map still
+# renders unhashed, and every `three/addons/*` specifier 404s, taking the 3D
+# viewer with it. Leave it unset, or exempt the tree, before touching it.
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": "config.storage.ForgivingCompressedManifestStaticFilesStorage"},

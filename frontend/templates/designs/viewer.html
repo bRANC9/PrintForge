@@ -76,6 +76,19 @@
         to the millimetre STL -- so an annotation placed here would be in the
         wrong coordinate space (docs/visual-editing.md 2./6.). The canvas
         therefore refuses the annotation mode itself; the panel never offers it.
+
+        That `x-if` teardown is measured, not assumed. Driving the vendored
+        Alpine 3.17.4 plus the shipped `registerStlViewerDirective` (app.js) and
+        the shipped viewer.js through on -> off -> on -> off in a real browser:
+        a false `x-if` runs the directive `cleanup()`, which calls
+        `PrintForgeViewer.dispose(el)` exactly once for that element, which in
+        turn reaches both `setAnimationLoop(null)` and `renderer.dispose()`; the
+        torn-down canvas stops calling `render()` entirely, the main canvas
+        keeps rendering, the `printforge:viewer-ready` listener count returns to
+        1, and only one renderer is ever live. Removing the `dispose(el)` call
+        from that cleanup makes the same probe report the leak immediately, so
+        the teardown is load-bearing: a WebGL context outlives the element that
+        created it, and dropping this path would leak one context per toggle.
     {% endcomment %}
     <template x-if="sourceMeshAvailable && sourceMeshOpen">
         <section class="source-mesh-panel"
