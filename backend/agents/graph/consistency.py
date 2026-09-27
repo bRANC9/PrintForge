@@ -147,6 +147,17 @@ def _mentions(haystack: str, words: Sequence[str]) -> bool:
     return False
 
 
+#: A named silhouette needs a real outline: a rectangle, a triangle or a rhombus
+#: is never a tree/star/heart. Six distinct points is the floor for a readable
+#: 2D outline; a proper tree wants more.
+_SILHOUETTE_MIN_POINTS = 6
+
+
+def _round_point(point: tuple[float, float]) -> tuple[float, float]:
+    """A profile point rounded for de-duplication (a closing point repeats)."""
+    return (round(point[0], 6), round(point[1], 6))
+
+
 def _profile_points(primitive: Mapping[str, Any]) -> list[tuple[float, float]]:
     """Valid ``(x, y)`` points of an ``extrude`` profile, in order."""
     points: list[tuple[float, float]] = []
@@ -258,11 +269,23 @@ def consistency_issues(prompt: str, specification: Mapping[str, Any] | None) -> 
 
     if _mentions(haystack, SILHOUETTE_WORDS):
         for primitive in extrudes:
-            if _is_axis_aligned_rectangle(_profile_points(primitive)):
+            points = _profile_points(primitive)
+            if _is_axis_aligned_rectangle(points):
                 issues.append(
                     "the request asks for a shaped outline (tree/star/heart/... silhouette), "
                     "but the 'extrude' profile is a plain rectangle: replace it with the real "
                     "outline as a polygon of at least 6 ordered {'x','y'} points"
+                )
+            elif len({_round_point(point) for point in points}) < _SILHOUETTE_MIN_POINTS:
+                # A diamond/rhombus or a triangle is not a rectangle, yet it is still
+                # not the requested silhouette: a tree, star or heart needs a real
+                # outline. Measured: a 14B model answered a tree-cutter request
+                # with a 4-point rhombus, which the rectangle rule alone accepted.
+                issues.append(
+                    f"the request asks for a shaped outline, but the 'extrude' profile has "
+                    f"only {len({_round_point(point) for point in points})} distinct points "
+                    f"(minimum {_SILHOUETTE_MIN_POINTS}): draw the actual silhouette as a "
+                    "polygon (a tree outline needs at least 6 ordered points, more for branches)"
                 )
 
     if _mentions(haystack, PRESS_WORDS):

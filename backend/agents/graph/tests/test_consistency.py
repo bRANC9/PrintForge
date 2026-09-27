@@ -105,6 +105,53 @@ def test_every_finding_is_returned_so_one_retry_can_fix_them_all():
     assert any("wall_thickness" in item for item in issues)
 
 
+def test_a_four_point_rhombus_is_not_a_silhouette():
+    """The measured live case: a 14B model drew a 4-point rhombus for a tree.
+
+    The rectangle rule alone accepted it (a rhombus is not axis-aligned), so a
+    shaped outline now also needs enough distinct points to be a real outline.
+    """
+    produced = spec(
+        [
+            {
+                "type": "extrude",
+                "role": "add",
+                "height": 30.0,
+                "wall_thickness": 2.0,
+                "profile": [
+                    {"x": -75.0, "y": 0.0},
+                    {"x": 0.0, "y": 15.0},
+                    {"x": 75.0, "y": 0.0},
+                    {"x": 0.0, "y": -15.0},
+                    {"x": -75.0, "y": 0.0},
+                ],
+            }
+        ],
+        object="cookie_cutter",
+    )
+
+    issues = consistency_issues("karácsonyfa formájú süti kinyomó", produced)
+
+    assert any("distinct points" in issue for issue in issues)
+
+
+def test_a_real_tree_outline_passes_the_point_count_rule():
+    produced = spec(
+        [
+            {
+                "type": "extrude",
+                "role": "add",
+                "height": 30.0,
+                "wall_thickness": 2.0,
+                "profile": [{"x": point["x"], "y": point["y"]} for point in TREE],
+            }
+        ],
+        object="karácsonyfa",
+    )
+
+    assert consistency_issue("karácsonyfa formájú süti kinyomó", produced) is None
+
+
 def test_press_without_a_wall_is_flagged():
     produced = spec(
         [{"type": "extrude", "role": "add", "height": 25.0, "profile": TREE}],
