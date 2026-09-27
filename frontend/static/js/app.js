@@ -41,6 +41,10 @@
         notificationsReadAll: () => `${API_BASE}/notifications/read-all/`,
         notificationRead: (notificationId) =>
             `${API_BASE}/notifications/${encodeURIComponent(notificationId)}/read/`,
+        // Own account: profile fields + aggregated statistics, and the password
+        // change. Both are caller-scoped, so they take no id.
+        me: () => `${API_BASE}/me/`,
+        mePassword: () => `${API_BASE}/me/password/`,
         // Runtime settings (staff-only).
         settings: () => `${API_BASE}/settings/`,
         settingsTestOllama: () => `${API_BASE}/settings/test-ollama/`,
@@ -273,6 +277,10 @@
         readAllNotifications: () => request(endpoints.notificationsReadAll(), { method: "POST" }),
         markNotificationRead: (notificationId) =>
             request(endpoints.notificationRead(notificationId), { method: "POST" }),
+        getProfile: () => request(endpoints.me()),
+        updateProfile: (patch) => request(endpoints.me(), { method: "PATCH", body: patch }),
+        changePassword: (payload) =>
+            request(endpoints.mePassword(), { method: "POST", body: payload }),
         getSettings: () => request(endpoints.settings()),
         updateSettings: (patch) => request(endpoints.settings(), { method: "PATCH", body: patch }),
         testOllama: () => request(endpoints.settingsTestOllama(), { method: "POST" }),
@@ -1450,7 +1458,11 @@
             // Polling: every 2 s, only while a pull is pending, never hidden
             // ---------------------------------------------------------------
             get hasPendingPulls() {
-                return this.pulls.some((pull) => isPullPending(pull.status));
+                // A stale (stuck) row must not keep the 2 s poll alive forever: it
+                // will not move, and the UI offers retry/cancel for it instead.
+                return this.pulls.some(
+                    (pull) => isPullPending(pull.status) && !this.isStale(pull),
+                );
             },
 
             ensurePolling() {

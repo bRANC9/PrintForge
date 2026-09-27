@@ -125,17 +125,17 @@
                                 <span class="badge is-danger" x-show="isStale(item)">elakadt</span>
                                 <button type="button"
                                         class="link-btn"
-                                        x-show="isPending(item)"
+                                        x-show="isPending(item) && !isStale(item)"
                                         :disabled="pullBusy === item.id"
                                         @click="cancelPull(item)">Megszakítás</button>
                                 <button type="button"
                                         class="link-btn"
-                                        x-show="!isPending(item)"
+                                        x-show="!isPending(item) || isStale(item)"
                                         :disabled="pullBusy === item.id"
                                         @click="retryPull(item)">Újra</button>
                                 <button type="button"
                                         class="link-btn"
-                                        x-show="!isPending(item)"
+                                        x-show="!isPending(item) || isStale(item)"
                                         @click="dismiss(item)">Elrejtés</button>
                             </div>
                             <div class="progress"
