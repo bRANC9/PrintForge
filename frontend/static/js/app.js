@@ -250,6 +250,13 @@
         versionStatus: (versionId) => request(endpoints.versionStatus(versionId)),
         listPrintJobs: async () => unwrapList(await request(endpoints.printJobs())),
         listAgentRuns: async () => unwrapList(await request(endpoints.agentRuns())),
+        // Raw paginated payload (results + next) for the Jobs page.
+        listAgentRunsPage: (params) =>
+            request(
+                params && typeof params === "string"
+                    ? params
+                    : withQuery(endpoints.agentRuns(), params || {}),
+            ),
         startPrintJob: (jobId) => request(endpoints.printJobStart(jobId), { method: "POST" }),
         cancelPrintJob: (jobId) => request(endpoints.printJobCancel(jobId), { method: "POST" }),
         transitionPrintJob: (jobId, status) =>
@@ -859,6 +866,138 @@
                 }
             },
         };
+    }
+
+    /**
+     * Jobs page: the AI workflow runs of the caller's workspaces, with their
+     * step history (docs/... the history lives in `AgentRun.state_json`).
+     * GET /api/v1/agent-runs/?summary=1 (paginated, ?status= filter). Polls
+     * every 2 s while something is live, like the print history.
+     */
+    function jobsPageComponent() {
+        const STATUSES = [
+            { value: "", label: "Összes" },
+            { value: "RUNNING", label: "Fut" },
+            { value: "PENDING", label: "Sorban" },
+            { value: "DONE", label: "Kész" },
+            { value: "FAILED", label: "Hiba" },
+        ];
+        const RUNNING = ["RUNNING", "PENDING"];
+
+        /** Badge class for an AgentRun status (PENDING/RUNNING/DONE/FAILED). */
+        function runStatusClass(status) {
+            const state = String(status || "").toUpperCase();
+            if (state === "DONE") return "is-ok";
+            if (state === "FAILED") return "is-danger";
+            if (state === "RUNNING") return "is-active";
+            return "is-muted";
+        }
+
+        return mergeLiveProperties(projectDetailUrlMixin(), {
+            runs: [],
+            statuses: STATUSES,
+            statusFilter: "",
+            nextUrl: "",
+            loading: true,
+            loadingMore: false,
+            error: "",
+            notice: "",
+            openIds: [],
+            pollTimer: null,
+
+            get liveCount() {
+                return this.runs.filter((run) => RUNNING.includes(String(run.status).toUpperCase()))
+                    .length;
+            },
+
+            get hasMore() {
+                return Boolean(this.nextUrl);
+            },
+
+            formatDate,
+            displayName,
+            runStatusClass,
+
+            async init() {
+                await this.load();
+                this.startPolling();
+            },
+
+            query() {
+                const params = { summary: 1 };
+                if (this.statusFilter) params.status = this.statusFilter;
+                return params;
+            },
+
+            async load() {
+                this.loading = true;
+                this.error = "";
+                try {
+                    const data = (await api.listAgentRunsPage(this.query())) || {};
+                    this.runs = PF.unwrapList(data);
+                    this.nextUrl = PF.sameOrigin(data.next);
+                    this.notice = "";
+                } catch (error) {
+                    this.error = error.message || String(error);
+                } finally {
+                    this.loading = false;
+                }
+            },
+
+            async loadMore() {
+                if (!this.nextUrl || this.loadingMore) return;
+                this.loadingMore = true;
+                try {
+                    const data = (await api.listAgentRunsPage(this.nextUrl)) || {};
+                    this.runs = [...this.runs, ...PF.unwrapList(data)];
+                    this.nextUrl = PF.sameOrigin(data.next);
+                } catch (error) {
+                    this.error = error.message || String(error);
+                } finally {
+                    this.loadingMore = false;
+                }
+            },
+
+            /** Keep the open detail rows open across a poll. */
+            startPolling() {
+                this.stopPolling();
+                this.pollTimer = window.setInterval(() => {
+                    if (document.hidden) return;
+                    this.load();
+                }, OLLAMA_POLL_MS);
+            },
+
+            stopPolling() {
+                if (this.pollTimer) {
+                    window.clearInterval(this.pollTimer);
+                    this.pollTimer = null;
+                }
+            },
+
+            isOpen(run) {
+                return (this.openIds || []).includes(run.id);
+            },
+
+            toggleDetail(run) {
+                const id = run.id;
+                this.openIds = this.isOpen(run)
+                    ? this.openIds.filter((item) => item !== id)
+                    : [...this.openIds, id];
+            },
+
+            hasClarifications(run) {
+                return Array.isArray(run.clarifications) && run.clarifications.length > 0;
+            },
+
+            statusLabel(run) {
+                if (!run) return "";
+                const state = String(run.status || "").toUpperCase();
+                if (state === "DONE" && run.stage && run.stage !== "done") {
+                    return `${state} · ${run.stage}`;
+                }
+                return state || "—";
+            },
+        });
     }
 
     /**
@@ -1804,6 +1943,7 @@
         Alpine.data("projectDetail", projectDetailComponent);
         Alpine.data("notificationsBell", notificationsBellComponent);
         Alpine.data("printHistory", printHistoryComponent);
+        Alpine.data("jobsPage", jobsPageComponent);
         Alpine.data("settingsPage", settingsPageComponent);
         Alpine.data("ollamaModels", ollamaModelsComponent);
         Alpine.data("ollamaAdvisor", ollamaAdvisorComponent);

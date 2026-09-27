@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Munkák – PrintForge{% endblock %}
+{% block content %}
+    {# The project URL template (pk=0) is filled client-side by `detailUrl()`. #}
+    <div data-jobs
+         data-project-detail-url="{% url 'projects:detail' pk=0 %}"
+         x-data="jobsPage">
+        <header class="page-head">
+            <div>
+                <h1>Munkák</h1>
+                <p class="muted">Az AI generálási futások, állapotuk és lépés-nyomuk.</p>
+            </div>
+            <div class="page-head-actions">
+                <button type="button"
+                        class="btn"
+                        @click="load()"
+                        :disabled="loading"
+                        x-text="loading ? 'Betöltés…' : 'Frissítés'"></button>
+            </div>
+        </header>
+        <p class="notice-box" x-show="notice" x-cloak x-text="notice"></p>
+        <p class="error-box" x-show="error" x-cloak x-text="error"></p>
+        <div class="form-row is-inline">
+            <label for="jobs-status">Állapot</label>
+            <select id="jobs-status"
+                    class="input"
+                    x-model="statusFilter"
+                    @change="load()">
+                <template x-for="item in statuses" :key="item.value">
+                    <option :value="item.value" x-text="item.label"></option>
+                </template>
+            </select>
+            <span class="badge" x-show="liveCount" x-text="liveCount + ' fut'"></span>
+        </div>
+        <p class="muted" x-show="loading && !runs.length">Betöltés…</p>
+        <p class="muted" x-show="!loading && !error && !runs.length">Még nincs futás.</p>
+        <ul class="job-list" x-show="!loading && runs.length">
+            <template x-for="run in runs" :key="run.id">
+                <li class="job-item" :class="runStatusClass(run.status)">
+                    <div class="job-head">
+                        <span class="status-badge"
+                              :class="runStatusClass(run.status)"
+                              x-text="statusLabel(run)"></span>
+                        <a :href="detailUrl(run.project)"
+                           x-text="displayName(run.project_name, run.project)"></a>
+                        <span class="muted" x-text="'#' + run.id"></span>
+                        <span class="badge"
+                              x-show="run.attempts"
+                              x-text="run.attempts + ' kísérlet'"></span>
+                        <time class="muted" x-text="formatDate(run.created_at)"></time>
+                        <button type="button" class="link-btn" @click="toggleDetail(run)">
+                            <span x-text="isOpen(run) ? 'Részletek bezárása' : 'Részletek'"></span>
+                        </button>
+                    </div>
+                    <p class="job-prompt" x-text="run.user_prompt || '—'"></p>
+                    <p class="error-box" x-show="run.error" x-cloak x-text="run.error"></p>
+                    <template x-if="isOpen(run)">
+                        <div class="job-detail">
+                            <template x-if="(run.history || []).length">
+                                <ol class="job-history">
+                                    <template x-for="(step, index) in run.history" :key="index">
+                                        <li x-text="step"></li>
+                                    </template>
+                                </ol>
+                            </template>
+                            <p class="muted" x-show="!(run.history || []).length">Nincs lépés-nyom.</p>
+                            <template x-if="hasClarifications(run)">
+                                <div class="job-clarifications">
+                                    <h4>Nyitott kérdések</h4>
+                                    <ul>
+                                        <template x-for="(item, index) in run.clarifications" :key="index">
+                                            <li x-text="item.question || item.field || 'Kérdés'"></li>
+                                        </template>
+                                    </ul>
+                                </div>
+                            </template>
+                            <button type="button"
+                                    class="link-btn"
+                                    x-show="!isOpen(run)"
+                                    @click="toggleDetail(run)"></button>
+                        </div>
+                    </template>
+                </li>
+            </template>
+        </ul>
+        <p class="muted" x-show="!loading && hasMore" x-cloak>
+            <button type="button" class="btn" @click="loadMore()">Több betöltése</button>
+        </p>
+    </div>
+{% endblock %}

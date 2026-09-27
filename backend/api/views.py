@@ -723,6 +723,14 @@ class ModelVersionViewSet(
 
 
 class AgentRunViewSet(viewsets.ReadOnlyModelViewSet):
+    """AI workflow runs for the Jobs page (staff see every run of their scope).
+
+    ``?status=`` and ``?project=`` narrow the list so the Jobs page can show one
+    project's history or only the live ones. ``?summary=1`` trims ``state_json``
+    to what the list renders (the step history and the LLM trace) so polling a
+    busy workspace stays cheap; the detail route always returns the full state.
+    """
+
     serializer_class = AgentRunSerializer
     permission_classes = [WorkspaceScopePermission]
 
@@ -730,7 +738,45 @@ class AgentRunViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         if not user.is_authenticated:
             return AgentRun.objects.none()
-        return runs_accessible_to(user).select_related("project")
+        queryset = runs_accessible_to(user).select_related("project")
+        status = (self.request.query_params.get("status") or "").strip().upper()
+        if status:
+            queryset = queryset.filter(status=status)
+        project = (self.request.query_params.get("project") or "").strip()
+        if project.isdigit():
+            queryset = queryset.filter(project_id=int(project))
+        return queryset.order_by("-created_at")
+
+    def list(self, request, *args, **kwargs):
+        """Paginated list; ``?summary=1`` returns a lighter per-run payload."""
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        if (request.query_params.get("summary") or "").strip() in {"1", "true"}:
+            rows = [
+                self._summary_row(row, run) for row, run in zip(serializer.data, page, strict=True)
+            ]
+            return self.get_paginated_response(rows)
+        return self.get_paginated_response(serializer.data)
+
+    @staticmethod
+    def _summary_row(row: dict, run) -> dict:
+        """One list row: the scalars plus the step history, without the traces."""
+        state = dict(run.state_json or {})
+        return {
+            "id": row["id"],
+            "project": row["project"],
+            "status": row["status"],
+            "user_prompt": row["user_prompt"],
+            "attempts": int(state.get("attempts") or 0),
+            "stage": str(state.get("status") or ""),
+            "error": row["error"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "created_at": row["created_at"],
+            "history": list(state.get("history") or []),
+            "clarifications": row["clarifications"],
+        }
 
     @action(detail=True, methods=["post"], url_path="clarifications")
     def clarifications(self, request, pk=None):

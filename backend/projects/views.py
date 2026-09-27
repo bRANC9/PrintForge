@@ -119,3 +119,13 @@ class ProjectPlatesView(LoginRequiredMixin, TemplateView):
         context["filaments"] = list(FilamentProfile.objects.values("id", "name", "material"))
         context["printer_profiles"] = list(PrinterProfile.objects.values("id", "name"))
         return context
+
+
+class JobsListView(LoginRequiredMixin, TemplateView):
+    """Jobs page (``/jobs/``): every AI workflow run of the caller's workspaces.
+
+    A thin shell: the rows, the step history and the traces come from
+    ``/api/v1/agent-runs/`` through Alpine.js, the same as every list page.
+    """
+
+    template_name = "jobs/list.html"

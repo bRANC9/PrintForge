@@ -7,6 +7,7 @@ from django.urls import include, path
 from projects.views import (
     CommunityDetailView,
     CommunityListView,
+    JobsListView,
     SharedProjectDownloadView,
     SharedProjectView,
 )
@@ -18,6 +19,9 @@ urlpatterns = [
     # is the workspace list; items live under /workspaces/<id>/.
     path("", WorkspaceListView.as_view(), name="home"),
     path("workspaces/", include("workspaces.urls")),
+    # Jobs: every AI workflow run of the caller's workspaces (data from
+    # /api/v1/agent-runs/).
+    path("jobs/", JobsListView.as_view(), name="jobs"),
     path("community/", CommunityListView.as_view(), name="community-list"),
     path("community/<int:pk>/", CommunityDetailView.as_view(), name="community-detail"),
     # Public token share links (Phase 7): read-only, no login required.

@@ -93,6 +93,12 @@ _NAV_ITEMS: tuple[dict[str, Any], ...] = (
         "matches": _matcher(url_names=("printers:history",)),
     },
     {
+        "key": "jobs",
+        "label": "Munkák",
+        "url_name": "jobs",
+        "matches": _matcher(url_names=("jobs",)),
+    },
+    {
         "key": "settings",
         "label": "Beállítások",
         "url_name": "configuration:settings",

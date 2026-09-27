@@ -170,6 +170,88 @@ code {
     display: none !important;
 }
 
+/* Jobs page (agent runs) ---------------------------------------------- */
+
+.job-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.job-item {
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+}
+
+.job-item.is-ok {
+    border-left-color: var(--ok);
+}
+
+.job-item.is-danger {
+    border-left-color: var(--danger);
+}
+
+.job-item.is-active {
+    border-left-color: var(--accent);
+}
+
+.job-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.job-head a {
+    color: var(--text);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.job-head a:hover {
+    color: var(--accent);
+}
+
+.job-prompt {
+    margin: 0.35rem 0 0;
+    font-size: 0.9rem;
+    color: var(--text);
+}
+
+.job-detail {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+}
+
+.job-history {
+    margin: 0;
+    padding-left: 1.2rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+}
+
+.job-clarifications {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.job-clarifications h4 {
+    margin: 0 0 0.3rem;
+    font-size: 0.85rem;
+}
+
+.job-clarifications ul {
+    margin: 0;
+    padding-left: 1.2rem;
+}
+
 .visually-hidden {
     position: absolute;
     width: 1px;
