@@ -12,29 +12,73 @@ here can hard-fail a generation.
 
 Keywords are Hungarian **and** English: the UI and the prompts are Hungarian,
 while a model may answer in either language.
+
+Every list is split into **two tiers that are matched differently** (see
+`_mentions`), because a bare substring test is a false-positive machine. The
+measured case: the *correct* answer to "50 mm-es PVC csőre menő adapter, másik
+oldalán 1/4 collos kompresszor csatlakozó" is ``cylinder`` + ``cylinder``, and
+``phi4:14b`` produced exactly that -- but ``press`` matched the bare substring
+inside **kom**presszor, so the guard rejected a right answer and burned a retry.
+The same class of bug: ``sajtó`` in **garáz**sajtó, ``vágó`` in **vágó**lap.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from typing import Any
 
 __all__ = [
+    "HOLE_PREFIX_WORDS",
+    "HOLE_WHOLE_WORDS",
     "HOLE_WORDS",
+    "PREFIX_TIER",
+    "PRESS_PREFIX_WORDS",
+    "PRESS_WHOLE_WORDS",
     "PRESS_WORDS",
+    "SILHOUETTE_PREFIX_WORDS",
+    "SILHOUETTE_WHOLE_WORDS",
     "SILHOUETTE_WORDS",
     "SMALL_ITEM_MAX_MM",
+    "SMALL_ITEM_PREFIX_WORDS",
+    "SMALL_ITEM_WHOLE_WORDS",
     "SMALL_ITEM_WORDS",
     "consistency_issue",
     "consistency_issues",
 ]
 
+#: The two tiers
+#: ----------------
+#:
+#: * ``*_WHOLE_WORDS`` -- matched with a boundary on **both** sides. Every
+#:   English entry is here: an English word inside a Hungarian compound
+#:   (``press`` in *kompresszor*, ``pin`` in *pipe*) is never a shape request.
+#: * ``*_PREFIX_WORDS`` -- matched with a leading boundary only, for the few
+#:   Hungarian stems whose case/plural ending is welded onto them
+#:   (``kinyomó`` -> "kinyomómat", ``furat`` -> "furatokat").
+#:
+#: An entry may only join the prefix tier when **nothing common starts with it
+#: that is not the thing itself** -- otherwise the compound is a false positive
+#: again (``vágó``lap, ``csap``ágy, ``szög``skála). No entry may join it when it
+#: is a word *ending* (``sajtó`` in *garázsajtó*): a leading boundary already
+#: rules those out, but a whole-word entry is the stricter, clearer rule.
+#:
+#: The trade-off is deliberate and asymmetric: a **missed** keyword only leaves
+#: the guard quiet (a box instead of an extrude, a human notices), while a
+#: **wrong** keyword rejects a correct part and burns the bounded retry budget.
+#: So where a plural/case form and a compound collision compete, precision wins
+#: and the inflected form is documented below as an accepted miss.
+
 #: A named outline (not a rectangle). Such a request needs a real polygon.
 #: Minden szórokon a toldalék-utáni toldat (fakonzol/falkonzol) hamis pozitívet
 #: adhat, ezért a hosszabb, egyértelműbb alakokat is felsoroljuk; a `fa` csak
 #: pontosan szóként illeszkedik (lásd `_mentions`).
-SILHOUETTE_WORDS = (
+#:
+#: No silhouette keyword needs the prefix tier: each one is a closed compound
+#: whose Hungarian use is `"<szó> alakú"` with a space, which the whole-word
+#: boundary already accepts.
+SILHOUETTE_WHOLE_WORDS = (
     "karácsonyfa",
     "karácsony fa",
     "fa alakú",
@@ -52,6 +96,7 @@ SILHOUETTE_WORDS = (
     "matrica",
     "sziluett",
     "fa",
+    # English: an English word inside a Hungarian compound is never a shape.
     "tree",
     "star",
     "heart",
@@ -64,57 +109,128 @@ SILHOUETTE_WORDS = (
     "logo",
     "silhouette",
 )
+SILHOUETTE_PREFIX_WORDS: tuple[str, ...] = ()
 
 #: A press / cutter / stamp: a thin extruded wall, never a solid block.
-PRESS_WORDS = (
-    "kinyomó",
-    "kinyomo",
+PRESS_WHOLE_WORDS = (
+    # `sajtó` a toldat: "garázsajtó" (garage door) is a door, not a press.
     "sajtó",
     "matric",
+    # The two stems welded into one word: without it "sajtómatrica" (the actual
+    # Hungarian word for a cookie-press die) loses both whole-word entries.
+    "sajtómatrica",
     "sütiforma",
     "kiszúró",
+    # `vágó` toldatét kezdi: "vágólap" (cutting mat) is a mat, not a cutter.
     "vágó",
     "bélyeg",
     "cutter",
     "press",
     "stamp",
     "cookie",
+    # The one-word spellings the boundary would otherwise lose. The slug
+    # spelling ("cookie_cutter", see `_mentions`) needs no entry: the
+    # separator is normalised to a space, so "cookie" already matches.
+    "cookiecutter",
     "matrix",
     "emboss",
+    "embossed",
+    "embossing",
+)
+#: `kinyomó`/`kinyomo`: the request grammar welds the possessive or the object
+#: suffix onto the stem ("kinyomómat", "kinyomot", "süti kinyomóhoz"), which is
+#: the canonical phrasing -- and nothing but a press starts with the stem.
+PRESS_PREFIX_WORDS = (
+    "kinyomó",
+    "kinyomo",
 )
 
 #: Hole / fastener / hanging features that need a subtraction.
-HOLE_WORDS = (
-    "lyuk",
-    "furat",
+HOLE_WHOLE_WORDS = (
     "lyukas",
-    "csavar",
+    # `csap` a toldatét kezdi: "csapágy" (bearing) is a bearing, not a pin.
     "csap",
+    # `szög` a toldatét kezdi: "szöglet" (angle bracket), "szögskála" (angle
+    # scale), "szöghossz" (cosine) are common workshop words, not nails.
     "szög",
+    # `tüske` a toldatét kezdi: "tüskés" (a spiky texture) is not a pin.
     "tüske",
-    "akasztó",
+    # The inflected forms the boundary match drops. Left to the whole-word tier
+    # each of these is a *miss* -- the request is normal workshop language and
+    # the guard simply stays quiet -- and a miss is far cheaper than the
+    # collision it was bought against. Each one is also a whole word: none is a
+    # prefix of anything, which is what the boundary actually buys here.
+    "szögek",
+    "szögekkel",
+    "csapok",
+    "csappal",
+    "tüskék",
+    "lyukak",
     "hole",
+    "holes",
     "cutout",
+    "cutouts",
     "screw",
+    "screws",
     "pin",
     "dowel",
+    "dowels",
     "hook",
+    "hooks",
+)
+#: Stems whose ending is welded onto the word, and which no common workshop word
+#: *starts* with other than the feature itself:
+#:
+#: * `lyuk` -> "lyukkal" (4 mm **lyukkal**), "lyukak"; the compounds that start
+#:   with it -- lyukas/lyukasztó/lyukfúró -- are holes as well.
+#: * `furat` -> "furatok", "furatokat" (required); furatmérő/furatlemez are a
+#:   hole gauge and a hole plate.
+#: * `csavar` -> "csavarok", "csavarokkal"; csavaranya (nut) is still a screw.
+#: * `akasztó` -> "ruhatartó akasztó", "akasztóval", "falra akasztó"; the
+#:   compounds that start with it (akasztóhorog, akasztókerék) are hooks.
+HOLE_PREFIX_WORDS = (
+    "lyuk",
+    "furat",
+    "csavar",
+    "akasztó",
 )
 
 #: Small wearable items; their parts are never a few hundred millimetres.
-SMALL_ITEM_WORDS = (
-    "fülbevaló",
+SMALL_ITEM_WHOLE_WORDS = (
     "fülbevalók",
     "ékszer",
+    # `gyűrű` a toldatét kezdi: "gyűrűs", "gyűrűtartó" (ring holder) are a holder.
     "gyűrű",
+    # `nyaklánc`/`karkötő` a toldatét kezdi: "nyaklánctartó", "karkötőtartó"
+    # (display stands) are routinely 250 mm and over.
     "nyaklánc",
     "karkötő",
     "fülcse",
     "earring",
+    "earrings",
     "jewellery",
     "jewelry",
     "pendant",
     "stud",
+)
+#: `fülbevaló`: the canonical request is "fülbevalóhoz" / "fülbevalót" (the case
+#: ending is welded onto the stem), and nothing but an earring starts with it.
+SMALL_ITEM_PREFIX_WORDS = ("fülbevaló",)
+
+#: The four guard keyword sets stay importable under their original names as
+#: the **union** of the two tiers, so an old caller or test that iterates
+#: `SILHOUETTE_WORDS` still sees every keyword exactly as before.
+SILHOUETTE_WORDS = SILHOUETTE_WHOLE_WORDS + SILHOUETTE_PREFIX_WORDS
+PRESS_WORDS = PRESS_WHOLE_WORDS + PRESS_PREFIX_WORDS
+HOLE_WORDS = HOLE_WHOLE_WORDS + HOLE_PREFIX_WORDS
+SMALL_ITEM_WORDS = SMALL_ITEM_WHOLE_WORDS + SMALL_ITEM_PREFIX_WORDS
+
+#: Every prefix-tier keyword, which is the only thing `_mentions` needs to know
+#: about the tier split. It is **derived** from the four constants above, so an
+#: entry is declared exactly once and the old two-argument `_mentions(haystack,
+#: words)` call site cannot silently degrade to whole-word-only matching.
+PREFIX_TIER = frozenset(
+    SILHOUETTE_PREFIX_WORDS + PRESS_PREFIX_WORDS + HOLE_PREFIX_WORDS + SMALL_ITEM_PREFIX_WORDS
 )
 
 #: Anything bigger than this is not an earring-scale part.
@@ -128,23 +244,40 @@ def _text(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _mentions(haystack: str, words: Sequence[str]) -> bool:
-    """True when any keyword appears in ``haystack`` as a whole word.
+#: A slug separator is a word character for `\b`, so "cookie_cutter" and
+#: "heart-shaped" would miss a keyword that the same text spells with a space.
+#: Normalising them to spaces makes the boundary mean what it looks like.
+_SEPARATORS = re.compile(r"[-_]+")
 
-    Word-boundary matching (not plain substring) matters for short Hungarian
-    stems: ``fa`` is "tree", but it is also the first two letters of ``fal``
-    (wall) and ``falkonzol``. Long keywords (kinyomó, cutter, extrude) stay
-    substring-matched so inflected compounds still hit.
+
+@lru_cache(maxsize=256)
+def _keyword_pattern(word: str, prefix: bool) -> re.Pattern[str]:
+    """Compile one keyword matcher: ``\\bword\\b``, or ``\\bword`` for a prefix."""
+    body = re.escape(word)
+    return re.compile(rf"\b{body}" if prefix else rf"\b{body}\b")
+
+
+def _mentions(haystack: str, words: Sequence[str]) -> bool:
+    """True when any keyword of ``words`` appears in ``haystack``.
+
+    Two tiers, because one rule cannot be right for both languages:
+
+    * a keyword in `PREFIX_TIER` is matched with a **leading** boundary only --
+      Hungarian welds the case and plural ending onto the stem ("kinyomómat",
+      "furatokat", "csavarok"), so a trailing boundary would drop the most
+      common phrasing of the very request the guard exists for;
+    * every other keyword is matched as a **whole word**. That is what keeps
+      ``fa`` out of *falkonzol*, and -- the measured bug -- ``press`` out of
+      *kompresszor*, ``sajtó`` out of *garázsajtó*, ``vágó`` out of *vágólap*,
+      ``szög`` out of *szögskála*, ``csap`` out of *csapágy*.
+
+    A keyword is a whole word, never a bare substring: the substring form is
+    what let ``press`` reject a correct ``cylinder``+``cylinder`` answer for a
+    PVC adapter, and it is not deterministic -- whether it fires depends only
+    on whether the model happened to emit an ``extrude``.
     """
-    for word in words:
-        if len(word) <= 3:
-            # Short stems need a boundary on BOTH sides: \bfa\b matches "fa" but
-            # not the "fal" inside "falkonzol" (wall bracket).
-            if re.search(rf"\b{re.escape(word)}\b", haystack):
-                return True
-        elif word in haystack:
-            return True
-    return False
+    text = _SEPARATORS.sub(" ", haystack)
+    return any(_keyword_pattern(word, word in PREFIX_TIER).search(text) for word in words)
 
 
 #: A named silhouette needs a real outline: a rectangle, a triangle or a rhombus
@@ -244,6 +377,10 @@ def consistency_issues(prompt: str, specification: Mapping[str, Any] | None) -> 
     fact in the specification. **All** findings are returned (not just the first)
     so the reviser can repair a wrong shape *and* a missing wall in one retry
     instead of one issue per attempt.
+
+    Every keyword test is a two-tier word-boundary match (see `_mentions`), so
+    a Hungarian compound ("kompresszor", "garázsajtó", "vágólap", "falkonzol")
+    cannot trip a guard on a part that is none of those things.
     """
     spec: Mapping[str, Any] = specification if isinstance(specification, Mapping) else {}
     request = _text(prompt)
@@ -251,21 +388,22 @@ def consistency_issues(prompt: str, specification: Mapping[str, Any] | None) -> 
     extrudes = [item for item in _primitives(spec) if str(item.get("type") or "") == "extrude"]
     issues: list[str] = []
 
-    if _mentions(haystack, SILHOUETTE_WORDS) or _mentions(haystack, PRESS_WORDS):
-        if not extrudes:
-            kinds = sorted(
-                {
-                    str(item.get("type") or "?")
-                    for item in _primitives(spec)
-                    if str(item.get("type") or "")
-                }
-            )
-            issues.append(
-                "the request asks for a shaped outline / a thin press, but the specification "
-                f"has no 'extrude' primitive at all (only {', '.join(kinds) or 'nothing'}): a "
-                "box or cylinder cannot express that shape -- use one 'extrude' whose "
-                "'profile' is the real 2D outline"
-            )
+    wants_shape = _mentions(haystack, SILHOUETTE_WORDS) or _mentions(haystack, PRESS_WORDS)
+
+    if wants_shape and not extrudes:
+        kinds = sorted(
+            {
+                str(item.get("type") or "?")
+                for item in _primitives(spec)
+                if str(item.get("type") or "")
+            }
+        )
+        issues.append(
+            "the request asks for a shaped outline / a thin press, but the specification "
+            f"has no 'extrude' primitive at all (only {', '.join(kinds) or 'nothing'}): a "
+            "box or cylinder cannot express that shape -- use one 'extrude' whose "
+            "'profile' is the real 2D outline"
+        )
 
     if _mentions(haystack, SILHOUETTE_WORDS):
         for primitive in extrudes:
