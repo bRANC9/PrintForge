@@ -181,6 +181,151 @@
                         </template>
                     </ul>
                 </section>
+                {% comment %}
+                    Render findings of the selected version -- what the render
+                    itself noticed about the model it just produced.
+
+                    This is the only place `validation_json["warnings"]` is shown,
+                    and it is deliberately OUTSIDE any `x-if`. A prompt-generated
+                    version has no source mesh, so the old home for these strings
+                    (inside the source-mesh panel in designs/viewer.html) mounted
+                    for none of them: the 90 mm cookie press that rendered 195 mm
+                    tall passed every meshcheck, reported "printable", and warned
+                    nobody (docs/model-matrix-test-round.md 2.).
+
+                    Read as one list (`versionWarnings`), split into three boxes by
+                    `warningKind`, which only recognises the sentence openings the
+                    backend producers use -- the numbers stay in the text, nothing
+                    is re-parsed here.
+
+                    Keyed on the selected version like the panels below, so
+                    switching versions cannot leave a previous version's findings
+                    (or acknowledgement) on screen.
+                {% endcomment %}
+                <template x-for="v in [selectedVersion]" :key="'f' + (v ? v.id : 'none')">
+                    <div class="findings" x-show="renderFindingsVisible" x-cloak>
+                        {% comment %}
+                            1. A specification with no geometry at all. Not a note:
+                            the result otherwise looks like a finished part.
+                        {% endcomment %}
+                        <section class="error-box findings-block" x-show="versionGeometryEmpty">
+                            <p class="findings-lead">
+                                <strong>Nem készült geometria</strong>
+                            </p>
+                            <p class="findings-text">
+                                Ennek a verziónak a specifikációjában nincs egyetlen
+                                primitív és nincs egyetlen művelet sem, tehát a
+                                generálás nem rajzolt alakot. Amit látsz, az nem a
+                                kérésedre készült rész.
+                            </p>
+                            <p class="muted findings-text">
+                                A modell a saját tartalék sablonját adta vissza
+                                (telefontartó), nem a kért tárgyat. Írd le újra a
+                                kérést konkrét méretekkel, vagy javítsd a fenti
+                                promptot.
+                            </p>
+                            <div class="findings-actions">
+                                <button type="button"
+                                        class="btn btn-primary btn-small"
+                                        @click="requestCorrection()">Prompt szerkesztése és újragenerálás</button>
+                            </div>
+                        </section>
+                        {% comment %}
+                            2. The rendered part is not the part that was asked
+                            for. A dimension mismatch is not a footnote: it means
+                            the model is the wrong size, so it gets the error
+                            treatment and the three numbers the backend wrote stay
+                            readable.
+                        {% endcomment %}
+                        <section class="error-box findings-block" x-show="criticalWarnings.length">
+                            <p class="findings-lead">
+                                <strong>A renderelt modell nem a kért méretű</strong>
+                            </p>
+                            <p class="findings-text">
+                                A render után a backend összevetette a kész STL
+                                befoglalóját a kért méretekkel. A lenti sorokban a
+                                kért, a tényleges és az eltérés mérete szerepel – a
+                                modell kész és nyomtatható, csak nem azt adja,
+                                amit kértél.
+                            </p>
+                            <ul class="findings-list">
+                                <template x-for="(warning, index) in criticalWarnings" :key="'c' + index">
+                                    <li>
+                                        <code x-text="warning"></code>
+                                    </li>
+                                </template>
+                            </ul>
+                            <div class="findings-actions">
+                                <button type="button"
+                                        class="btn btn-primary btn-small"
+                                        @click="requestCorrection()">Prompt szerkesztése és újragenerálás</button>
+                            </div>
+                        </section>
+                        {% comment %}
+                            3. More than one disconnected body. Genuinely
+                            ambiguous -- two separate prints is often what you
+                            wanted -- so it is a question, not a defect. The
+                            inline confirm is the same pattern the version list
+                            uses for the delete (`confirmDeleteVersionId`), no
+                            dialog.
+                        {% endcomment %}
+                        <section class="warning-box findings-block" x-show="bodySplitWarnings.length">
+                            <template x-if="!bodySplitAcknowledged">
+                                <div>
+                                    <p class="findings-lead">
+                                        <strong>Több különálló test a modellben</strong>
+                                    </p>
+                                    <p class="findings-text">
+                                        Ez <em>nem</em> automatikusan hiba. A lenti
+                                        sorok szerint a háló több, egymáshoz nem
+                                        kapcsolódó testből áll. Ez lehet szándékos
+                                        (két külön nyomtatandó darab), de lehet az is,
+                                        hogy az egyik test lebeg, és csak látszólag
+                                        tartozik a részhez.
+                                    </p>
+                                    <p class="muted findings-text">Szándékosan két darab?</p>
+                                    <ul class="findings-list">
+                                        <template x-for="(warning, index) in bodySplitWarnings" :key="'b' + index">
+                                            <li>
+                                                <code x-text="warning"></code>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                    <div class="findings-actions confirm-inline">
+                                        <button type="button"
+                                                class="btn btn-small btn-primary"
+                                                @click="acknowledgeBodySplit()">Igen, ez a várt</button>
+                                        <button type="button"
+                                                class="btn btn-small"
+                                                @click="requestCorrection()">Nem, ez hiba</button>
+                                    </div>
+                                </div>
+                            </template>
+                            <template x-if="bodySplitAcknowledged">
+                                <p class="muted findings-text">
+                                    Megerősítetted: a több test a modell szándékos
+                                    része, nem hiba.
+                                </p>
+                            </template>
+                        </section>
+                        {% comment %}
+                            4. Everything else: worth reading, not worth a raised
+                            voice.
+                        {% endcomment %}
+                        <section class="warning-box findings-block" x-show="noteWarnings.length">
+                            <p class="findings-lead">
+                                <strong>Ellenőrzési megjegyzések a modellről</strong>
+                            </p>
+                            <ul class="findings-list">
+                                <template x-for="(warning, index) in noteWarnings" :key="'n' + index">
+                                    <li>
+                                        <code x-text="warning"></code>
+                                    </li>
+                                </template>
+                            </ul>
+                        </section>
+                    </div>
+                </template>
                 <form class="prompt-form"
                       enctype="multipart/form-data"
                       @submit.prevent="submitVersion()">

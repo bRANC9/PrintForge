@@ -89,6 +89,18 @@ _MESH_FORMAT = "stl"
 _UNIT_SCALE = 1e-12
 
 
+def _is_degraded(action: str) -> bool:
+    """True when a repair step did not actually happen.
+
+    :meth:`_apply_repair` records every step as a short phrase: ``"fix_normals"``
+    when it ran, ``"fix_normals skipped (ModuleNotFoundError)"`` when it could
+    not. Only the second kind is worth telling the user about -- a diffusion mesh
+    routinely ships 200k+ triangles, so a silently skipped decimation means a
+    full-resolution STL in the slicer, the 3MF and the browser.
+    """
+    return "skipped" in action
+
+
 @dataclass(frozen=True)
 class MeshTransform:
     """Placement of the source mesh on the build plate."""
@@ -273,6 +285,11 @@ class MeshCADBackend(CADBackend):
             ),
             mesh_bytes=payload,
             mesh_format=_MESH_FORMAT,
+            # A repair step that could not be performed is recorded here rather
+            # than in the manifest only: the manifest is never persisted for a
+            # mesh render (produces_source_code is False), so anything left in it
+            # is invisible to the API and the UI.
+            warnings=tuple(f"mesh repair: {action}" for action in actions if _is_degraded(action)),
         )
 
     def validate(self, model: GeneratedModel) -> list[str]:

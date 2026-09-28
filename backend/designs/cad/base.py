@@ -60,6 +60,13 @@ class GeneratedModel:
     mesh_bytes: bytes | None = None
     #: Lowercase extension of ``mesh_bytes`` ("stl", "obj", "glb") or "".
     mesh_format: str = ""
+    #: What the generation had to report about itself: a primitive it skipped, a
+    #: fallback it synthesised, a repair it could not perform. These belong on the
+    #: model rather than on a separate call, because the generate step is not free
+    #: -- a mesh backend reads, transforms, repairs and decimates its source, so
+    #: asking it a second time for the same answer would do that work twice and
+    #: throw the first result away.
+    warnings: tuple[str, ...] = ()
 
 
 class CADBackend(ABC):
@@ -96,12 +103,12 @@ class CADBackend(ABC):
         """Export ``model`` to ``format`` and return the raw bytes."""
 
     def build_model(self, specification: dict[str, Any]) -> GeneratedModel:
-        """Run :meth:`generate` and wrap the result in a :class:`GeneratedModel`.
+        """Run the generate step and wrap the result in a :class:`GeneratedModel`.
 
-        The default is the parametric path: the returned string is stored as
-        :attr:`GeneratedModel.scad_source`. A mesh backend overrides this to
-        attach :attr:`GeneratedModel.mesh_bytes` while still returning its
-        manifest from :meth:`generate`. This is a concrete helper, never
-        abstract, so existing backends and duck-typed test doubles keep working.
+        This is the single entry point the pipeline uses, so a backend that
+        learns something while generating reports it on
+        :attr:`GeneratedModel.warnings` here. The default is the parametric path
+        with nothing to report; :meth:`generate` remains abstract and unchanged so
+        an existing backend keeps working untouched.
         """
         return GeneratedModel(specification=specification, scad_source=self.generate(specification))

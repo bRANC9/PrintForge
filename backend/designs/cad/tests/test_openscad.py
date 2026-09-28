@@ -131,6 +131,155 @@ def test_object_name_is_sanitised():
 
 
 # ---------------------------------------------------------------------------
+# build_model: the generate step's own warnings
+# ---------------------------------------------------------------------------
+#
+# ``render_scad`` records what the weak-model tolerance had to skip or
+# synthesise, but until ``generate_reported`` existed those notes only ever
+# existed as ``// warning:`` comments inside the SCAD text -- which the UI never
+# sees. A version that quietly fell back to a synthesised box therefore looked
+# finished. The hook returns them alongside the source so
+# ``designs.cad.pipeline.render_version`` can put them in
+# ``validation_json["warnings"]``.
+#
+# A check that fires on good output is worse than no check, so the third case
+# (a valid specification) is pinned as carefully as the two that produce notes.
+
+#: A non-holder object with a declared envelope, so the box fallback is legal.
+WIDGET = {
+    "object": "widget",
+    "dimensions": {"width": 40.0, "height": 60.0, "thickness": 10.0},
+}
+
+#: The exact note for an empty ``primitives`` list on a non-holder object.
+SYNTHESIS_WARNING = "no usable primitives; synthesized a box from 'dimensions'"
+
+#: The exact note for one unusable primitive, as the parse error renders it.
+SKIPPED_WARNING = (
+    "skipped primitives[0]: primitives[0].type: must be one of "
+    "['box', 'cylinder', 'sphere', 'cone', 'extrude'] (got 'torus')"
+)
+
+
+def test_build_model_reports_the_synthesised_box_note():
+    """``primitives: []`` -> a box from ``dimensions``, and it says so."""
+    model = OpenSCADBackend().build_model({**WIDGET, "primitives": []})
+
+    assert list(model.warnings) == [SYNTHESIS_WARNING]
+    # The fallback is real, not just reported: the box is in the source.
+    assert "primitive" in model.scad_source
+    # The same note is still in the SCAD text, so the artifact stays auditable.
+    assert SYNTHESIS_WARNING in model.scad_source
+
+
+def test_build_model_reports_the_skipped_primitive_and_the_fallback():
+    """An unknown ``type`` is skipped, then the empty result is synthesised.
+
+    Both notes travel, in the order the parse produced them: the skip first
+    (the real problem), the fallback second (its consequence). Only reporting the
+    fallback would hide *why* the part is not what was asked for.
+    """
+    model = OpenSCADBackend().build_model(
+        {**WIDGET, "primitives": [{"type": "torus", "role": "add", "major_radius": 20.0}]}
+    )
+
+    assert list(model.warnings) == [SKIPPED_WARNING, SYNTHESIS_WARNING]
+    # The unusable primitive is gone from the geometry (it survives only inside
+    # the ``// warning:`` comment) and the synthesised box took its place.
+    assert "torus(" not in model.scad_source
+    assert "cube(" in model.scad_source
+
+
+def test_build_model_is_silent_for_a_valid_specification():
+    """Good output must stay silent: a warning that always fires is noise."""
+    valid = {
+        **WIDGET,
+        "primitives": [
+            {
+                "type": "box",
+                "role": "add",
+                "width": 40.0,
+                "depth": 60.0,
+                "height": 10.0,
+                "position": {"x": 0.0, "y": 0.0, "z": 5.0},
+            }
+        ],
+    }
+
+    model = OpenSCADBackend().build_model(valid)
+
+    assert model.warnings == ()
+    assert "warning:" not in model.scad_source
+
+
+def test_build_model_renders_exactly_what_generate_renders():
+    """The source it persists is the one it reports against.
+
+    ``render_version`` takes the source and the warnings from the *same*
+    ``build_model`` call. If that call ever started rendering differently from
+    ``generate``, a part would ship that contradicts its own reported warnings.
+    """
+    backend = OpenSCADBackend()
+    for spec in (SPEC, {**WIDGET, "primitives": []}, {**WIDGET, "primitives": []}):
+        assert backend.build_model(spec).scad_source == backend.generate(spec)
+
+
+def test_build_model_runs_the_generate_step_exactly_once():
+    """One call, because the generate step is not free.
+
+    A mesh backend reads its source from storage, transforms, repairs and
+    decimates it. A pipeline that asked the backend twice -- once for the source
+    and once for the warnings -- would do that work twice and throw the first
+    result away, roughly doubling the time of a large mesh import. The notes
+    therefore ride on the model rather than on a second call.
+    """
+    calls = []
+
+    class Counting(CADBackend):
+        name = "counting"
+
+        def generate(self, specification):
+            calls.append(1)
+            return "// source"
+
+        def validate(self, model):
+            return []
+
+        def export(self, model, format):
+            return b""
+
+    Counting().build_model({"anything": True})
+
+    assert len(calls) == 1
+
+
+def test_the_default_build_model_keeps_the_plain_generate_contract():
+    """A backend that has nothing to report is unchanged by the warnings field.
+
+    ``GeneratedModel.warnings`` defaults to empty and the base ``build_model`` is
+    concrete, not abstract, so an existing or duck-typed backend keeps working
+    and simply reports nothing.
+    """
+
+    class Minimal(CADBackend):
+        name = "minimal"
+
+        def generate(self, specification):
+            return "// minimal source"
+
+        def validate(self, model):
+            return []
+
+        def export(self, model, format):
+            return b""
+
+    model = Minimal().build_model({"anything": True})
+
+    assert model.scad_source == "// minimal source"
+    assert model.warnings == ()
+
+
+# ---------------------------------------------------------------------------
 # validate / safety scan
 # ---------------------------------------------------------------------------
 

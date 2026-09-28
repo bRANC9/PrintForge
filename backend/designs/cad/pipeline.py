@@ -28,18 +28,27 @@ relative paths are stored on ``scad_file`` / ``stl_file``. Which artifacts are
 written comes from ``CADBackend.produced_artifacts`` and the
 :data:`ARTIFACT_FILENAMES` / :data:`ARTIFACT_TARGETS` maps below, which must stay
 in sync with ``designs.services.ARTIFACT_KINDS`` and its ``_ARTIFACT_FIELDS``.
+
+After a successful export the STL is measured **once** from the bytes that were
+just written (:func:`dimension_warnings`) and any finding is appended to
+``warnings`` -- the same advisory list ``designs.services`` fills with the
+meshcheck findings of an imported mesh, so the API and the UI already carry it.
+``warnings`` is only created when there is something to say: a clean part keeps
+the exact ``validation_json`` shape it had before this check existed.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.utils import timezone
 
 from .base import CADBackend, CADError, GeneratedModel
+from .dimensions import dimension_issues
 from .mesh import MeshCADBackend
 from .openscad import OpenSCADBackend
 
@@ -53,6 +62,7 @@ __all__ = [
     "CAD_BACKEND_ALIASES",
     "CADValidationFailed",
     "DEFAULT_CAD_BACKEND",
+    "dimension_warnings",
     "get_backend",
     "get_storage",
     "render_version",
@@ -191,9 +201,10 @@ def _persist_status(
 def _build_model(backend: CADBackend, specification: dict[str, Any]) -> GeneratedModel:
     """Run the backend's generate step and wrap the result in a ``GeneratedModel``.
 
-    ``CADBackend.build_model`` is the parametric default; the ``getattr`` keeps
-    duck-typed backends (test doubles that only implement the ABC methods)
-    working exactly as before.
+    ``CADBackend.build_model`` is the single entry point: the backend reports
+    what it had to skip or synthesise on ``GeneratedModel.warnings``, so this must
+    be called exactly once per render. The ``getattr`` keeps duck-typed backends
+    (test doubles that only implement the ABC methods) working as before.
     """
     builder = getattr(backend, "build_model", None)
     if callable(builder):
@@ -224,6 +235,79 @@ def _artifact_path(version: ModelVersion, kind: str) -> str:
     return model_artifact_path(version, ARTIFACT_FILENAMES[kind])
 
 
+def dimension_warnings(payload: bytes, dimensions: Mapping[str, Any] | None) -> list[str]:
+    """Non-blocking dimension findings for an **already exported** STL.
+
+    ``payload`` is the exact byte string the backend just returned from
+    ``export`` (no second export, no storage round-trip, no shell call) and
+    ``dimensions`` is the specification's ``dimensions`` mapping -- or ``None`` /
+    a partial mapping, in which case only the build-plate check applies.
+
+    This is the byte-level half of :func:`designs.cad.dimensions.dimension_issues`
+    and the single reusable entry point for it: :func:`render_version` calls it
+    after the export, and the agent path (``agents.tasks._persist_version``, which
+    exports through the graph's Validator node instead of through this module)
+    calls the same function with its own ``stl_bytes``, so both render paths get
+    an identical verdict.
+
+    Never raises and never blocks. ``trimesh`` / ``numpy`` are imported lazily
+    (the :mod:`designs.cad.meshcheck` pattern) so a missing dependency or an
+    unparseable payload yields no findings instead of failing a render that
+    already produced a valid artifact: this is a warning about a *good* mesh, so
+    it must not be the reason a job fails.
+    """
+    if not payload:
+        return []
+    try:
+        import numpy as np
+
+        from .meshcheck import load_mesh
+
+        bounds = np.asarray(load_mesh(bytes(payload), "stl").bounds, dtype=np.float64)
+    except Exception:  # noqa: BLE001 - an unmeasurable mesh is not a render failure
+        logger.warning("Could not measure the exported STL; skipping the dimension check")
+        logger.debug("dimension check detail", exc_info=True)
+        return []
+    if bounds.shape != (2, 3):  # pragma: no cover - trimesh always returns a 2x3 box
+        return []
+    (low_x, low_y, low_z), (high_x, high_y, high_z) = bounds
+    extents = (float(high_x - low_x), float(high_y - low_y), float(high_z - low_z))
+    return dimension_issues(extents, dimensions, min_z_mm=float(low_z))
+
+
+def _merge_warnings(existing: Any, findings: list[str]) -> list[str]:
+    """``validation_json["warnings"]`` after appending ``findings``.
+
+    Appended, never replaced: the key is shared with the mesh-import findings
+    ``designs.services`` records (``_persist_validation(..., {"warnings": ...})``)
+    and a re-render only rewrites the status/stage keys, so both kinds of finding
+    have to survive together. De-duplicated in place because a re-render of the
+    same version would otherwise stack identical strings.
+    """
+    merged = [str(warning) for warning in (existing or [])]
+    for finding in findings:
+        if finding not in merged:
+            merged.append(finding)
+    return merged
+
+
+def _dimension_findings(payload: bytes, specification: Mapping[str, Any]) -> list[str]:
+    """:func:`dimension_warnings` for a render, wrapped so it cannot fail the job.
+
+    The check is a *diagnostic on a mesh that already rendered*, so it runs after
+    the export and outside the render's ``try``: an exception here must not turn a
+    finished render into a failed one, and above all must not leave the version
+    stuck in ``status="running"`` for the API to poll forever (terv.md 9.
+    fejezet). Anything unexpected is logged and the render finishes clean.
+    """
+    try:
+        dimensions = specification.get("dimensions") if isinstance(specification, Mapping) else None
+        return dimension_warnings(payload, dimensions)
+    except Exception:  # noqa: BLE001 - a broken check is not a render failure
+        logger.warning("Dimension check failed; continuing without it", exc_info=True)
+        return []
+
+
 def render_version(
     version: ModelVersion,
     *,
@@ -234,9 +318,12 @@ def render_version(
 
     Writes one file per ``CADBackend.produced_artifacts`` entry through
     :func:`files.services.get_storage` and records the relative paths both on the
-    model fields and in ``validation_json``. Returns a small result dict. On
-    failure the error is persisted to ``validation_json`` and the exception is
-    re-raised so Celery can mark the task failed / retry.
+    model fields and in ``validation_json``. The exported STL is then measured
+    against the requested ``dimensions`` (:func:`dimension_warnings`) and any
+    finding is appended to ``validation_json["warnings"]``; the job still finishes
+    ``done``, because an envelope mismatch is a warning, not a failure. Returns a
+    small result dict. On failure the error is persisted to ``validation_json``
+    and the exception is re-raised so Celery can mark the task failed / retry.
     """
     backend = backend or get_backend()
     storage = storage or get_storage()
@@ -313,6 +400,18 @@ def render_version(
             status_fields[size_key] = len(payloads[kind])
             result_fields[size_key] = len(payloads[kind])
     status_fields["completed_at"] = timezone.now().isoformat()
+    # Measured *after* the try/except on purpose: the check runs on a render that
+    # already produced a valid STL, so it must never be able to turn a success
+    # into a persisted failure (nor leave the version stuck in "running"). Only
+    # the bytes export() just returned are read -- no second export.
+    findings = [str(w) for w in (getattr(model, "warnings", ()) or ())]
+    for item in _dimension_findings(payloads.get("stl", b""), specification):
+        if item not in findings:
+            findings.append(item)
+    if findings:
+        status_fields["warnings"] = _merge_warnings(
+            (version.validation_json or {}).get("warnings"), findings
+        )
     _persist_status(version, status_fields, update_fields=[*update_fields, "validation_json"])
 
     return {

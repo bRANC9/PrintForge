@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -11,7 +12,7 @@ from django.db import models
 from designs import tasks
 from designs.cad.base import GeneratedModel
 from designs.cad.mesh import MeshCADBackend
-from designs.cad.openscad import OpenSCADBackend
+from designs.cad.openscad import SANDBOX_FLAGS, OpenSCADBackend
 from designs.cad.pipeline import (
     ARTIFACT_FILENAMES,
     ARTIFACT_SIZE_KEYS,
@@ -612,3 +613,586 @@ def test_mesh_backend_is_selected_from_the_registry(mesh_version, monkeypatch):
     assert result["status"] == "done"
     assert storage.exists(version.stl_file.name)
     assert not version.scad_file.name
+
+
+# ---------------------------------------------------------------------------
+# Post-render dimension check
+# ---------------------------------------------------------------------------
+#
+# ``designs.cad.dimensions`` compares the *rendered* bounding box with the
+# requested ``dimensions`` and appends what it finds to
+# ``validation_json["warnings"]`` -- advisory, never blocking. The unit tests
+# live in ``test_dimensions.py``; these cover the wiring, the key-set contract
+# and, at the bottom, the real OpenSCAD sandbox.
+
+
+def _trimesh_stl(box: tuple[float, float, float], *, lift: float | None = None) -> bytes:
+    """A real, parseable STL of a box, resting on the plate by default."""
+    import trimesh
+
+    mesh = trimesh.creation.box(extents=box)
+    mesh.apply_translation([0.0, 0.0, (lift if lift is not None else box[2] / 2)])
+    return mesh.export(file_type="stl")
+
+
+class StlBackend(FakeBackend):
+    """``FakeBackend`` that exports a real, measurable STL."""
+
+    payload = b""
+
+    def export(self, model: GeneratedModel, format: str) -> bytes:
+        self.exported_format = format
+        return self.payload
+
+
+@pytest.fixture
+def sized_version(version):
+    """``version`` with a declared 40 x 60 x 10 mm envelope (a device, not a part)."""
+    version.specification_json = {
+        **SPEC,
+        "dimensions": {"width": 40.0, "height": 60.0, "thickness": 10.0},
+    }
+    version.save(update_fields=["specification_json"])
+    return version
+
+
+def test_render_version_appends_a_dimension_warning(sized_version, tmp_path):
+    backend = StlBackend()
+    backend.payload = _trimesh_stl((100.0, 60.0, 10.0))
+
+    result = render_version(sized_version, backend=backend, storage=LocalStorage(root=tmp_path))
+
+    sized_version.refresh_from_db()
+    assert result["status"] == "done"  # advisory: the job still succeeds
+    assert sized_version.validation_json["status"] == "done"
+    assert sized_version.validation_json["errors"] == []
+    assert sized_version.validation_json["warnings"] == [
+        "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% "
+        "(tolerance +-25%)"
+    ]
+
+
+def test_render_version_reports_a_floating_part(sized_version, tmp_path):
+    """``min Z != 0`` is reported even when every dimension is right."""
+    backend = StlBackend()
+    backend.payload = _trimesh_stl((40.0, 60.0, 10.0), lift=10.0)
+
+    render_version(sized_version, backend=backend, storage=LocalStorage(root=tmp_path))
+
+    sized_version.refresh_from_db()
+    assert sized_version.validation_json["warnings"] == [
+        "rendered part starts at Z=5.000mm; the rest of the app assumes the part "
+        "rests on the build plate (min Z = 0)"
+    ]
+
+
+def test_a_correct_part_adds_no_warnings_key(sized_version, tmp_path):
+    """The documented ``validation_json`` shape must survive a *measurable* STL.
+
+    ``test_openscad_generate_produces_untouched_validation_json_keys`` pins the
+    key set for a backend whose STL cannot be parsed at all. This is the
+    stronger version of the same contract: the check runs, finds nothing, and
+    still leaves ``validation_json`` byte-identical -- no empty ``warnings`` list
+    invented for every good render.
+    """
+    backend = StlBackend()
+    backend.payload = _trimesh_stl((40.0, 60.0, 10.0))
+
+    result = render_version(sized_version, backend=backend, storage=LocalStorage(root=tmp_path))
+
+    sized_version.refresh_from_db()
+    assert "warnings" not in sized_version.validation_json
+    assert set(sized_version.validation_json) == {
+        "status",
+        "stage",
+        "errors",
+        "scad_file",
+        "stl_file",
+        "stl_bytes",
+        "started_at",
+        "completed_at",
+    }
+    assert set(result) == {"version_id", "status", "scad_file", "stl_file", "stl_bytes"}
+
+
+def test_a_broken_dimension_check_cannot_fail_or_stall_a_render(
+    sized_version, tmp_path, monkeypatch
+):
+    """The check runs on a render that already produced a valid artifact.
+
+    A diagnostic must not be able to turn a finished render into a failed one --
+    and, worse, into one stuck in ``status="running"``, which is what the API
+    would then poll forever.
+    """
+    monkeypatch.setattr(
+        "designs.cad.pipeline.dimension_warnings",
+        lambda payload, dimensions: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    backend = StlBackend()
+    backend.payload = _trimesh_stl((100.0, 60.0, 10.0))
+    storage = LocalStorage(root=tmp_path)
+
+    result = render_version(sized_version, backend=backend, storage=storage)
+
+    sized_version.refresh_from_db()
+    assert result["status"] == "done"
+    assert sized_version.validation_json["status"] == "done"
+    assert sized_version.validation_json["errors"] == []
+    assert "warnings" not in sized_version.validation_json
+    assert storage.exists(sized_version.stl_file.name)
+
+
+def test_dimension_warnings_is_given_the_exported_bytes_and_the_dimensions(
+    sized_version, tmp_path, monkeypatch
+):
+    """The seam the agent path is expected to reuse (see the module docstring)."""
+    seen: list[tuple[bytes, object]] = []
+
+    def spy(payload, dimensions):  # noqa: ANN001
+        seen.append((payload, dimensions))
+        return []
+
+    monkeypatch.setattr("designs.cad.pipeline.dimension_warnings", spy)
+    backend = StlBackend()
+    backend.payload = _trimesh_stl((100.0, 60.0, 10.0))
+
+    render_version(sized_version, backend=backend, storage=LocalStorage(root=tmp_path))
+
+    assert seen == [(backend.payload, sized_version.specification_json["dimensions"])]
+
+
+def test_an_unparseable_stl_is_not_a_render_failure(version, tmp_path):
+    """``FAKE_STL`` cannot be measured: no findings, no key, no failure."""
+    render_version(version, backend=FakeBackend(), storage=LocalStorage(root=tmp_path))
+
+    version.refresh_from_db()
+    assert "warnings" not in version.validation_json
+    assert version.validation_json["status"] == "done"
+
+
+def test_mesh_import_warnings_are_kept_when_the_check_appends(mesh_version):
+    """``warnings`` is shared with ``designs.services``; append, never replace."""
+    version, storage = mesh_version
+    version.validation_json = {"status": "done", "warnings": ["mesh has 2 disconnected bodies"]}
+    version.save(update_fields=["validation_json"])
+
+    render_version(version, backend=MeshCADBackend(storage=storage), storage=storage)
+
+    version.refresh_from_db()
+    # The mesh specification has no ``dimensions`` and ``rest_on_plate`` put the
+    # part on Z = 0, so only the pre-existing finding survives.
+    assert version.validation_json["warnings"] == ["mesh has 2 disconnected bodies"]
+
+
+def test_re_rendering_does_not_stack_identical_warnings(sized_version, tmp_path):
+    backend = StlBackend()
+    backend.payload = _trimesh_stl((100.0, 60.0, 10.0))
+
+    storage = LocalStorage(root=tmp_path)
+    render_version(sized_version, backend=backend, storage=storage)
+    render_version(sized_version, backend=backend, storage=storage)
+
+    sized_version.refresh_from_db()
+    assert len(sized_version.validation_json["warnings"]) == 1
+
+
+def test_a_mesh_render_gets_the_build_plate_check_without_dimensions(mesh_version):
+    """A mesh specification has no ``dimensions``: only the plate check is possible."""
+    import trimesh
+
+    version, storage = mesh_version
+    version.specification_json = {
+        "generator": "mesh",
+        "mesh": {"source": "reference_uploads/1/mesh.glb"},
+        "transform": {"scale_mm": 120.0, "rest_on_plate": False, "center_xy": True},
+    }
+    version.save(update_fields=["specification_json"])
+    source = "reference_uploads/1/floating.glb"
+    box = trimesh.creation.box(extents=(1.0, 0.5, 0.25))
+    box.apply_translation([0.0, 0.0, 1.0])
+    storage.write_bytes(source, box.export(file_type="glb"))
+
+    render_version(version, backend=MeshCADBackend(storage=storage), storage=storage)
+
+    version.refresh_from_db()
+    warnings = version.validation_json["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("rendered part starts at Z=")
+
+
+# ---------------------------------------------------------------------------
+# The generate step's own warnings (```GeneratedModel.warnings``)
+# ---------------------------------------------------------------------------
+#
+# ``render_scad`` already knew what it had to skip or synthesise, but the note
+# only ever became a ``// warning:`` comment inside the SCAD text -- invisible to
+# the API and the UI, so a version that quietly fell back to a synthesised box
+# looked finished. ``OpenS`GeneratedModel.warnings`` returns those notes
+# alongside the source and ``render_version`` merges them into the same
+# ``validation_json["warnings"]`` the dimension check and the mesh import use.
+#
+# These tests run the *real* generate step and stub only the sandboxed export,
+# which is what keeps them out of the docker skip below: the warnings under test
+# are produced by ``parse_primitives`` before any CLI call happens.
+
+
+class UncompiledOpenSCADBackend(OpenSCADBackend):
+    """The real OpenSCAD generate/validate, with only the CLI export replaced.
+
+    Everything about the warnings travels unchanged -- ``generate_reported`` is
+    the shipped implementation -- and ``export`` hands back a real STL so the
+    pipeline still writes a measurable artifact without a container.
+    """
+
+    payload = b""
+
+    def export(self, model, format):
+        return self.payload
+
+
+def _render_spec(version, specification, storage, *, extents=(40.0, 60.0, 10.0)):
+    """Render ``version`` with the real OpenSCAD generate step and a fixed STL."""
+    version.specification_json = specification
+    version.save(update_fields=["specification_json"])
+    backend = UncompiledOpenSCADBackend()
+    backend.payload = _trimesh_stl(extents)
+    render_version(version, backend=backend, storage=storage)
+    version.refresh_from_db()
+    return version.validation_json
+
+
+#: A non-holder object with a declared envelope, so the box fallback is legal.
+WIDGET = {
+    "object": "widget",
+    "dimensions": {"width": 40.0, "height": 60.0, "thickness": 10.0},
+}
+
+#: The exact notes the generate step collects, in the order it collects them.
+SYNTHESIS_WARNING = "no usable primitives; synthesized a box from 'dimensions'"
+SKIPPED_WARNING = (
+    "skipped primitives[0]: primitives[0].type: must be one of "
+    "['box', 'cylinder', 'sphere', 'cone', 'extrude'] (got 'torus')"
+)
+
+
+def test_render_version_records_the_generate_step_warnings(version, tmp_path):
+    """A silent synthesised-box fallback becomes a visible advisory.
+
+    Without this the only record that the model produced no usable geometry is
+    a comment inside a ``.scad`` file the UI never opens.
+    """
+    validation = _render_spec(version, {**WIDGET, "primitives": []}, LocalStorage(root=tmp_path))
+
+    assert validation["status"] == "done"
+    assert validation["errors"] == []
+    assert validation["warnings"] == [SYNTHESIS_WARNING]
+
+
+def test_render_version_records_a_skipped_primitive_and_the_fallback(version, tmp_path):
+    """Both notes travel, in order: the cause, then its consequence."""
+    validation = _render_spec(
+        version,
+        {**WIDGET, "primitives": [{"type": "torus", "role": "add", "major_radius": 20.0}]},
+        LocalStorage(root=tmp_path),
+    )
+
+    assert validation["warnings"] == [SKIPPED_WARNING, SYNTHESIS_WARNING]
+
+
+def test_a_valid_primitive_spec_adds_no_warnings_key(version, tmp_path):
+    """Good output must stay silent, in the merged key as much as in the hook.
+
+    The synthesised box is exactly ``width x height x thickness``, so a spec with
+    a matching primitive produces no generate note and no dimension finding --
+    and ``validation_json`` keeps its documented shape with no ``warnings`` key.
+    """
+    validation = _render_spec(
+        version,
+        {
+            **WIDGET,
+            "primitives": [
+                {
+                    "type": "box",
+                    "role": "add",
+                    "width": 40.0,
+                    "depth": 60.0,
+                    "height": 10.0,
+                    "position": {"x": 0.0, "y": 0.0, "z": 5.0},
+                }
+            ],
+        },
+        LocalStorage(root=tmp_path),
+    )
+
+    assert "warnings" not in validation
+    assert set(validation) == {
+        "status",
+        "stage",
+        "errors",
+        "scad_file",
+        "stl_file",
+        "stl_bytes",
+        "started_at",
+        "completed_at",
+    }
+
+
+def test_generate_and_dimension_warnings_survive_in_the_same_list(version, tmp_path):
+    """Two independent producers, one key: neither may replace the other.
+
+    The generate step reports what it skipped; the dimension check reports what
+    the export measured. Here both fire -- an unusable primitive *and* a mesh
+    that does not match the declared envelope -- so a merge that lost either
+    half would ship a version with an incomplete story.
+    """
+    # The fallback box is built from ``dimensions``, yet the exported mesh is
+    # 100 mm wide: exactly the "synthesised something, and it is not what was
+    # asked for" case both checks exist for.
+    validation = _render_spec(
+        version,
+        {**WIDGET, "primitives": [{"type": "torus", "role": "add", "major_radius": 20.0}]},
+        LocalStorage(root=tmp_path),
+        extents=(100.0, 60.0, 10.0),
+    )
+
+    assert validation["warnings"] == [
+        SKIPPED_WARNING,
+        SYNTHESIS_WARNING,
+        "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% "
+        "(tolerance +-25%)",
+    ]
+
+
+def test_a_backend_whose_model_carries_no_warnings_still_renders(version, tmp_path):
+    """Duck-typed backends keep working: ``GeneratedModel.warnings`` is optional.
+
+    The pipeline reads the notes with ``getattr(model, "warnings", ())``, so a
+    backend that builds a model object of its own -- an external integration, a
+    test double written before the field existed -- renders exactly as it did
+    before. Reading the attribute unconditionally would break every such backend.
+    """
+
+    class BareModel:
+        def __init__(self, specification, scad_source):
+            self.specification = specification
+            self.scad_source = scad_source
+
+    class MinimalBackend:
+        name = "minimal"
+
+        def build_model(self, specification):
+            return BareModel(specification, FAKE_SCAD.decode())
+
+        def generate(self, specification):
+            return FAKE_SCAD.decode()
+
+        def validate(self, model):
+            return []
+
+        def export(self, model, format):
+            return FAKE_STL
+
+    assert not hasattr(BareModel("s", "src"), "warnings")
+
+    storage = LocalStorage(root=tmp_path)
+    result = render_version(version, backend=MinimalBackend(), storage=storage)
+
+    version.refresh_from_db()
+    assert result["status"] == "done"
+    assert version.validation_json["status"] == "done"
+    assert "warnings" not in version.validation_json
+    assert storage.exists(version.stl_file.name)
+
+
+# ---------------------------------------------------------------------------
+# The real OpenSCAD sandbox
+# ---------------------------------------------------------------------------
+#
+# Everything above fakes the mesh. These two render through the *real*
+# ``OpenSCADBackend`` in ``docker`` mode (the terv.md 20. fejezet sandbox), which
+# is the only way to prove the numbers come from a genuine CGAL mesh.
+#
+# They are skipped when there is no container runtime, no sandbox image, or the
+# runtime cannot bind-mount the directory the backend writes the job into. That
+# last case is a *harness* property, not a product behaviour: the sandbox is
+# driven with ``-v <job-dir>/in:/work`` (``OpenSCADBackend.build_args``), so the
+# runtime has to be able to see the path. On WSL the daemon is Windows-hosted and
+# cannot see a WSL path, so ``TMPDIR`` has to point at a Windows-visible one
+# (``/mnt/c/...``); on a native Linux host the default ``/tmp`` is fine. Without
+# that, OpenSCAD exits 0 having written into a directory nobody else can see and
+# the backend correctly reports "produced no output file".
+
+
+def _docker_sandbox_available() -> tuple[bool, str]:
+    import shutil
+    import subprocess
+
+    binary = shutil.which("docker")
+    if binary is None:
+        return False, "docker is not installed"
+    image = OpenSCADBackend(mode="docker").config.image
+    probe = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+        [binary, "image", "inspect", image],
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return False, f"sandbox image {image} is missing"
+    return _runtime_can_mount(binary, image)
+
+
+def _runtime_can_mount(binary: str, image: str) -> tuple[bool, str]:
+    """Can the runtime bind-mount the directory the backend will render into?
+
+    Probed with the *real* invocation shape -- the sandbox flags and the same two
+    mounts ``OpenSCADBackend.build_args`` uses -- and with a ``touch`` instead of
+    a render, because the failure mode is silent: a runtime that cannot see the
+    path mounts something else (or nothing), the container still exits 0, and
+    OpenSCAD reports ``Can't open file "/out/model.stl" for export``. The marker
+    has to show up **on this host** for the mount to count. Measured on this
+    box: a WSL ``TMPDIR=/tmp`` leaves the container with the image's own ``/out``
+    (``touch: Permission denied``), while ``TMPDIR=/mnt/c/...`` really mounts.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="printforge-mount-probe-") as job:
+        in_dir, out_dir = Path(job) / "in", Path(job) / "out"
+        in_dir.mkdir()
+        out_dir.mkdir()
+        marker = out_dir / "probe"
+        completed = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+            [
+                binary,
+                "run",
+                "--rm",
+                *SANDBOX_FLAGS,
+                "--entrypoint",
+                "/bin/sh",
+                "-v",
+                f"{in_dir}:/work:ro",
+                "-v",
+                f"{out_dir}:/out:rw",
+                image,
+                "-c",
+                "touch /out/probe",
+            ],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        mounted = marker.exists()
+        if not mounted:
+            return False, (
+                f"the container runtime cannot bind-mount {tempfile.gettempdir()} "
+                f"(exit {completed.returncode}: "
+                f"{(completed.stderr or completed.stdout or '').strip()[:200]}); point "
+                "TMPDIR at a path the runtime can see (on WSL: /mnt/c/...)"
+            )
+    return True, ""
+
+
+_DOCKER, _DOCKER_REASON = _docker_sandbox_available()
+needs_docker = pytest.mark.skipif(not _DOCKER, reason=_DOCKER_REASON or "docker unavailable")
+
+
+def _render_with_sandbox(version, storage):
+    render_version(
+        version,
+        backend=OpenSCADBackend(mode="docker"),
+        storage=storage,
+    )
+    version.refresh_from_db()
+    return version.validation_json
+
+
+@needs_docker
+def test_the_sandbox_render_of_an_oversized_primitive_warns(version, tmp_path):
+    """A 100 mm plate declared as a 40 mm one: watertight, printable, wrong."""
+    version.specification_json = {
+        "object": "widget",
+        "dimensions": {"width": 40.0, "height": 60.0, "thickness": 10.0},
+        "primitives": [
+            {
+                "type": "box",
+                "role": "add",
+                "width": 100.0,
+                "depth": 60.0,
+                "height": 10.0,
+                "position": {"x": 0.0, "y": 0.0, "z": 5.0},
+            }
+        ],
+    }
+    version.save(update_fields=["specification_json"])
+    storage = LocalStorage(root=tmp_path)
+
+    validation = _render_with_sandbox(version, storage)
+
+    assert validation["status"] == "done"
+    assert validation["errors"] == []
+    assert validation["warnings"] == [
+        "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% "
+        "(tolerance +-25%)"
+    ]
+    # The artifact itself is a fine STL -- that is the whole point of the warning.
+    import trimesh
+
+    mesh = trimesh.load(io.BytesIO(storage.read_bytes(version.stl_file.name)), file_type="stl")
+    assert mesh.is_watertight
+    assert float(mesh.bounds[0][2]) == pytest.approx(0.0, abs=1e-5)
+
+
+@needs_docker
+def test_the_sandbox_render_of_a_matching_primitive_is_silent(version, tmp_path):
+    version.specification_json = {
+        "object": "widget",
+        "dimensions": {"width": 40.0, "height": 60.0, "thickness": 10.0},
+        "primitives": [
+            {
+                "type": "box",
+                "role": "add",
+                "width": 40.0,
+                "depth": 60.0,
+                "height": 10.0,
+                "position": {"x": 0.0, "y": 0.0, "z": 5.0},
+            }
+        ],
+    }
+    version.save(update_fields=["specification_json"])
+
+    validation = _render_with_sandbox(version, LocalStorage(root=tmp_path))
+
+    assert validation["status"] == "done"
+    assert "warnings" not in validation
+    assert set(validation) == {
+        "status",
+        "stage",
+        "errors",
+        "scad_file",
+        "stl_file",
+        "stl_bytes",
+        "started_at",
+        "completed_at",
+    }
+
+
+@needs_docker
+def test_the_sandbox_render_of_a_centred_primitive_reports_the_build_plate(version, tmp_path):
+    """A cylinder with no ``position`` is centred, so half of it is under Z = 0."""
+    version.specification_json = {
+        "object": "knob",
+        "dimensions": {"width": 25.0, "height": 25.0, "thickness": 25.0},
+        "primitives": [{"type": "cylinder", "role": "add", "diameter": 25.0, "height": 25.0}],
+    }
+    version.save(update_fields=["specification_json"])
+
+    validation = _render_with_sandbox(version, LocalStorage(root=tmp_path))
+
+    assert validation["status"] == "done"
+    assert len(validation["warnings"]) == 1
+    assert validation["warnings"][0].startswith("rendered part starts at Z=-12.")

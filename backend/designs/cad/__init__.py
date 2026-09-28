@@ -9,6 +9,8 @@ Public entry points:
   a print-ready STL.
 - :func:`~designs.cad.meshcheck.check_mesh` -- deterministic printability report
   for a mesh.
+- :func:`~designs.cad.dimensions.dimension_issues` -- compare a rendered bounding
+  box with the requested ``dimensions`` (pure numbers, no mesh).
 - :func:`~designs.cad.preview.render_stl_preview` -- headless STL -> PNG preview
   used by the vision review node.
 - :func:`~designs.cad.pipeline.render_version` -- run the pipeline for a
@@ -29,6 +31,7 @@ from .base import (
     SpecificationError,
     UnsupportedFormatError,
 )
+from .dimensions import DIMENSION_TOLERANCE, dimension_issues
 from .mesh import MeshCADBackend, MeshRepair, MeshTransform
 from .meshcheck import (
     SUPPORTED_MESH_FORMATS,
@@ -41,6 +44,7 @@ from .pipeline import (
     ARTIFACT_FILENAMES,
     ARTIFACT_TARGETS,
     CAD_BACKEND_ALIASES,
+    dimension_warnings,
     get_backend,
     render_version,
     resolve_backend_name,
@@ -53,6 +57,7 @@ __all__ = [
     "CAD_BACKEND_ALIASES",
     "CADBackend",
     "CADError",
+    "DIMENSION_TOLERANCE",
     "GeneratedModel",
     "MeshCADBackend",
     "MeshCheckError",
@@ -65,6 +70,8 @@ __all__ = [
     "SpecificationError",
     "UnsupportedFormatError",
     "check_mesh",
+    "dimension_issues",
+    "dimension_warnings",
     "get_backend",
     "render_stl_preview",
     "render_version",

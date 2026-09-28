@@ -44,6 +44,7 @@ fields are required**. The API polls it (plain `fetch` + JSON polling, no HTMX):
   "status": "queued | running | done | failed",
   "stage": "generate | export | done | failed",
   "errors": ["RuntimeError: ..."],
+  "warnings": ["rendered Y extent 195.0mm differs from the requested height 90.0mm by +117% (tolerance +-25%)"],
   "scad_file": "projects/<id>/v<version>/model.scad",
   "stl_file": "projects/<id>/v<version>/model.stl",
   "stl_bytes": 12345,
@@ -64,6 +65,19 @@ queued  ->  running  ->  done
 * On success `scad_file` / `stl_file` are also written and `stage=done`.
 * On any failure the error is persisted first, then the exception is re-raised
   so Celery records the failure and can retry.
+
+`warnings` is **advisory and never blocking**: the job still finishes `done`. It
+is only present when there is something to report, and it is shared with the
+mesh-import findings `designs.services` records for an uploaded source mesh, so
+both kinds of finding survive a re-render. Two sources write to it:
+
+* `designs.cad.pipeline.dimension_warnings` — after the export, the exported STL
+  is measured once and compared with the requested `dimensions`
+  (`width`/`height`/`thickness`, ±25%, see `designs/cad/dimensions.py`), plus a
+  "rests on the build plate" check on the minimum Z. A clean part produces no
+  key at all.
+* `designs.services.source_mesh_warnings` — the meshcheck findings of an
+  imported mesh.
 
 A mesh render produces no source code, so `scad_file` is **absent** from
 `validation_json` (and `ModelVersion.scad_file` stays empty); `stl_file` and

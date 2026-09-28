@@ -15,6 +15,15 @@
 //   GET       /api/v1/agent-runs/                            (clarification/assumption provenance)
 //   POST      /api/v1/agent-runs/{id}/clarifications/        (answer blocking questions)
 //
+// The render findings shown on the version page are NOT read from
+// `/versions/{id}/status/`: that endpoint answers `{status, stage, errors}` and
+// nothing else, so it cannot carry a warning. They are read from the version
+// list instead -- `ModelVersionSerializer` exposes the whole `validation_json`
+// read-only, and `validation_json["warnings"]` is where the backend records
+// every advisory finding (meshcheck at import, the post-export dimension check
+// for a prompt). `pollVersion` re-reads the list once the status turns terminal
+// so a finished render shows the findings it just produced.
+//
 // Reuses the vendored Three.js viewer through `x-stl-viewer` (app.js) with the
 // same `stlUrl` / `viewerToken` contract as the original component, plus the
 // `annotationMode` flag (docs/visual-editing.md 3.6), the optional explicit
@@ -154,6 +163,10 @@
             regenerateBusyId: null,
             confirmDeleteVersionId: null,
             deletingVersionId: null,
+            // Version id -> the user confirmed "yes, two bodies is intended".
+            // In memory only and keyed per version: it answers a question about
+            // one render, it is not a property of the model.
+            acknowledgedBodySplit: {},
             originLabels: {
                 generate: "generate",
                 annotation: "annotation",
@@ -324,17 +337,187 @@
                 return "formátum nélkül";
             },
 
+            // -------------------------------------------------------------
+            // Render findings (`validation_json["warnings"]`)
+            // -------------------------------------------------------------
+
             /**
-             * Non-blocking meshcheck findings recorded at import (multiple
-             * bodies, extents outside the print envelope, thin edges). The
-             * blocking problems cannot appear here: a mesh that is not printable
-             * is refused with a 400 at upload time and never becomes a version.
+             * Every advisory finding the render recorded on the selected
+             * version, verbatim.
+             *
+             * This is deliberately ONE list, and it is the very list the
+             * source-mesh panel used to read: `get_source_mesh_warnings` is
+             * literally `list(validation_json["warnings"])` (backend
+             * `designs/services.py:792-800` -> `api/serializers.py:384-386`),
+             * so `source_mesh_warnings` and `validation_json.warnings` are the
+             * *same strings* for every version -- a prompt-generated one
+             * included. Keeping two would either print each line twice (a mesh
+             * import with a dimension mismatch) or invent a provenance the row
+             * does not carry: nothing in `validation_json` says which producer
+             * wrote which line. So the canonical key wins and the flat field is
+             * only a fallback for the day `validation_json` leaves the list
+             * serializer.
              */
-            get sourceMeshWarnings() {
+            get versionWarnings() {
                 const version = this.selectedVersion;
-                const warnings = version ? version.source_mesh_warnings : null;
-                if (!Array.isArray(warnings)) return [];
-                return warnings.filter((warning) => typeof warning === "string" && warning);
+                if (!version) return [];
+                const validation = version.validation_json;
+                const canonical =
+                    validation && Array.isArray(validation.warnings)
+                        ? validation.warnings
+                        : [];
+                const flat = Array.isArray(version.source_mesh_warnings)
+                    ? version.source_mesh_warnings
+                    : [];
+                const collected = [];
+                // Union, not concat: for an imported mesh the two sources are the
+                // same array, and a repeated line would read as a second finding.
+                canonical.concat(flat).forEach((warning) => {
+                    if (typeof warning !== "string") return;
+                    const text = warning.trim();
+                    if (text && !collected.includes(text)) collected.push(text);
+                });
+                return collected;
+            },
+
+            /**
+             * Which of the three display boxes a finding belongs to.
+             *
+             * The sentences are written by the backend, so this only recognises
+             * the openings those producers use -- it never re-reads a number out
+             * of the text, and the numbers stay where the backend put them:
+             *
+             *   "critical"  `designs/cad/dimensions.py::dimension_issues` and
+             *                `designs/cad/meshcheck.py::check_mesh`: the rendered
+             *                mesh is not the part that was asked for, or cannot
+             *                be printed as it stands.
+             *   "question"  `mesh has N disconnected bodies`: genuinely ambiguous
+             *                (two separate prints is often correct), so the user
+             *                decides, we do not decide for them.
+             *   "note"      anything else (skill warnings, future producers).
+             *
+             * An unrecognised line degrades to a note: a wording change upstream
+             * costs emphasis, it never invents a defect.
+             */
+            warningKind(warning) {
+                const text = String(warning || "");
+                // `mesh has 2 disconnected bodies (expect separate prints)`
+                if (/disconnected bod(y|ies)/i.test(text)) return "question";
+                // `rendered Y extent 195.0mm differs from the requested height
+                //  90.0mm by +117% (tolerance +-25%)` and
+                // `rendered part starts at Z=-1.500mm; ...` -- both
+                // `dimension_issues`; the rendered part is wrong either way.
+                if (/^rendered .+ differs from the requested /i.test(text)) return "critical";
+                if (/^rendered part starts at Z=/i.test(text)) return "critical";
+                // `Y extent 0.050mm is below the 0.1mm print minimum ...`,
+                // `Y extent 1400.000mm exceeds the 1000.0mm print envelope ...` --
+                // `meshcheck._extent_warnings`, i.e. a unit mix-up.
+                if (/extent .+ (is below|exceeds) the .+ (print minimum|print envelope)/i.test(text)) {
+                    return "critical";
+                }
+                // `shortest edge is 0.109mm, below the 0.4mm printable feature
+                // size` -- a nozzle cannot lay that wall.
+                if (/^shortest edge is /i.test(text)) return "critical";
+                return "note";
+            },
+
+            /** The part is not what was asked for / will not print as it stands. */
+            get criticalWarnings() {
+                return this.versionWarnings.filter(
+                    (warning) => this.warningKind(warning) === "critical"
+                );
+            },
+
+            /** Ambiguous findings the user is asked to confirm. */
+            get bodySplitWarnings() {
+                return this.versionWarnings.filter(
+                    (warning) => this.warningKind(warning) === "question"
+                );
+            },
+
+            /** Informational findings: shown, but not worth a raised voice. */
+            get noteWarnings() {
+                return this.versionWarnings.filter(
+                    (warning) => this.warningKind(warning) === "note"
+                );
+            },
+
+            /**
+             * Whether the user has already confirmed the multi-body finding for
+             * *this* version. Keyed by version id on purpose: a fresh version
+             * with two bodies is a new question, not an old answer.
+             */
+            get bodySplitAcknowledged() {
+                const version = this.selectedVersion;
+                if (!version) return false;
+                return Boolean(this.acknowledgedBodySplit[version.id]);
+            },
+
+            /** Collapse the multi-body question into a one-line note. */
+            acknowledgeBodySplit() {
+                const version = this.selectedVersion;
+                if (!version) return;
+                this.acknowledgedBodySplit[version.id] = true;
+            },
+
+            /**
+             * "Nem, ez hiba": the finding means the part is not what was wanted,
+             * so the existing "Szerkesztés" affordance is the honest next step --
+             * edit the prompt (with the measured numbers) and regenerate. Reused,
+             * not invented: `startEditVersion` already backs the per-version edit
+             * form, this only opens it and focuses the textarea so the user does
+             * not have to hunt for the right row in the version history.
+             *
+             * Both the dimension mismatch and the "these two bodies are not
+             * intended" answer go here; the difference is only the copy.
+             */
+            requestCorrection() {
+                const version = this.selectedVersion;
+                if (!version) return;
+                this.startEditVersion(version, { focus: true });
+            },
+
+            /**
+             * True when the version was produced from a prompt and the
+             * specification asked for no geometry at all.
+             *
+             * `ModelSpecification._omit_empty_collections` drops `primitives` and
+             * `operations` from the serialised spec when they are empty
+             * (backend `agents/spec.py:443-461`), so "no geometry" reaches the UI
+             * as *both keys missing*, not as `primitives: []`. The CAD backend
+             * then falls back to its own template, which is exactly why this
+             * needed saying out loud: the result otherwise looks finished.
+             */
+            get versionGeometryEmpty() {
+                const version = this.selectedVersion;
+                if (!version) return false;
+                // An imported mesh has no primitives by design -- the uploaded
+                // mesh *is* the geometry, and its specification is the
+                // `{"generator": "mesh", ...}` descriptor, not a parametric one.
+                if (this.sourceMeshAvailable) return false;
+                const specification = version.specification_json;
+                if (!specification || typeof specification !== "object"
+                    || Array.isArray(specification)) {
+                    return false;
+                }
+                if (specification.generator === "mesh") return false;
+                const primitives = Array.isArray(specification.primitives)
+                    ? specification.primitives
+                    : [];
+                const operations = Array.isArray(specification.operations)
+                    ? specification.operations
+                    : [];
+                return primitives.length === 0 && operations.length === 0;
+            },
+
+            /** Any of the four blocks has something to say. */
+            get renderFindingsVisible() {
+                return Boolean(
+                    this.versionGeometryEmpty
+                    || this.criticalWarnings.length
+                    || this.bodySplitWarnings.length
+                    || this.noteWarnings.length
+                );
             },
 
             toggleSourceMesh() {
@@ -1522,6 +1705,16 @@
                                 .join(" · ");
                             const kind = PF.statusKind(state);
                             if (kind === "done") {
+                                // The poller cannot see the findings: the status
+                                // endpoint answers `{status, stage, errors}` only
+                                // (backend `designs/services.py::version_status`),
+                                // so the warnings this very render just wrote are
+                                // not on this response. Re-read the version list,
+                                // which carries the whole `validation_json`
+                                // through `ModelVersionSerializer`, so the panel
+                                // shows the finished render instead of the empty
+                                // findings the row had while the job was queued.
+                                await this.loadVersions();
                                 return "done";
                             }
                             if (kind === "failed") {
@@ -1826,12 +2019,43 @@
                 }
             },
 
-            startEditVersion(version) {
+            /**
+             * Open the per-version prompt editor. `options.focus` additionally
+             * puts the caret in the textarea: the render findings offer
+             * "javítsd meg" for a version the user is not necessarily looking
+             * at in the history list.
+             */
+            startEditVersion(version, options) {
                 if (!version) return;
                 this.editingVersionId = version.id;
                 this.editPrompt = version.prompt || "";
                 this.editError = "";
                 this.notice = "";
+                if (!options || !options.focus) return;
+                // The edit form lives in an `x-if`, so the textarea does not
+                // exist yet when this runs. Poll for it briefly instead of
+                // guessing a single tick.
+                //
+                // `document.getElementById`, not `this.$el.querySelector`: inside
+                // a method reached from a template `@click`, Alpine's `$el` is
+                // the *bound* element (the button), not the component root, so a
+                // scoped query would search the wrong subtree. The id is derived
+                // from the version id and is unique on the page.
+                const fieldId = "version-prompt-" + String(version.id);
+                let attempts = 20;
+                const focus = () => {
+                    if (String(this.editingVersionId) !== String(version.id)) return;
+                    const field = document.getElementById(fieldId);
+                    if (!field) {
+                        if (attempts <= 0) return;
+                        attempts -= 1;
+                        window.setTimeout(focus, 50);
+                        return;
+                    }
+                    field.scrollIntoView({ block: "center" });
+                    field.focus();
+                };
+                window.setTimeout(focus, 0);
             },
 
             cancelEditVersion() {

@@ -1744,6 +1744,27 @@ class OpenSCADBackend(CADBackend):
         primitives = parse_primitives(specification, warnings=warnings)
         return render_scad(parameters, operations, primitives, warnings)
 
+    def build_model(self, specification: dict[str, Any]) -> GeneratedModel:
+        """:meth:`CADBackend.build_model`, reporting what the render had to skip.
+
+        ``render_scad`` records what it could not use -- a malformed primitive,
+        a skipped operation, or the "no usable primitives; synthesized a box from
+        'dimensions'" fallback. Those were only ever written as ``// warning:``
+        comments into the SCAD text, which the UI never reads, so a version that
+        quietly fell back to a synthesised box looked like a finished one. They
+        ride along on :attr:`GeneratedModel.warnings` and land in
+        ``validation_json["warnings"]`` like every other advisory.
+        """
+        parameters = build_parameters(specification)
+        warnings: list[str] = []
+        operations = parse_operations(specification, warnings=warnings)
+        primitives = parse_primitives(specification, warnings=warnings)
+        return GeneratedModel(
+            specification=specification,
+            scad_source=render_scad(parameters, operations, primitives, warnings),
+            warnings=tuple(warnings),
+        )
+
     def validate(self, model: GeneratedModel | str) -> list[str]:
         """Return blocking safety/parameter problems (empty list == valid)."""
         problems = validate_scad_source(_source_of(model))

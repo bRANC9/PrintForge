@@ -103,7 +103,16 @@ def test_create_version_with_specification_renders_directly(client, project, no_
     assert no_broker["agent"] == []
 
     status_response = client.get(f"/api/v1/versions/{body['id']}/status/")
-    assert status_response.json() == {"status": "queued", "stage": "queued", "errors": []}
+    # `warnings` joined `errors` here: the poller needs the render's advisory
+    # findings (an envelope that contradicts the requested dimensions, a
+    # multi-body mesh, a skipped primitive) in the same payload, otherwise the UI
+    # can only surface them after re-fetching the whole version list.
+    assert status_response.json() == {
+        "status": "queued",
+        "stage": "queued",
+        "errors": [],
+        "warnings": [],
+    }
 
 
 def test_prompt_only_version_enqueues_the_agent(client, project, user, no_broker):
@@ -171,6 +180,42 @@ def test_version_detail_exposes_specification_and_validation(client, project, us
     assert body["specification_json"] == {"object": "cube"}
     assert body["validation_json"] == {}
     assert body["status"] == "pending"
+
+
+#: The advisory findings a finished render can carry, in the order they merge.
+RENDER_FINDINGS = [
+    "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% (tolerance +-25%)",
+    "no usable primitives; synthesized a box from 'dimensions'",
+]
+
+
+def test_the_status_endpoint_surfaces_the_render_warnings(client, project, user):
+    """The non-empty half of the ``warnings`` key, end to end through HTTP.
+
+    The empty case is pinned on the create path above; this is the one that
+    matters in production, because a poller can only show an advisory it
+    received. A finished version keeps ``status`` ``done`` and ``errors`` empty
+    while reporting what the render found, so the UI can warn without implying
+    the job failed.
+    """
+    version = create_next_version(project=project, prompt="make it", created_by=user)
+    version.validation_json = {
+        "status": "done",
+        "stage": "done",
+        "errors": [],
+        "warnings": list(RENDER_FINDINGS),
+    }
+    version.save(update_fields=["validation_json"])
+
+    response = client.get(f"/api/v1/versions/{version.pk}/status/")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "done",
+        "stage": "done",
+        "errors": [],
+        "warnings": RENDER_FINDINGS,
+    }
 
 
 def test_artifact_is_streamed_through_storage(client, project, user, tmp_path):

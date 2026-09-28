@@ -27,7 +27,9 @@ from agents.llm import LLMError
 from agents.models import AgentRun, AgentRunStatus
 from agents.spec import ModelSpecification
 from agents.tasks import NotificationKind, build_dependencies, run_agent_workflow
+from designs.cad.pipeline import dimension_warnings
 from designs.models import ModelVersionOrigin
+from designs.services import version_status
 from files.services import LocalStorage
 
 pytestmark = pytest.mark.django_db
@@ -641,3 +643,238 @@ def test_task_without_skills_has_no_skill_provenance(monkeypatch, tmp_path):
     version = project.versions.get()
     assert "skills" not in version.validation_json
     assert "skill_selection" not in version.validation_json
+
+
+# ---------------------------------------------------------------------------
+# The dimension check on the agent path
+# ---------------------------------------------------------------------------
+#
+# ``designs.cad.pipeline.render_version`` runs the envelope check for a
+# re-render and ``designs.services`` records the findings of an imported mesh,
+# but the agent path never goes through ``render_version``: the Validator node
+# exports the STL and ``agents.tasks._persist_version`` builds
+# ``validation_json`` itself around that already-exported bytes. The check is
+# invoked there too, because a prompt is the one case that matters: the measured
+# 90 mm cookie press rendered 195 mm tall and every meshcheck said it was fine.
+#
+# No OpenSCAD and no stubbed check here: ``FakeCADBackend`` exports a real,
+# measurable trimesh STL, so the verdict comes from a genuine mesh, and the
+# assertions are the exact strings ``validation_json`` has to carry for the
+# poller and the UI.
+
+
+def _trimesh_stl(extents, *, lift=None):
+    """A real, parseable STL of a box resting on the build plate by default."""
+    import trimesh
+
+    mesh = trimesh.creation.box(extents=extents)
+    mesh.apply_translation([0.0, 0.0, lift if lift is not None else extents[2] / 2])
+    return mesh.export(file_type="stl")
+
+
+def _widget_plan():
+    """A planner plan for a plain 40 x 60 x 10 mm widget.
+
+    No guard keyword in the object name, and a primitive that matches the
+    declared envelope, so the consistency guard stays quiet and the *only*
+    possible finding is the dimension check under test.
+    """
+    return {
+        "specification": {
+            "object": "widget",
+            "dimensions": {"width": 40.0, "height": 60.0, "thickness": 10.0},
+            "angle": 15,
+            "wall_thickness": 4,
+            "mounting": {"type": "M5", "count": 2},
+            "material": "PETG",
+            "primitives": [
+                {
+                    "type": "box",
+                    "role": "add",
+                    "width": 40.0,
+                    "depth": 60.0,
+                    "height": 10.0,
+                    "position": {"x": 0.0, "y": 0.0, "z": 5.0},
+                }
+            ],
+        },
+        "needs_research": False,
+        "research_query": None,
+    }
+
+
+def _run_widget(monkeypatch, tmp_path, plan, stl_bytes):
+    """Run the real task for a prompt whose backend exports *stl_bytes*.
+
+    Returns the finished ``AgentRun`` and the persisted ``ModelVersion``. The
+    preview renderer is stubbed so a real mesh never reaches the image
+    renderer: the dimension check reads the same bytes either way.
+    """
+    project = ProjectFactory()
+    storage = _install(
+        monkeypatch,
+        tmp_path,
+        _deps(
+            provider=FakeProvider(plan=plan),
+            cad=FakeCADBackend(stl_bytes=stl_bytes),
+            preview_renderer=lambda _stl: b"",
+        ),
+    )
+
+    run_id = run_agent_workflow(project.pk, "make a 40 x 60 x 10 mm widget", project.created_by_id)
+
+    return AgentRun.objects.get(pk=run_id), project.versions.get(), storage
+
+
+def test_the_agent_path_records_a_rendered_envelope_that_contradicts_the_request(
+    monkeypatch, tmp_path
+):
+    """The headline case: a 100 mm part declared as a 40 mm one, from a prompt.
+
+    ``render_version`` covers a re-render and the mesh import covers a manual
+    upload, so without the call in ``_persist_version`` this version would ship
+    with an *empty* ``warnings`` list -- a watertight, printable, wrong part
+    that looks finished. This test fails if the check is removed from the agent
+    path, pointed at the wrong bytes, or pointed at anything but the declared
+    ``dimensions``.
+    """
+    run, version, _storage = _run_widget(
+        monkeypatch, tmp_path, _widget_plan(), _trimesh_stl((100.0, 60.0, 10.0))
+    )
+
+    # Advisory: the job still finishes done, exactly as a re-render does.
+    assert run.status == AgentRunStatus.DONE
+    assert version.validation_json["status"] == "done"
+    assert version.validation_json["errors"] == []
+    assert version.validation_json["warnings"] == [
+        "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% "
+        "(tolerance +-25%)"
+    ]
+
+
+def test_the_agent_path_check_measures_the_persisted_stl_against_the_declared_dimensions(
+    monkeypatch, tmp_path
+):
+    """The seam itself: the bytes on ``stl_file`` and the requested envelope.
+
+    A second export, a re-measured source file or a different dimension mapping
+    would all produce a plausible-looking warning for the wrong comparison; this
+    pins the two arguments.
+    """
+    seen: list[tuple[bytes, object]] = []
+    real_check = dimension_warnings
+
+    def spy(payload, dimensions):  # noqa: ANN001
+        seen.append((payload, dimensions))
+        return real_check(payload, dimensions)
+
+    monkeypatch.setattr("agents.tasks.dimension_warnings", spy)
+    stl_bytes = _trimesh_stl((100.0, 60.0, 10.0))
+
+    _run, version, storage = _run_widget(monkeypatch, tmp_path, _widget_plan(), stl_bytes)
+
+    assert seen == [(stl_bytes, {"width": 40.0, "height": 60.0, "thickness": 10.0})]
+    # ... and those bytes are the artifact the viewer will load.
+    assert storage.read_bytes(version.stl_file.name) == seen[0][0]
+
+
+def test_the_agent_path_reports_a_part_that_does_not_rest_on_the_build_plate(monkeypatch, tmp_path):
+    """The build-plate half of the check travels on the agent path too.
+
+    Every axis matches the request here, so the finding can only come from
+    ``min Z != 0`` -- a primitive placed on its centre sinks into the plate.
+    """
+    run, version, _storage = _run_widget(
+        monkeypatch, tmp_path, _widget_plan(), _trimesh_stl((40.0, 60.0, 10.0), lift=10.0)
+    )
+
+    assert run.status == AgentRunStatus.DONE
+    assert version.validation_json["warnings"] == [
+        "rendered part starts at Z=5.000mm; the rest of the app assumes the part "
+        "rests on the build plate (min Z = 0)"
+    ]
+
+
+def test_a_matching_agent_render_adds_no_warnings_key(monkeypatch, tmp_path):
+    """A check that fires on good output is worse than no check.
+
+    The exact-envelope render must leave ``validation_json`` without a
+    ``warnings`` key at all, so the UI can tell "nothing to say" from "something
+    to say" instead of showing an empty advisory list for every version.
+    """
+    run, version, _storage = _run_widget(
+        monkeypatch, tmp_path, _widget_plan(), _trimesh_stl((40.0, 60.0, 10.0))
+    )
+
+    assert run.status == AgentRunStatus.DONE
+    assert "warnings" not in version.validation_json
+    assert version.validation_json["status"] == "done"
+
+
+def test_a_derived_edit_version_gets_the_dimension_check_too(monkeypatch, tmp_path):
+    """A visual edit writes its ``validation_json`` through the same code.
+
+    The derived version declares its own envelope, so it can contradict its own
+    render exactly like a fresh generation's -- the check may not be gated on
+    the origin, the parent link or the annotation payload.
+    """
+    project = ProjectFactory()
+    base = ModelVersionFactory(project=project, version=1)
+    _install(
+        monkeypatch,
+        tmp_path,
+        _deps(
+            provider=FakeProvider(plan=_widget_plan()),
+            cad=FakeCADBackend(stl_bytes=_trimesh_stl((100.0, 60.0, 10.0))),
+            preview_renderer=lambda _stl: b"",
+        ),
+    )
+
+    run_id = run_agent_workflow(
+        project.pk,
+        "A kijelölt peremre tegyél egy lyukat.",
+        project.created_by_id,
+        base_version_id=base.pk,
+        annotations=ANNOTATIONS,
+    )
+
+    assert AgentRun.objects.get(pk=run_id).status == AgentRunStatus.DONE
+    derived = project.versions.get(version=2)
+    assert derived.parent_version_id == base.pk
+    assert derived.annotations_json == ANNOTATIONS
+    assert derived.validation_json["warnings"] == [
+        "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% "
+        "(tolerance +-25%)"
+    ]
+
+
+def test_an_unmeasurable_agent_stl_is_not_a_run_failure(monkeypatch, tmp_path):
+    """The check is a diagnostic on a mesh that already exported.
+
+    A payload trimesh cannot parse yields no findings and no key -- never a
+    failed run and never a version stuck without a status.
+    """
+    run, version, _storage = _run_widget(
+        monkeypatch, tmp_path, _widget_plan(), b"solid fake\nendsolid fake\n"
+    )
+
+    assert run.status == AgentRunStatus.DONE
+    assert version.validation_json["status"] == "done"
+    assert "warnings" not in version.validation_json
+
+
+def test_the_agent_path_warnings_reach_the_status_poller(monkeypatch, tmp_path):
+    """The end of the chain: what the UI polls carries the finding.
+
+    ``version_status`` is the only thing between the persisted ``warnings`` and
+    the browser, so a key that never leaves ``validation_json`` is a check
+    nobody sees.
+    """
+    _run, version, _storage = _run_widget(
+        monkeypatch, tmp_path, _widget_plan(), _trimesh_stl((100.0, 60.0, 10.0))
+    )
+
+    assert version_status(version)["warnings"] == [
+        "rendered X extent 100.0mm differs from the requested width 40.0mm by +150% "
+        "(tolerance +-25%)"
+    ]

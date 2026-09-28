@@ -2001,12 +2001,6 @@ ul.error-box {
     justify-content: flex-end;
 }
 
-.source-mesh-warnings {
-    margin: 0.4rem 0 0;
-    padding-left: 1.2rem;
-    font-size: 0.85rem;
-}
-
 /* Annotation / vision panels ---------------------------------------------- */
 
 .annotation-panel,
@@ -2188,6 +2182,68 @@ ul.error-box {
 .used-skills h3 {
     margin: 0;
     font-size: 0.95rem;
+}
+
+/* Render findings ---------------------------------------------------------- */
+
+/*
+ * What the render itself noticed about the model it produced
+ * (`validation_json["warnings"]`). The blocks reuse `.error-box` /
+ * `.warning-box` so they inherit the established severity palette: a finding
+ * that means the part is not the one you asked for gets the error treatment,
+ * an ambiguous one gets the warning treatment, and nothing else is escalated.
+ */
+.findings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    margin: 0 0 var(--sp-4);
+}
+
+.findings-block {
+    margin: 0;
+}
+
+/* The lead line is the only thing a scanning eye should catch; the sentence
+   under it explains what it means, and the list is the backend's own text. */
+.findings-lead {
+    margin: 0 0 0.35rem;
+    font-size: 0.95rem;
+}
+
+.findings-text {
+    margin: 0.35rem 0 0;
+    font-size: 0.88rem;
+    text-wrap: pretty;
+}
+
+/* The measured numbers arrive inside the sentence, so they are given their own
+   monospace block: nothing is re-parsed, they only have to stay legible. */
+.findings-list {
+    margin: var(--sp-2) 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.findings-list li + li {
+    margin-top: 0.35rem;
+}
+
+.findings-list code {
+    display: block;
+    padding: 0.35rem 0.5rem;
+    background: rgba(0, 0, 0, 0.22);
+    border-radius: var(--radius-sm);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.findings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: var(--sp-3);
 }
 
 /* Community --------------------------------------------------------------- */

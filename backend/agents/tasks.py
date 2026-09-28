@@ -53,6 +53,7 @@ from agents.search import WebSearchBackend
 from agents.services import fail_run, finish_run, start_run
 from configuration.services import get_setting
 from designs.cad.openscad import OpenSCADBackend
+from designs.cad.pipeline import dimension_warnings
 from designs.cad.preview import render_stl_preview
 from designs.models import ModelVersion, ModelVersionOrigin, model_artifact_path
 from designs.services import create_next_version
@@ -73,6 +74,19 @@ logger = logging.getLogger(__name__)
 SCAD_FILENAME = "model.scad"
 STL_FILENAME = "model.stl"
 PREVIEW_FILENAME = "preview.png"
+
+
+def _merge_advice(existing: Any, additions: list[str]) -> list[str]:
+    """Append advisory findings to ``existing``, keeping order and dropping dupes.
+
+    Several producers write into ``validation_json["warnings"]`` on this path --
+    skill constraints, then the rendered-envelope check -- and the poller reads
+    the single key, so they all have to land in the same list.
+    """
+    merged = list(existing or [])
+    merged.extend(item for item in additions if item not in merged)
+    return merged
+
 
 #: Upper bound for the stored vision system/user prompt (docs/vision-self-check.md
 #: 5.). Long specifications are clipped so a single review trace cannot bloat the
@@ -534,7 +548,26 @@ def _persist_version(
         str(warning) for warning in (state.get("validation") or {}).get("warnings") or []
     ]
     if skill_warnings:
+        # Advisory like everything else, so it belongs on `warnings` -- that is
+        # the key version_status() hands the poller, and a separate key made a
+        # skill-constraint warning invisible to the UI.
+        validation_json["warnings"] = _merge_advice(validation_json.get("warnings"), skill_warnings)
         validation_json["skill_warnings"] = skill_warnings
+    # Envelope check: the rendered STL against the dimensions the planner
+    # declared. The agent path exports its own bytes (via validator.py) and never
+    # goes through designs.cad.pipeline.render_version, so the check is invoked
+    # here too -- otherwise it would run for a re-render and for an imported mesh
+    # but never for a prompt, which is the case that matters.
+    # A measured 90 mm cookie press rendered 195 mm tall and every meshcheck said
+    # it was fine; this is the only thing that noticed. Advisory only: the
+    # finding lands in `warnings`, the job still finishes "done".
+    dimension_findings = dimension_warnings(
+        stl_bytes, (state.get("specification") or {}).get("dimensions")
+    )
+    if dimension_findings:
+        validation_json["warnings"] = _merge_advice(
+            validation_json.get("warnings"), dimension_findings
+        )
     update_fields = [
         "scad_file",
         "stl_file",

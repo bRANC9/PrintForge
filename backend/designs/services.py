@@ -369,6 +369,12 @@ def version_status(version: ModelVersion) -> dict[str, Any]:
         "status": data.get("status") or "pending",
         "stage": data.get("stage") or "pending",
         "errors": list(data.get("errors") or []),
+        # Advisory findings (a rendered envelope that contradicts the requested
+        # dimensions, a mesh with more than one body, a skipped primitive). The
+        # poller needs them: without this the UI could only see a warning after
+        # re-fetching the whole version list, so it showed them late or not at
+        # all. Same key the render paths already write into validation_json.
+        "warnings": list(data.get("warnings") or []),
     }
 
 

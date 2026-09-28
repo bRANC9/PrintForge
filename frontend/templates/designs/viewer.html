@@ -14,11 +14,14 @@
 
     The optional source-mesh preview below the STL canvas needs `sourceMeshOpen`,
     `sourceMeshAvailable`, `sourceMeshUrl`, `sourceMeshFormat`,
-    `sourceMeshFormatLabel`, `sourceMeshState`, `sourceMeshMessage`,
-    `sourceMeshWarnings` and `handleSourceMeshState` from the same component. It
-    is mounted with `readOnly: true`, so the annotatable model is the top canvas
-    only -- see the note in static/js/viewer.js `setReadOnly` for why a raw source
-    mesh must never accept an annotation.
+    `sourceMeshFormatLabel`, `sourceMeshState`, `sourceMeshMessage` and
+    `handleSourceMeshState` from the same component. It is mounted with
+    `readOnly: true`, so the annotatable model is the top canvas only -- see the
+    note in static/js/viewer.js `setReadOnly` for why a raw source mesh must
+    never accept an annotation.
+
+    It deliberately carries NO warning list: the version's findings are rendered
+    once, ungated, on the project page (see the comment above `</section>`).
 {% endcomment %}
 <section class="panel viewer-panel">
     <header class="viewer-toolbar">
@@ -117,14 +120,21 @@
             <div class="source-mesh-foot">
                 <a class="btn btn-small" :href="sourceMeshUrl" download>Forrásháló letöltése</a>
             </div>
-            <div class="warning-box" x-show="sourceMeshWarnings.length" x-cloak>
-                <strong>Ellenőrzési megjegyzések a feltöltött hálóról</strong>
-                <ul class="source-mesh-warnings">
-                    <template x-for="(warning, index) in sourceMeshWarnings" :key="index">
-                        <li x-text="warning"></li>
-                    </template>
-                </ul>
-            </div>
+            {% comment %}
+                No warning list here, and that is deliberate. The only warnings
+                the API carries for a version are `validation_json["warnings"]`,
+                and `get_source_mesh_warnings` is literally that same key
+                (backend `designs/services.py:792-800`), so the strings that used
+                to be printed here were, for an imported mesh, the *rendered
+                part's* findings -- including dimension warnings that have
+                nothing to do with the upload -- and for a prompt-generated
+                version (no source mesh at all, so this panel never mounts) they
+                were the only copy and were shown nowhere. They now render once,
+                ungated, next to the planner assumptions on the project page:
+                `versionWarnings` / `criticalWarnings` /
+                `bodySplitWarnings` / `noteWarnings` in
+                `static/js/project.js`.
+            {% endcomment %}
         </section>
     </template>
     <section class="annotation-panel"
