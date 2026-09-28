@@ -20,8 +20,21 @@ from agents.graph.silhouette import (
 
 #: A three-tier conifer: the shape the real cookie-cutter products sell.
 CONIFER = [
-    (0, 90), (14, 66), (7, 64), (24, 44), (14, 42), (34, 22), (22, 20), (40, 0),
-    (-40, 0), (-22, 20), (-34, 22), (-14, 42), (-24, 44), (-7, 64), (-14, 66),
+    (0, 90),
+    (14, 66),
+    (7, 64),
+    (24, 44),
+    (14, 42),
+    (34, 22),
+    (22, 20),
+    (40, 0),
+    (-40, 0),
+    (-22, 20),
+    (-34, 22),
+    (-14, 42),
+    (-24, 44),
+    (-7, 64),
+    (-14, 66),
 ]
 
 #: The best a model actually produced in the 13-model round: a five-point
@@ -36,10 +49,21 @@ RECTANGLE = [(-40, 90), (40, 90), (40, 0), (-40, 0)]
 #: Self-intersecting: renders as garbage through CGAL.
 BOWTIE = [(-40, 90), (40, 0), (40, 90), (-40, 0)]
 
-CIRCLE = [(40 * math.cos(2 * math.pi * k / 16), 40 * math.sin(2 * math.pi * k / 16)) for k in range(16)]
+CIRCLE = [
+    (40 * math.cos(2 * math.pi * k / 16), 40 * math.sin(2 * math.pi * k / 16)) for k in range(16)
+]
 
-HOURGLASS = [(0, 90), (30, 60), (12, 45), (20, 30), (8, 0), (-8, 0),
-             (-20, 30), (-12, 45), (-30, 60)]
+HOURGLASS = [
+    (0, 90),
+    (30, 60),
+    (12, 45),
+    (20, 30),
+    (8, 0),
+    (-8, 0),
+    (-20, 30),
+    (-12, 45),
+    (-30, 60),
+]
 
 
 def _right_edge(tiers, height, half_base, crown_half):
@@ -57,8 +81,8 @@ def _right_edge(tiers, height, half_base, crown_half):
         # correctly -- refuses to call it a tree. A fixture that lies about the
         # shape under test is worse than no fixture.
         width = half_base * (1 - y / height)
-        points.append((width, y - height * 0.02))   # outward to the branch tip
-        points.append((width * 0.6, y))             # inward: the notch
+        points.append((width, y - height * 0.02))  # outward to the branch tip
+        points.append((width * 0.6, y))  # inward: the notch
     points.append((crown_half, height))
     return points
 
@@ -101,8 +125,21 @@ def test_an_asymmetric_hand_drawn_tree_passes():
     written and dropped for exactly this reason.
     """
     lopsided = [
-        (0, 90), (14, 66), (7, 64), (24, 44), (14, 42), (34, 22), (22, 20), (40, 0),
-        (-36, 0), (-20, 20), (-32, 22), (-12, 42), (-22, 44), (-6, 64), (-13, 66),
+        (0, 90),
+        (14, 66),
+        (7, 64),
+        (24, 44),
+        (14, 42),
+        (34, 22),
+        (22, 20),
+        (40, 0),
+        (-36, 0),
+        (-20, 20),
+        (-32, 22),
+        (-12, 42),
+        (-22, 44),
+        (-6, 64),
+        (-13, 66),
     ]
     assert check_silhouette(lopsided) == []
 
@@ -256,9 +293,7 @@ def test_the_purity_guarantee_holds():
     importlib.reload(module)
     builtins.__import__ = blocked
     try:
-        assert module.check_silhouette(SLAB) == [
-            issue for issue in module.check_silhouette(SLAB)
-        ]
+        assert module.check_silhouette(SLAB) == [issue for issue in module.check_silhouette(SLAB)]
         assert module.check_silhouette(SLAB)
     finally:
         builtins.__import__ = real_import

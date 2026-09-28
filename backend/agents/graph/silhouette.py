@@ -82,9 +82,15 @@ def _vertices(points: Sequence[tuple[float, float]]) -> list[tuple[float, float]
     out: list[tuple[float, float]] = []
     for point in points:
         candidate = (float(point[0]), float(point[1]))
-        if not out or abs(candidate[0] - out[-1][0]) >= _EPS or abs(candidate[1] - out[-1][1]) >= _EPS:
+        if (
+            not out
+            or abs(candidate[0] - out[-1][0]) >= _EPS
+            or abs(candidate[1] - out[-1][1]) >= _EPS
+        ):
             out.append(candidate)
-    while len(out) > 1 and abs(out[0][0] - out[-1][0]) < _EPS and abs(out[0][1] - out[-1][1]) < _EPS:
+    while (
+        len(out) > 1 and abs(out[0][0] - out[-1][0]) < _EPS and abs(out[0][1] - out[-1][1]) < _EPS
+    ):
         out.pop()
     return out
 
@@ -161,9 +167,7 @@ def _is_simple(vertices: Sequence[tuple[float, float]]) -> bool:
     return True
 
 
-def _band_extents(
-    vertices: Sequence[tuple[float, float]], y_low: float, y_high: float
-) -> float:
+def _band_extents(vertices: Sequence[tuple[float, float]], y_low: float, y_high: float) -> float:
     """Width of the outline inside a horizontal band, or 0.0 when it misses.
 
     Measured on the vertices rather than on edge intersections, which is enough
