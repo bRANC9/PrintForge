@@ -132,6 +132,45 @@ def test_embed_text_posts_to_ollama_api_embed(monkeypatch, settings, runtime_set
     assert timeout == services.EMBEDDING_TIMEOUT_SEC
 
 
+def test_embed_text_follows_the_ollama_url_changed_in_the_settings_page(
+    monkeypatch, settings, runtime_settings
+):
+    """The endpoint has to be as runtime-editable as the model.
+
+    Reading the Django setting alone meant that changing the Ollama base URL in
+    the UI moved the LLM and the model catalogue but left the embeddings on the
+    previous host: one configuration, two halves, drifting apart silently. The
+    embedding model was already read through ``get_setting``, so the asymmetry
+    was in the same function.
+    """
+    settings.OLLAMA_BASE_URL = "http://env-host:11434"
+    settings.EMBEDDING_DIM = 2
+    runtime_settings["ollama_base_url"] = "http://ui-host:11434/"
+    captured: list[Any] = []
+    _stub_urlopen(monkeypatch, {"embeddings": [[0.1, 0.2]]}, captured)
+
+    assert embed_text("hello") == [0.1, 0.2]
+
+    request, _timeout = captured[0]
+    assert request.full_url == "http://ui-host:11434/api/embed"
+
+
+def test_embed_text_falls_back_to_the_env_url_when_no_override_is_set(
+    monkeypatch, settings, runtime_settings
+):
+    """An unset override must not break embeddings: the env tier still works."""
+    settings.OLLAMA_BASE_URL = "http://env-host:11434/"
+    settings.EMBEDDING_DIM = 2
+    runtime_settings.pop("ollama_base_url", None)
+    captured: list[Any] = []
+    _stub_urlopen(monkeypatch, {"embeddings": [[0.1, 0.2]]}, captured)
+
+    assert embed_text("hello") == [0.1, 0.2]
+
+    request, _timeout = captured[0]
+    assert request.full_url == "http://env-host:11434/api/embed"
+
+
 def test_embed_text_accepts_legacy_embedding_response(monkeypatch, settings, runtime_settings):
     settings.EMBEDDING_DIM = 2
     _stub_urlopen(monkeypatch, {"embedding": [1.0, 2.0]})

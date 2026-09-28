@@ -20,11 +20,11 @@ Design constraints
   :func:`configuration.services.get_setting`. When it is off, :func:`retrieve`
   returns ``[]`` and :func:`ingest_document` raises :class:`RagDisabledError`
   without ever touching the database or a live embedding model.
-* **Runtime settings.** The embedding model and the RAG flag are read at *call
-  time* from :func:`configuration.services.get_setting` (DB override -> Django
-  settings -> environment -> default), so an admin change takes effect without
-  a restart. ``EMBEDDING_DIM`` deliberately stays a Django/env setting because
-  it is baked into the pgvector column.
+* **Runtime settings.** The embedding model, the RAG flag and the Ollama base
+  URL are read at *call time* from :func:`configuration.services.get_setting`
+  (DB override -> Django settings -> environment -> default), so an admin change
+  takes effect without a restart. ``EMBEDDING_DIM`` deliberately stays a
+  Django/env setting because it is baked into the pgvector column.
 
 * **Best-effort text similarity.** :func:`rank_texts` and
   :func:`cosine_similarity` rank plain strings for the skill auto-selection
@@ -119,6 +119,25 @@ def _embedding_model() -> str:
     return str(get_setting("embedding_model") or DEFAULT_EMBEDDING_MODEL)
 
 
+def _ollama_base_url() -> str:
+    """The Ollama endpoint, honouring a runtime override from the Settings page.
+
+    The model is runtime-editable through ``get_setting("embedding_model")``, so
+    the endpoint has to be as well. Reading the Django setting alone meant that
+    changing the Ollama base URL in the UI moved the LLM and the model
+    catalogue but silently left the embeddings on the previous host -- two
+    halves of one configuration drifting apart with nothing reporting it. The
+    ``get_setting`` call is wrapped because the settings service is the
+    runtime-editable path and may be unavailable (a bare checkout, a test), the
+    same fallback chain the Ollama provider uses.
+    """
+    try:
+        value = get_setting("ollama_base_url")
+    except Exception:  # noqa: BLE001 - fall back to the env/settings tier
+        value = ""
+    return str(value or _setting("OLLAMA_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+
+
 def _models() -> tuple[type[KnowledgeDocument], type[Any]]:
     """Import the pgvector models lazily (never at module import time)."""
     from embeddings.models import EmbeddingChunk, KnowledgeDocument
@@ -141,7 +160,7 @@ def embed_text(text: str) -> list[float]:
     if not isinstance(text, str) or not text.strip():
         raise EmbeddingError("embed_text() requires a non-empty string")
 
-    base_url = str(_setting("OLLAMA_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    base_url = _ollama_base_url()
     model = _embedding_model()
     url = f"{base_url}{EMBEDDINGS_PATH}"
     payload = {"model": model, "input": text}
