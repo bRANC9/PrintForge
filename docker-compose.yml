@@ -19,6 +19,10 @@ x-app-env: &app-env
     OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-coder:30b}
     # Optional vision model for the agent self-check review; empty = use OLLAMA_MODEL.
     OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-}
+    # Request context window sent to Ollama as `num_ctx`; 0 = do not send it.
+    # Raise it to 16384 when the Ollama host serves 4096-token models, or the
+    # ~4.2k-token Planner request is rejected before the model ever runs.
+    OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-0}
     # LLM provider: "ollama" (default) or "openai" for any OpenAI-compatible
     # endpoint (hosted OpenAI or a local gateway). OPENAI_* are only used then.
     LLM_PROVIDER: ${LLM_PROVIDER:-ollama}

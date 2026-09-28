@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import inspect
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+import agents.spec as spec_module
+from agents.graph.planner import PlannerPlan
 from agents.spec import (
     Clarification,
     Dimensions,
@@ -248,7 +251,7 @@ def test_json_schema_exposes_bounded_edit_operation():
     assert operation_schema["properties"]["depth"] == {
         "minimum": 0.4,
         "maximum": 200.0,
-        "description": "Cut depth / boss height in mm; required for every operation.",
+        "description": "Cut depth / boss height in mm; always required.",
         "title": "Depth",
         "type": "number",
     }
@@ -256,28 +259,208 @@ def test_json_schema_exposes_bounded_edit_operation():
     assert kinds == ["hole", "pocket", "boss", "slot", "cut", "add"]
 
 
-def test_json_schema_documents_per_kind_field_requirements():
-    """The schema the LLM sees must spell out which kinds need which fields.
+#: Which fields each operation kind needs, and which every kind needs.
+#:
+#: The model is told this through the **field descriptions**, not through a
+#: paragraph in the system prompt (the Planner prompt would otherwise restate
+#: the schema verbatim, and the two together blew the 4096-token context), so
+#: these maps are the machine-checkable form of the same contract.
+OPERATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "hole": ("diameter",),
+    "boss": ("diameter",),
+    "slot": ("diameter", "length"),
+    "pocket": ("width", "height"),
+    "cut": ("width", "height"),
+    "add": ("width", "height"),
+}
+ALWAYS_REQUIRED_OPERATION_FIELDS = ("depth", "origin", "normal")
+
+#: Which sizes each primitive type needs.
+PRIMITIVE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "box": ("width", "depth", "height"),
+    "cylinder": ("diameter", "height"),
+    "cone": ("diameter", "height"),
+    "sphere": ("diameter",),
+    "extrude": ("profile", "height"),
+}
+
+
+def _description_nodes(node: object, path: str = "") -> list[tuple[str, str]]:
+    """Every ``description`` string in a JSON Schema, as ``(path, text)``."""
+    found: list[tuple[str, str]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = f"{path}.{key}" if path else key
+            if key == "description" and isinstance(value, str):
+                found.append((child, value))
+            found.extend(_description_nodes(value, child))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found.extend(_description_nodes(value, f"{path}[{index}]"))
+    return found
+
+
+def test_planner_plan_schema_description_budget_is_bounded():
+    """No developer prose may creep back into the Planner's JSON Schema.
+
+    The Planner request is measured against a 4096-token context and
+    ``PlannerPlan.model_json_schema()`` is the largest part of it: its
+    ``description`` strings were 4440 characters (41% of the schema) once, of
+    which a third was Sphinx roles, ``docs/*.md`` pointers and "why this
+    exists" rationale that the model cannot use. A 4.2k-token request killed
+    five of thirteen local models outright. The human documentation now lives in
+    ``#:`` comment blocks in :mod:`agents.spec`, so this budget is the guard
+    that keeps it there.
+    """
+    total = sum(len(text) for _, text in _description_nodes(PlannerPlan.model_json_schema()))
+    assert total <= 1800, f"PlannerPlan schema prose grew to {total} characters"
+
+
+def test_schema_carries_no_developer_provenance():
+    """Sphinx roles, doc pointers and rationale must not reach the model."""
+    text = " ".join(t for _, t in _description_nodes(PlannerPlan.model_json_schema()))
+    for pointer in ("terv.md", "docs/", ":class:", "``", "fejezet"):
+        assert pointer not in text, f"{pointer!r} leaked into the model-facing schema"
+
+
+#: The human documentation that was moved out of the schema, and the fragments
+#: that must survive directly above the class as a ``#:`` comment block.
+#: Relocating it was allowed; losing it was not.
+RELOCATED_DOCS: dict[type, tuple[str, ...]] = {
+    Primitive: ("docs/cad-primitives.md 1", "never OpenSCAD code", "union/difference"),
+    EditOperation: ("docs/visual-editing.md 3.1", "never OpenSCAD code", "clamps"),
+    Clarification: ("docs/planner-clarification.md 1", "Planner-only contract"),
+    ModelSpecification: ("terv.md 8. fejezet", "never free text"),
+    Vec2: ("docs/skills.md 5", "linear_extrude(height) polygon(points)"),
+    Vec3: ("docs 3.1", "model coordinates"),
+    Mounting: ("terv.md 8.", "the part is not"),
+    ReviewResult: ("docs/vision-self-check.md", "bounded collections"),
+    Dimensions: ("MAX_DIMENSION_MM", "Bounding-box dimensions"),
+}
+
+
+def _doc_block_above(model: type) -> str:
+    """Return the ``#:`` comment block directly above *model*, de-marked.
+
+    The ``#:`` prefixes are stripped and the text is whitespace-collapsed, so a
+    fragment may be matched even when the source wraps it across two lines.
+    """
+    lines = inspect.getsource(spec_module).splitlines()
+    index = next(
+        i for i, line in enumerate(lines) if line.startswith(f"class {model.__name__}(BaseModel):")
+    )
+    block: list[str] = []
+    for line in reversed(lines[:index]):
+        if line.startswith("#:"):
+            block.append(line[2:].strip())
+        elif not line.strip() and block:
+            break
+        elif not line.strip():
+            continue
+        else:
+            break
+    return " ".join(reversed(block)).strip()
+
+
+@pytest.mark.parametrize(
+    "model, fragments", sorted(RELOCATED_DOCS.items(), key=lambda item: item[0].__name__)
+)
+def test_human_documentation_is_still_in_the_source(model, fragments) -> None:
+    """The prose cut from the schema must survive as a ``#:`` block in the file.
+
+    Pydantic has no "docstring for humans, short one for the schema" split, so
+    the developer documentation was moved verbatim into the comment block above
+    each class. These tests keep that move honest in both directions: the budget
+    test above fails if it drifts back into ``description``, and these fail if it
+    is deleted instead of relocated.
+    """
+    block = _doc_block_above(model)
+    assert block, f"{model.__name__} lost its ``#:`` documentation block"
+    for fragment in fragments:
+        assert fragment in block, f"{model.__name__} dropped {fragment!r}"
+
+
+def test_developer_documentation_is_gone_from_every_schema_description() -> None:
+    """No ``$defs`` description in any shipped model may carry provenance."""
+    for model in (ModelSpecification, ReviewResult):
+        for path, text in _description_nodes(model.to_json_schema()):
+            assert "docs/" not in text, f"{model.__name__} {path} points at a doc file"
+            assert ":class:" not in text, f"{model.__name__} {path} carries a Sphinx role"
+
+
+def test_schema_documents_the_field_requirements_per_kind():
+    """Each operation kind's required dimensions stay named on the fields.
 
     Regression guard for the editor LLM emitting a ``slot`` operation without
     ``diameter`` (the CAD parser then failed with "operations[0].diameter is
     required for a 'slot' operation"): the requirement has to be explicit in
-    the structured-output schema, not only enforced downstream.
+    the structured-output schema, not only enforced downstream. It used to be
+    asserted as one exact sentence per field; it is now asserted as the
+    invariant, so rewording the sentence cannot silently drop a requirement.
     """
-    properties = ModelSpecification.to_json_schema()["$defs"]["EditOperation"]["properties"]
-    assert properties["diameter"]["description"] == (
-        "Required for kinds hole, boss and slot; ignored otherwise."
+    schema = ModelSpecification.to_json_schema()["$defs"]["EditOperation"]
+    properties = schema["properties"]
+
+    for field in ALWAYS_REQUIRED_OPERATION_FIELDS:
+        assert field in properties
+        assert field in schema["required"]
+
+    for kind, fields in OPERATION_REQUIREMENTS.items():
+        assert kind in properties["kind"]["enum"]
+        for field in fields:
+            assert kind in properties[field]["description"], (
+                f"{field} no longer states that it is required for {kind!r}: "
+                f"{properties[field].get('description')!r}"
+            )
+
+    # A non-required dimension says so, so the model does not fill it blindly.
+    assert "ignored otherwise" in properties["diameter"]["description"]
+    # Units and the always-required rule survive on the field itself.
+    assert "in mm" in properties["depth"]["description"]
+    assert "required" in properties["depth"]["description"]
+    assert "in mm" in properties["origin"]["description"]
+    assert "unit length" in properties["normal"]["description"]
+    # The add/subtract meaning of a kind is stated, not just enumerated.
+    assert "add" in properties["kind"]["description"]
+    assert "boss/add" in properties["kind"]["description"]
+
+
+def test_json_schema_documents_per_type_primitive_field_requirements():
+    """The schema the LLM sees must spell out which primitive types need which sizes.
+
+    Regression guard for a local model emitting a ``box`` primitive without
+    ``depth``/``height``: the requirement has to be explicit in the
+    structured-output schema, not only enforced downstream. As above, the guard
+    is the invariant (which type requires which size), not one exact sentence.
+    """
+    properties = ModelSpecification.to_json_schema()["$defs"]["Primitive"]["properties"]
+
+    for kind, fields in PRIMITIVE_REQUIREMENTS.items():
+        assert kind in properties["type"]["enum"]
+        for field in fields:
+            assert kind in properties[field]["description"], (
+                f"{field} no longer states that it is required for {kind!r}: "
+                f"{properties[field].get('description')!r}"
+            )
+
+    # A size that is not needed by a type says so, so the model does not fill
+    # it blindly: ``width``/``depth`` are a box's only sizes.
+    assert properties["width"]["description"].endswith("(required for box).")
+    assert properties["depth"]["description"].endswith("(required for box).")
+    # Every constraint the pipeline's known failures depend on, still present:
+    assert properties["position"]["description"] == (
+        "Primitive centre in mm; the part rests on the plate (min Z = 0)."
     )
-    assert properties["length"]["description"] == ("Required for the slot kind; ignored otherwise.")
-    assert properties["width"]["description"] == (
-        "Required for kinds pocket, cut and add; ignored otherwise."
-    )
-    assert properties["height"]["description"] == (
-        "Required for kinds pocket, cut and add; ignored otherwise."
-    )
-    assert properties["depth"]["description"] == (
-        "Cut depth / boss height in mm; required for every operation."
-    )
+    assert properties["rotation"]["description"] == "XYZ rotation in degrees."
+    assert properties["role"]["description"] == "add adds material, subtract cuts it away."
+    # Ordering and the >= 3-point minimum of the 2D profile.
+    assert "in order" in properties["profile"]["description"]
+    assert "min 3" in properties["profile"]["description"]
+    assert "XZ plane" in properties["profile"]["description"]
+    assert "in mm" in properties["profile"]["description"]
+    # The extrude-only optionals.
+    assert "extrude only" in properties["wall_thickness"]["description"]
+    assert "extrude only" in properties["round_radius"]["description"]
 
 
 def test_example_helper_is_unchanged_by_operations_field():
@@ -410,30 +593,6 @@ def test_json_schema_exposes_bounded_primitive():
     assert number_schema["maximum"] == 1000.0
     assert primitive_schema["properties"]["label"]["maxLength"] == 120
     assert schema["properties"]["primitives"]["maxItems"] == 64
-
-
-def test_json_schema_documents_per_type_primitive_field_requirements():
-    """The schema the LLM sees must spell out which primitive types need which sizes.
-
-    Regression guard for a local model emitting a ``box`` primitive without
-    ``depth``/``height``: the requirement has to be explicit in the
-    structured-output schema, not only enforced downstream.
-    """
-    properties = ModelSpecification.to_json_schema()["$defs"]["Primitive"]["properties"]
-    assert properties["width"]["description"] == "Box size along X in mm (required for type box)."
-    assert properties["depth"]["description"] == "Box size along Y in mm (required for type box)."
-    assert properties["height"]["description"] == (
-        "Box size along Z, or the cylinder/cone height, in mm "
-        "(required for box, cylinder and cone)."
-    )
-    assert properties["diameter"]["description"] == (
-        "Cylinder/sphere/cone diameter in mm (required for cylinder, sphere and cone)."
-    )
-    assert properties["position"]["description"] == (
-        "Primitive centre in mm; the part rests on the build plate (minimum Z = 0)."
-    )
-    assert properties["rotation"]["description"] == "XYZ rotation in degrees."
-    assert properties["role"]["description"] == "add adds material, subtract cuts it away."
 
 
 def test_example_helper_is_unchanged_by_primitives_field():

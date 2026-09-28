@@ -64,6 +64,10 @@ services:
       # EDIT (optional): a vision-capable model (e.g. llava:7b, qwen2.5-vl:7b)
       # used only by the agent self-check review. Leave empty to use OLLAMA_MODEL.
       OLLAMA_VISION_MODEL: ""
+      # Request context window sent to Ollama as `num_ctx`; 0 = do not send it.
+      # Raise it to 16384 when the Ollama host serves 4096-token models, or the
+      # ~4.2k-token Planner request is rejected before the model ever runs.
+      OLLAMA_CONTEXT_LENGTH: 0
       MEDIA_ROOT: /data/media
       # Mesh-import CAD backend. "" (default) keeps the OpenSCAD-only pipeline;
       # set to "mesh" to also allow importing an external .stl/.obj/.glb. It

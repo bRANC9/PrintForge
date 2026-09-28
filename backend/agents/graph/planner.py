@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CLARIFICATION_PROMPT",
+    "MAX_REPAIR_ERRORS",
+    "MAX_REPAIR_HINT_CHARS",
     "OPERATION_DIMENSIONS_PROMPT",
     "PLANNER_SYSTEM_PROMPT",
     "PRIMITIVE_DIMENSIONS_PROMPT",
@@ -45,12 +47,17 @@ __all__ = [
 #: without its ``diameter`` (or any other missing required dimension) is a
 #: fixable specification error the CAD backend rejects, so every prompt states
 #: the contract explicitly and asks the LLM to fill the fields.
+#:
+#: Token budget: the *per-kind mapping itself* is no longer restated here. The
+#: JSON schema that ships with every request says it on the exact field being
+#: filled (``diameter``: "Required for hole, boss, slot; ignored otherwise"),
+#: which is both cheaper and closer to the decision than a paragraph at the top
+#: of the prompt. What stays here is the instruction the schema cannot state:
+#: these are always required, and they must be concrete numbers, never nulls.
 OPERATION_DIMENSIONS_PROMPT = (
-    "Every 'operations' entry MUST carry 'depth', 'origin' and 'normal', plus "
-    "the dimensions its kind needs: 'hole' -> 'diameter'; 'boss' -> 'diameter'; "
-    "'slot' -> 'diameter' and 'length'; 'pocket', 'cut' and 'add' -> 'width' "
-    "and 'height'. Always fill these numeric fields explicitly and never leave a "
-    "required dimension missing or null. "
+    "Every 'operations' entry MUST carry 'depth', 'origin' and 'normal' plus the "
+    "dimensions its kind requires, which the schema states on each field. Give "
+    "every one of them a concrete number, never null. "
 )
 
 #: Shared instruction pinning the per-type required fields of every
@@ -59,21 +66,24 @@ OPERATION_DIMENSIONS_PROMPT = (
 #: a fixable specification error the CAD backend rejects, so the Planner,
 #: Editor and Reviser all state the contract explicitly and ask the LLM for
 #: concrete numbers instead of nulls.
+#:
+#: Token budget: for the same reason as above, the per-type sizes, the
+#: millimetre unit and the "min Z = 0" build-plate rule are left to the field
+#: descriptions in the schema, which carry them verbatim. What stays here is
+#: the instruction the schema cannot state (concrete numbers, never nulls) plus
+#: the two hard-won behavioural facts: an ``extrude`` needs a real ``profile``
+#: *and* a ``height``, and the cookie-cutter example that pins the JSON shape.
 PRIMITIVE_DIMENSIONS_PROMPT = (
-    "Every 'primitives' entry MUST carry the sizes its type needs: 'box' "
-    "requires 'width', 'depth' and 'height'; 'cylinder' and 'cone' require "
-    "'diameter' and 'height'; 'sphere' requires 'diameter'; 'extrude' requires "
-    "'profile' (at least 3 {'x','y'} points in mm forming the 2D outline in the "
-    "XZ plane) and 'height' (the extrusion height), and its optional "
-    "'wall_thickness' makes a hollow wall (e.g. a cookie cutter) while "
-    "'round_radius' rounds the outline. 'position' is the "
-    "primitive centre in mm and the part must rest on the build plate "
-    "(min Z = 0); always give every listed size as a concrete number and never "
-    "leave a required size missing or null. Example cookie-cutter primitive: "
+    "Every 'primitives' entry MUST carry the sizes its type needs (each field's "
+    "description says which): give every required size a concrete number and "
+    "never leave it missing or null. 'extrude' also needs 'profile' (3+ ordered "
+    "{'x','y'} points) and 'height'. 'wall_thickness' makes a hollow wall (e.g. "
+    "a cookie cutter) and 'round_radius' rounds it. "
+    "Example: "
     "{'type': 'extrude', 'role': 'add', 'position': {'x': 0, 'y': 0, 'z': 0}, "
     "'profile': [{'x': -30, 'y': -30}, {'x': 30, 'y': -30}, {'x': 30, 'y': 30}, "
-    "{'x': -30, 'y': 30}], 'height': 25, 'wall_thickness': 1.2} - never leave "
-    "'height' null for an 'extrude' primitive. "
+    "{'x': -30, 'y': 30}], 'height': 25, 'wall_thickness': 1.2} - never null "
+    "'height' for an 'extrude'. "
 )
 
 #: Shared instruction teaching the Planner/Editor how to record missing values
@@ -86,51 +96,51 @@ PRIMITIVE_DIMENSIONS_PROMPT = (
 #: (e.g. qwen2.5-coder:7b, mistral-nemo:12b) otherwise skip ``clarifications``
 #: entirely and silently assume a generic part for an ambiguous request such as
 #: "Keszits egy telefontartot." The examples stay bounded (one entry each) and
-#: keep every existing rule intact.
+#: keep every existing rule intact. The "at most 8 entries" bound and the
+#: per-field meanings now live in the schema (``maxItems``/``description``).
 CLARIFICATION_PROMPT = (
-    "If the user did not give a value that could change the function of the "
-    "part, do one of two things: (a) choose a realistic, printable default and "
-    "record it in 'clarifications' with 'kind': 'assumed', the guess in "
-    "'answer', the reasoning in 'question' and an optional dotted 'field' "
-    "(e.g. 'dimensions.width'); or (b) when a wrong guess could break the part "
-    "(a critical dimension, mounting or interface), record it with 'kind': "
-    "'needs_user_input' and 'answer': ''. Return at most 8 'clarifications' "
-    "entries; use an empty list when nothing was missing. 'clarifications' is "
+    "For a value the user did not give that could change the part's "
+    "function, do one of two things: (a) choose a realistic, printable default "
+    "and record it in 'clarifications' with 'kind': 'assumed'; or (b) when a "
+    "wrong guess could break the part (a critical dimension, mounting or "
+    "interface), record it with 'kind': 'needs_user_input' and 'answer': ''. "
+    "Use an empty list when nothing was missing. 'clarifications' is "
     "Planner-only data: never put it inside the specification and never send it "
     "to the CAD backend. "
-    'Example A - ambiguous request with a critical missing dimension ("Make a '
-    'phone stand."): do NOT guess; add one top-level "clarifications" entry: '
-    '{"question": "Which phone model or width in mm should the stand fit?", '
-    '"answer": "", "kind": "needs_user_input", "field": "dimensions"}. '
-    'Example B - a safe missing value ("Make a 120 mm cable clip for a 6 mm '
-    'cable."): assume a printable wall and add one entry: {"question": "No '
-    'wall thickness given; assuming a printable 3 mm wall.", "answer": "3", '
-    '"kind": "assumed", "field": "wall_thickness"}. '
+    'Example A ("Make a phone stand.") - do NOT guess, add one top-level '
+    '"clarifications" entry: {"question": "Which phone width in mm should it '
+    'fit?", "answer": "", "kind": "needs_user_input", "field": "dimensions"}. '
+    'Example B ("Make a 120 mm cable clip for a 6 mm cable.") - assume a '
+    'printable wall, add one entry: {"question": "No wall thickness given; '
+    'assuming a printable 3 mm wall.", "answer": "3", "kind": "assumed", '
+    '"field": "wall_thickness"}. '
 )
 
+#: The Planner system prompt. Two budgets fight here, and the resolution is the
+#: same rule as in :mod:`agents.spec`: state a fact **once**, in the place the
+#: LLM reads it. The per-field contract (units, required sizes, the ``min Z =
+#: 0`` build-plate rule, the primitive type list) ships in the JSON Schema in
+#: the same system message, so restating it in prose here is pure cost against
+#: a 4096-token context. Every behavioural instruction stays, because the
+#: schema cannot express "what to do", only "what a field means".
 PLANNER_SYSTEM_PROMPT = (
     "You are the Planner agent of an OpenSCAD 3D-printing workflow. "
-    "Read the user's request and return ONE JSON object with two jobs: "
-    "(1) 'specification' - the structured model specification (object, "
-    "dimensions in millimetres, angle, wall_thickness, mounting, material); "
+    "Read the request and return ONE JSON object with two jobs: "
+    "(1) the full 'specification'; "
     "(2) 'needs_research' and 'research_query' - whether real-world product or "
-    "standard-part data (e.g. exact phone dimensions, ISO screw sizes) must be "
-    "looked up first, and a concise lookup query if so. "
-    "Describe the real geometry with the specification's 'primitives' list: "
-    "build the object from one or more primitives in millimetres, each one a "
-    "'box', 'cylinder', 'sphere', 'cone' or 'extrude' placed by its 'position' - the "
-    "primitive centre in mm - with an optional 'rotation' in degrees. "
+    "standard-part data (exact phone dimensions, ISO screw sizes) must be "
+    "looked up first, plus a concise query. "
+    "Describe the real geometry with the 'primitives' list: one or more "
+    "primitives, each placed by its 'position'. "
     "Use role 'add' for material and role 'subtract' for holes and cutouts. "
-    "The part must rest on the build plate (min Z = 0) and use sensible, "
-    "printable sizes. Keep dimensions, angle, wall_thickness and mounting "
-    "filled for compatibility. Use 'primitives': [] ONLY when the user "
-    "explicitly asked for the built-in phone holder (a phone or tablet stand); "
-    "for every other object you MUST fill 'primitives' with the geometry that "
-    "builds it and never fall back to the built-in phone holder. For a flat, "
-    "2D-shaped object (a stamp, cookie cutter, silhouette, tag or ornament) "
-    "use a single 'extrude' primitive whose 'profile' lists the {'x','y'} "
-    "outline points in mm in order. Use sensible printable defaults when a "
-    "value is missing. "
+    "Keep dimensions, angle, wall_thickness and mounting filled, with printable "
+    "values. "
+    "Use 'primitives': [] ONLY when the user asked for the built-in phone "
+    "holder (a phone or tablet stand); otherwise you MUST fill 'primitives' "
+    "with the geometry that builds it and never fall back to that template. "
+    "For a flat, 2D-shaped object (a stamp, cookie cutter, silhouette or "
+    "ornament) use a single 'extrude' whose 'profile' lists the {'x','y'} "
+    "outline points in order. "
     + OPERATION_DIMENSIONS_PROMPT
     + PRIMITIVE_DIMENSIONS_PROMPT
     + CLARIFICATION_PROMPT
@@ -138,21 +148,22 @@ PLANNER_SYSTEM_PROMPT = (
 )
 
 
+#: Structured Planner output.
+#:
+#: The nested ``specification`` is a fully validated
+#: :class:`~agents.spec.ModelSpecification`, so the LLM and the CAD backend
+#: keep their strict contract (terv.md 8. fejezet); the extra flags only drive
+#: graph routing and never reach the CAD backend. That is developer context, so
+#: it lives in this comment: a class docstring here is shipped to the model on
+#: every call as ``$defs``/root ``description`` (see the ``agents.spec`` module
+#: docstring for the full rationale).
 class PlannerPlan(BaseModel):
-    """Structured Planner output.
-
-    The nested ``specification`` is a fully validated
-    :class:`~agents.spec.ModelSpecification`, so the LLM and the CAD backend
-    keep their strict contract (terv.md 8. fejezet); the extra flags only drive
-    graph routing and never reach the CAD backend.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     specification: ModelSpecification
     needs_research: bool = Field(
         default=False,
-        description="True when external product/standard data must be looked up.",
+        description="True when product/standard data must be looked up first.",
     )
     research_query: str | None = Field(
         default=None,
@@ -162,10 +173,7 @@ class PlannerPlan(BaseModel):
     clarifications: list[Clarification] = Field(
         default_factory=list,
         max_length=8,
-        description=(
-            "Missing-value questions the Planner answered itself (kind='assumed') "
-            "or must ask the user (kind='needs_user_input'); Planner-only data."
-        ),
+        description="Missing values assumed, or to ask the user about.",
     )
 
 
@@ -239,6 +247,62 @@ def coerce_plan(raw: Any) -> PlannerPlan:
     return PlannerPlan.model_validate(payload)
 
 
+#: How many individual schema violations the repair hint may list.
+MAX_REPAIR_ERRORS = 3
+
+#: Hard character cap on the repair hint, *including* its preamble.
+#:
+#: Why this is bounded: the re-ask repeats the question **and** the complaint, so
+#: the second attempt of an already near-the-limit request is the one that is
+#: guaranteed to overflow a small context. A Pydantic ``ValidationError`` for
+#: this schema prints every violation, each with a ``loc``, a message, a type
+#: and the offending input value -- measured 600-2500 characters, i.e. 150-600
+#: tokens on top of a request that was already ~112 tokens over a 4096
+#: context. The first lines carry the field, the constraint and the received
+#: value, which is exactly what lets a model repair itself, so the hint keeps
+#: those and drops the rest.
+MAX_REPAIR_HINT_CHARS = 400
+
+#: Preamble of :func:`_repair_hint` (kept identical so it stays a substring).
+_REPAIR_PREAMBLE = (
+    "Your previous answer was rejected by the schema. Fix exactly this problem "
+    "and return the complete object again:\n"
+)
+
+
+def _repair_hint(exc: ValidationError) -> str:
+    """Return a bounded repair hint for a schema-invalid Planner answer.
+
+    The hint carries the problem and the offending location -- the two things a
+    model needs to fix itself -- and nothing else. It is bounded twice over, on
+    purpose:
+
+    * by :data:`MAX_REPAIR_ERRORS`, because a model can only act on a couple of
+      concrete complaints at once, and a long list makes it re-emit the same
+      broken structure;
+    * by :data:`MAX_REPAIR_HINT_CHARS`, because the hint is appended to the
+      user prompt of a request that is already close to the context ceiling (see
+      the constant's docstring).
+
+    The full, unbounded ``str(exc)`` is still reported through
+    :func:`~agents.graph.state.failure_state` on the last attempt, so the
+    operator-facing error keeps every violation.
+    """
+    errors = exc.errors()
+    lines = [
+        f"- {'.'.join(str(part) for part in error['loc']) or '(root)'}: {error['msg']}"
+        for error in errors[:MAX_REPAIR_ERRORS]
+    ]
+    hidden = len(errors) - len(lines)
+    if hidden > 0:
+        lines.append(f"- (+{hidden} more schema error(s))")
+    body = "\n".join(lines)
+    if len(body) > MAX_REPAIR_HINT_CHARS:
+        # Cut on a line boundary so the model never sees half a constraint.
+        body = body[:MAX_REPAIR_HINT_CHARS].rsplit("\n", 1)[0] + "\n- (truncated)"
+    return f"{_REPAIR_PREAMBLE}{body}"
+
+
 def make_planner_node(
     *,
     provider: LLMProvider,
@@ -293,11 +357,8 @@ def make_planner_node(
                         error_type=type(exc).__name__,
                         message=str(exc),
                     )
-                # Malformed structured output: re-ask with the complaint.
-                repair_hint = (
-                    "Your previous answer was rejected by the schema. Fix exactly this "
-                    f"problem and return the complete object again:\n{exc}"
-                )
+                # Malformed structured output: re-ask with a *bounded* complaint.
+                repair_hint = _repair_hint(exc)
                 logger.warning(
                     "planner returned an invalid plan (attempt %d/%d): %s",
                     attempt,

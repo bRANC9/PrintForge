@@ -5,15 +5,17 @@ extra dependency (terv.md 3. / 18. fejezet). ``generate()`` calls
 ``POST {base}/api/generate`` and ``structured()`` calls ``POST {base}/api/chat``
 with Ollama's structured-output ``format`` field.
 
-``base_url``/``model``/``timeout`` are resolved from the runtime settings
-service (``configuration.services.get_setting``: DB override -> Django settings
--> ``os.environ`` -> default). Values are resolved **at construction time** —
-never cached at import time — and can be refreshed with :meth:`reload`, so an
-admin setting change takes effect on the next provider instance without a
-process restart. Explicit constructor arguments always win; a ``get_setting``
-seam can be injected for tests without touching the database. ``timeout`` is
-resolved from ``ollama_timeout``; a missing/unknown name, a raising resolver or
-an invalid/blank/non-positive value degrades to :data:`DEFAULT_TIMEOUT_SEC`.
+``base_url``/``model``/``timeout``/``num_ctx`` are resolved from the runtime
+settings service (``configuration.services.get_setting``: DB override -> Django
+settings -> ``os.environ`` -> default). Values are resolved **at construction
+time** — never cached at import time — and can be refreshed with
+:meth:`reload`, so an admin setting change takes effect on the next provider
+instance without a process restart. Explicit constructor arguments always win; a
+``get_setting`` seam can be injected for tests without touching the database.
+``timeout`` is resolved from ``ollama_timeout`` and the request context window
+from ``ollama_context_length``; a missing/unknown name, a raising resolver or an
+invalid/blank/non-positive value degrades to :data:`DEFAULT_TIMEOUT_SEC` /
+:data:`DEFAULT_CONTEXT_LENGTH` (0 = do not send ``num_ctx`` at all).
 
 Vision (terv.md 27. fejezet) is detected from the model's own capability
 metadata via ``POST /api/show`` (field ``capabilities``) and cached in-process
@@ -38,6 +40,11 @@ from .base import LLMError, LLMProvider, normalise_images
 DEFAULT_TIMEOUT_SEC = 120.0
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3-coder:30b"
+#: Sentinel meaning "do not send ``options.num_ctx``", so the Ollama host keeps
+#: whatever context window the model was loaded with. A small model served with
+#: the 4096 default rejects a larger prompt outright, which is what
+#: ``ollama_context_length`` exists to fix on that host.
+DEFAULT_CONTEXT_LENGTH = 0
 
 #: Settings-resolver seam: ``(name) -> effective value``.
 SettingGetter = Callable[[str], Any]
@@ -65,6 +72,7 @@ class OllamaProvider(LLMProvider):
         model: str | None = None,
         timeout: float | None = None,
         *,
+        num_ctx: int | None = None,
         system_prompt: str = STRUCTURED_SYSTEM_PROMPT,
         get_setting: SettingGetter | None = None,
     ) -> None:
@@ -73,21 +81,26 @@ class OllamaProvider(LLMProvider):
         #: :meth:`reload` resolves ``ollama_timeout`` from the settings service.
         self._explicit_timeout: float | None = _coerce_timeout(timeout)
         self._timeout_pinned = timeout is not None
+        #: Request context window when the caller pinned ``num_ctx``, else
+        #: ``None`` so :meth:`reload` resolves ``ollama_context_length``.
+        self._explicit_num_ctx: int = _coerce_num_ctx(num_ctx) or 0
+        self._num_ctx_pinned = num_ctx is not None
         self.system_prompt = system_prompt
         self.base_url = DEFAULT_BASE_URL
         self.model = DEFAULT_MODEL
         self.timeout = DEFAULT_TIMEOUT_SEC
+        self.num_ctx = DEFAULT_CONTEXT_LENGTH
         self.reload(base_url=base_url, model=model)
 
     def reload(self, *, base_url: str | None = None, model: str | None = None) -> None:
-        """Re-resolve ``base_url``/``model``/``timeout`` from the settings service.
+        """Re-resolve ``base_url``/``model``/``timeout``/``num_ctx``.
 
         Called by ``__init__``; call it again to pick up a runtime settings
         change (a provider instance is short-lived per call, so this is usually
         not needed). Explicit arguments win over the settings service, so
-        ``reload(model="x")`` refreshes only the base URL. A ``timeout`` passed
-        to the constructor is sticky: it keeps winning over ``ollama_timeout``
-        across reloads.
+        ``reload(model="x")`` refreshes only the base URL. A ``timeout`` or
+        ``num_ctx`` passed to the constructor is sticky: it keeps winning over
+        ``ollama_timeout``/``ollama_context_length`` across reloads.
         """
         resolved_base = base_url if base_url is not None else self._get_setting("ollama_base_url")
         resolved_model = model if model is not None else self._get_setting("ollama_model")
@@ -97,6 +110,10 @@ class OllamaProvider(LLMProvider):
             self.timeout = self._explicit_timeout or DEFAULT_TIMEOUT_SEC
         else:
             self.timeout = _resolve_timeout(self._get_setting)
+        if self._num_ctx_pinned:
+            self.num_ctx = self._explicit_num_ctx or DEFAULT_CONTEXT_LENGTH
+        else:
+            self.num_ctx = _resolve_num_ctx(self._get_setting)
 
     # -- public API ---------------------------------------------------------
 
@@ -146,7 +163,7 @@ class OllamaProvider(LLMProvider):
         system = kwargs.pop("system", None)
         if system:
             payload["system"] = system
-        options = kwargs.pop("options", None)
+        options = self._request_options(kwargs.pop("options", None))
         if options:
             payload["options"] = options
         # Forward any remaining backend-specific knobs (e.g. ``temperature``,
@@ -193,7 +210,7 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "format": json_schema,
         }
-        options = kwargs.pop("options", None)
+        options = self._request_options(kwargs.pop("options", None))
         if options:
             payload["options"] = options
         # Reasoning ("thinking") models spend minutes per call on a thinking
@@ -225,6 +242,24 @@ class OllamaProvider(LLMProvider):
             except ValidationError as exc:
                 raise LLMError(f"Ollama response does not match {schema.__name__}: {exc}") from exc
         return parsed
+
+    # -- request options ----------------------------------------------------
+
+    def _request_options(self, options: Any) -> dict[str, Any]:
+        """Return the Ollama ``options`` dict to send with a request.
+
+        The caller's own ``options`` always win; the configured
+        :attr:`num_ctx` is only added when the caller did not pin one. When
+        :attr:`num_ctx` is :data:`DEFAULT_CONTEXT_LENGTH` (0) and the caller
+        passed no options, an empty dict is returned so the key is omitted from
+        the payload entirely -- the Ollama host then keeps the context window
+        the model was loaded with, which is the behaviour an unconfigured
+        deployment must not change.
+        """
+        merged = dict(options) if isinstance(options, dict) else {}
+        if self.num_ctx > 0:
+            merged.setdefault("num_ctx", self.num_ctx)
+        return merged
 
     # -- vision -------------------------------------------------------------
 
@@ -365,6 +400,51 @@ def _resolve_timeout(get_setting: SettingGetter) -> float:
     except Exception:  # noqa: BLE001 - a missing service/DB must not break construction
         return DEFAULT_TIMEOUT_SEC
     return _coerce_timeout(value) or DEFAULT_TIMEOUT_SEC
+
+
+def _coerce_num_ctx(value: Any) -> int:
+    """Return *value* as a positive token count, or ``0`` when unusable.
+
+    ``0`` is the "do not send ``num_ctx``" sentinel, so it is also the fallback
+    for every unusable input. Accepts a numeric string because a plain
+    ``env("OLLAMA_CONTEXT_LENGTH")`` in ``config/settings.py`` does not cast;
+    rejects booleans, blanks, non-numeric text, ``NaN``/``inf``, fractions and
+    non-positive numbers.
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        try:
+            number = float(text)
+        except ValueError:
+            return 0
+    elif isinstance(value, int):
+        number = float(value)
+    elif isinstance(value, float):
+        number = value
+    else:
+        return 0
+    if not math.isfinite(number) or number <= 0 or number != int(number):
+        return 0
+    return int(number)
+
+
+def _resolve_num_ctx(get_setting: SettingGetter) -> int:
+    """Resolve ``ollama_context_length`` from the settings service, never raising.
+
+    An unregistered name, a raising resolver, an unavailable database or any
+    unusable value degrade to :data:`DEFAULT_CONTEXT_LENGTH` (0 = do not send
+    ``num_ctx``), so a deployment that has not configured the knob behaves
+    exactly as before and a broken one can never break provider construction.
+    """
+    try:
+        value = get_setting("ollama_context_length")
+    except Exception:  # noqa: BLE001 - a missing service/DB must not break construction
+        return DEFAULT_CONTEXT_LENGTH
+    return _coerce_num_ctx(value)
 
 
 def _message_content(result: dict[str, Any]) -> str | None:

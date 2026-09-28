@@ -15,6 +15,36 @@ Example payload (terv.md 8.)::
       "mounting": {"type": "M5", "count": 2},
       "material": "PETG"
     }
+
+Two audiences, two homes for the prose
+----------------------------------------
+Pydantic has one description slot per node: a class docstring *is* the
+``$defs.<name>.description`` the LLM is shown, and there is no way to keep a
+long developer docstring "out" of the JSON schema. The Planner's prompt is
+~4.2k real tokens against Ollama's 4096-token default context, and
+``PlannerPlan.model_json_schema()`` is 72% of that request -- 41% of it raw
+``description`` prose addressed to Python developers (Sphinx roles, doc
+pointers, "why this exists" rationale) that the model cannot use.
+
+So the split is mechanical and lossless:
+
+* **Model-facing constraint text** -- the unit, the required-ness, the
+  ordering, the range, the meaning -- stays in the ``description=`` of the
+  exact field it constrains, and nowhere else. That placement is strictly
+  better than a paragraph in the system prompt: the model reads it while it is
+  filling that very field, under grammar-constrained decoding.
+* **Developer-facing documentation** -- Sphinx roles, ``docs/....md`` pointers,
+  "why this exists" rationale -- moves into the ``#:`` comment block
+  immediately above the class, so it stays in the file, greppable and readable
+  in an editor, but costs the request zero tokens.
+
+The models below therefore carry a ``#:`` documentation block and (where the
+per-field descriptions already say everything) no class docstring at all. A
+docstring here is not free: it is shipped to the model on every single call.
+Do not move developer prose back into one.
+
+``ReviewResult`` (the vision self-check contract) follows the same rule; its
+human documentation also lives in a ``#:`` block above the class.
 """
 
 from __future__ import annotations
@@ -97,9 +127,13 @@ MIN_ROUND_RADIUS_MM = 0.0
 MAX_ROUND_RADIUS_MM = 100.0
 
 
+#: How the part is fastened (terv.md 8.).
+#:
+#: ``type`` names the standard or hole size ("M5", "M3", "none") and ``count``
+#: the number of matching points/holes. ``count = 0`` means the part is not
+#: fastened at all. The class carries no schema description: both fields state
+#: their own contract, which is where the LLM reads it.
 class Mounting(BaseModel):
-    """How the part is fastened (terv.md 8.)."""
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     type: str = Field(
@@ -110,13 +144,16 @@ class Mounting(BaseModel):
     count: int = Field(
         ge=0,
         le=MAX_MOUNTING_COUNT,
-        description="Number of mounting points/holes (0 when the part is not fastened).",
+        description="Number of mounting points/holes; 0 when not fastened.",
     )
 
 
+#: Bounding-box dimensions of the produced object, in millimetres.
+#:
+#: Every edge is bounded by ``0 < edge <= MAX_DIMENSION_MM``. The three field
+#: descriptions carry the unit, so the class itself needs no schema
+#: description.
 class Dimensions(BaseModel):
-    """Bounding-box dimensions of the produced object, in millimetres."""
-
     model_config = ConfigDict(extra="forbid")
 
     width: float = Field(gt=0, le=MAX_DIMENSION_MM, description="Width in mm.")
@@ -124,9 +161,14 @@ class Dimensions(BaseModel):
     thickness: float = Field(gt=0, le=MAX_DIMENSION_MM, description="Thickness in mm.")
 
 
+#: A point or direction in model coordinates, millimetres (docs 3.1).
+#:
+#: Used for a primitive's ``position``/``rotation`` and for an operation's
+#: ``origin``/``normal``. The unit and the meaning belong to the *using* field
+#: ("Primitive centre in mm", "XYZ rotation in degrees", ...), so this class
+#: deliberately ships no schema description: repeating it in ``$defs`` would
+#: only duplicate text the LLM already has next to the field.
 class Vec3(BaseModel):
-    """A point or direction in model coordinates, millimetres (docs 3.1)."""
-
     model_config = ConfigDict(extra="forbid")
 
     x: float
@@ -134,14 +176,15 @@ class Vec3(BaseModel):
     z: float
 
 
+#: A point of a 2D profile in the XZ plane, millimetres (docs/skills.md 5).
+#:
+#: The ``extrude`` primitive renders its ``profile`` with
+#: ``linear_extrude(height) polygon(points)``, so the outline is an inline
+#: point list -- never a file, never ``import()``/``surface()``. The XZ plane,
+#: the millimetre unit and the >= 3-point minimum are stated on
+#: ``Primitive.profile``; see the module docstring for why this class has no
+#: schema description of its own.
 class Vec2(BaseModel):
-    """A point of a 2D profile in the XZ plane, millimetres (docs/skills.md 5).
-
-    The ``extrude`` primitive renders its ``profile`` with
-    ``linear_extrude(height) polygon(points)``, so the outline is an inline
-    point list -- never a file, never ``import()``/``surface()``.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     x: float
@@ -167,27 +210,29 @@ def _check_vec2_range(name: str, value: Vec2, low: float, high: float) -> None:
             raise ValueError(f"{name}.{axis} must be between {low} and {high}, got {component}")
 
 
+#: One validated CSG primitive the LLM composes into a model.
+#:
+#: The LLM emits primitives -- never OpenSCAD code -- and the CAD backend
+#: re-validates and clamps every value before building the union/difference
+#: tree (docs/cad-primitives.md 1). ``position`` is the centre of the shape in
+#: model coordinates and ``rotation`` is in degrees, applied in XYZ order.
+#:
+#: The model-facing half of this contract -- the millimetre units, the
+#: per-type required sizes, the >= 3-point ordered profile, the build-plate
+#: rule, the add/subtract roles -- is carried by the individual field
+#: descriptions below rather than by a class docstring, because that is where
+#: the LLM reads it while filling the object (see the module docstring).
 class Primitive(BaseModel):
-    """One validated CSG primitive the LLM composes into a model.
-
-    The LLM emits primitives -- never OpenSCAD code -- and the CAD backend
-    re-validates and clamps every value before building the union/difference
-    tree (docs/cad-primitives.md 1). ``position`` is the centre of the shape in
-    model coordinates and ``rotation`` is in degrees, applied in XYZ order.
-    """
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    type: Literal["box", "cylinder", "sphere", "cone", "extrude"] = Field(
-        description="Primitive shape.",
-    )
+    type: Literal["box", "cylinder", "sphere", "cone", "extrude"]
     role: Literal["add", "subtract"] = Field(
         default="add",
         description="add adds material, subtract cuts it away.",
     )
     position: Vec3 = Field(
         default_factory=_zero_vec3,
-        description="Primitive centre in mm; the part rests on the build plate (minimum Z = 0).",
+        description="Primitive centre in mm; the part rests on the plate (min Z = 0).",
     )
     rotation: Vec3 = Field(
         default_factory=_zero_vec3,
@@ -197,58 +242,47 @@ class Primitive(BaseModel):
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description="Box size along X in mm (required for type box).",
+        description="Box size along X in mm (required for box).",
     )
     depth: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description="Box size along Y in mm (required for type box).",
+        description="Box size along Y in mm (required for box).",
     )
     height: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description=(
-            "Box size along Z, or the cylinder/cone height, in mm "
-            "(required for box, cylinder and cone)."
-        ),
+        description="Height in mm (required for box, cylinder, cone, extrude; box size along Z).",
     )
     diameter: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_PRIMITIVE_MM,
-        description=(
-            "Cylinder/sphere/cone diameter in mm (required for cylinder, sphere and cone)."
-        ),
+        description="Diameter in mm (required for cylinder, sphere, cone).",
     )
     profile: list[Vec2] = Field(
         default_factory=list,
         max_length=MAX_PROFILE_POINTS,
-        description=(
-            "2D outline points in the XZ plane, in mm (required for type extrude, "
-            "at least 3 points); the CAD backend extrudes it to height."
-        ),
+        description="Outline points in the XZ plane, in mm, in order, min 3 (extrude only).",
     )
     wall_thickness: float | None = Field(
         default=None,
         ge=MIN_PRIMITIVE_MM,
         le=MAX_WALL_MM,
-        description=(
-            "Hollow-wall thickness in mm for an extrude primitive; when set the "
-            "profile is offset inwards to create an outer shell."
-        ),
+        description="Hollow-wall thickness in mm (extrude only): offsets the outline inwards.",
     )
     round_radius: float | None = Field(
         default=None,
         ge=MIN_ROUND_RADIUS_MM,
         le=MAX_ROUND_RADIUS_MM,
-        description="Optional top-edge rounding radius in mm (extrude primitive).",
+        description="Top-edge rounding radius in mm (extrude only).",
     )
     label: str = Field(
         default="",
         max_length=MAX_PRIMITIVE_LABEL,
-        description="Optional short human-readable label.",
+        description="Optional short label.",
     )
 
     @field_validator("position")
@@ -287,70 +321,74 @@ class Primitive(BaseModel):
         return self
 
 
+#: One validated parametric feature derived from a visual annotation.
+#:
+#: The LLM emits operations -- never OpenSCAD code -- and the CAD backend
+#: re-validates and clamps every value (docs/visual-editing.md 3.1, 3.3).
+#: ``normal`` is normalised by the CAD backend, so it need not be unit length;
+#: that fact is stated on the field itself, which is where the LLM reads it.
 class EditOperation(BaseModel):
-    """One validated parametric feature derived from a visual annotation.
-
-    The LLM emits operations -- never OpenSCAD code -- and the CAD backend
-    re-validates and clamps every value (docs/visual-editing.md 3.1, 3.3).
-    """
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     kind: Literal["hole", "pocket", "boss", "slot", "cut", "add"] = Field(
-        description="Feature type: subtraction (hole/pocket/cut/slot) or addition (boss/add).",
+        description="Subtractive (hole/pocket/cut/slot) or additive (boss/add).",
     )
-    origin: Vec3 = Field(description="Feature origin in model coordinates (mm).")
+    origin: Vec3 = Field(description="Feature origin in mm.")
     normal: Vec3 = Field(
-        description="Operation axis; need not be unit length (the CAD backend normalises).",
+        description="Operation axis; need not be unit length.",
     )
     depth: float = Field(
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_DEPTH_MM,
-        description="Cut depth / boss height in mm; required for every operation.",
+        description="Cut depth / boss height in mm; always required.",
     )
     width: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_SIZE_MM,
-        description="Required for kinds pocket, cut and add; ignored otherwise.",
+        description="Required for pocket, cut, add; ignored otherwise.",
     )
     height: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_SIZE_MM,
-        description="Required for kinds pocket, cut and add; ignored otherwise.",
+        description="Required for pocket, cut, add; ignored otherwise.",
     )
     diameter: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_DIAMETER_MM,
-        description="Required for kinds hole, boss and slot; ignored otherwise.",
+        description="Required for hole, boss, slot; ignored otherwise.",
     )
     length: float | None = Field(
         default=None,
         ge=MIN_OPERATION_MM,
         le=MAX_OPERATION_SIZE_MM,
-        description="Required for the slot kind; ignored otherwise.",
+        description="Required for slot; ignored otherwise.",
     )
     label: str = Field(
         default="",
         max_length=MAX_OPERATION_LABEL,
-        description="Optional short human-readable label.",
+        description="Optional short label.",
     )
 
 
+#: The single validated contract between the LLM and the CAD backend
+#: (terv.md 8. fejezet).
+#:
+#: The LLM and the CAD backend exchange validated data and **never free
+#: text**: the CAD backend relies on the field types and bounds below instead
+#: of re-parsing prose. ``operations`` and ``primitives`` extend the base
+#: example; an empty list keeps the built-in CAD template.
 class ModelSpecification(BaseModel):
-    """The single validated contract between the LLM and the CAD backend."""
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     object: str = Field(
         min_length=1,
         max_length=128,
         description=(
-            "Machine-readable object kind describing the requested object, "
-            'e.g. "cookie_cutter" or "wall_bracket". Name the real object; '
-            "never use a generic fallback when the request names a specific object."
+            'Machine-readable object kind, e.g. "cookie_cutter". Name the real '
+            "object, not a generic fallback."
         ),
     )
     dimensions: Dimensions
@@ -372,15 +410,12 @@ class ModelSpecification(BaseModel):
     )
     operations: list[EditOperation] = Field(
         default_factory=list,
-        description="Validated parametric features applied to the base part (visual prompts).",
+        description="Parametric features applied to the part.",
     )
     primitives: list[Primitive] = Field(
         default_factory=list,
         max_length=MAX_PRIMITIVE_COUNT,
-        description=(
-            "Validated CSG primitives composed by the LLM; empty keeps the built-in template "
-            "(docs/cad-primitives.md 1)."
-        ),
+        description="CSG primitives that build the object; [] keeps the phone-holder template.",
     )
 
     @field_validator("material")
@@ -465,42 +500,40 @@ MAX_CLARIFICATION_ANSWER = 600
 MAX_CLARIFICATION_FIELD = 120
 
 
+#: One question the Planner asked (or silently assumed) about the request.
+#:
+#: ``kind="assumed"`` means the Planner filled ``answer`` with its own guess
+#: and the run continues; ``kind="needs_user_input"`` means it deliberately
+#: left ``answer`` empty and, under the ``ask`` policy, the run stops until the
+#: user answers (docs/planner-clarification.md 1). ``field`` is an optional
+#: dotted path such as ``"dimensions.width"``.
+#:
+#: This is a Planner-only contract: it is part of ``PlannerPlan``, never of
+#: :class:`ModelSpecification`, so it never reaches the CAD backend and the
+#: strict LLM<->CAD contract (terv.md 8. fejezet) stays unchanged. None of that
+#: is model-facing, so the two ``kind`` semantics and the field meanings live on
+#: the fields (which is also where the LLM reads them) rather than in a class
+#: docstring.
 class Clarification(BaseModel):
-    """One question the Planner asked (or silently assumed) about the request.
-
-    ``kind="assumed"`` means the Planner filled ``answer`` with its own guess
-    and the run continues; ``kind="needs_user_input"`` means it deliberately
-    left ``answer`` empty and, under the ``ask`` policy, the run stops until the
-    user answers (docs/planner-clarification.md 1). ``field`` is an optional
-    dotted path such as ``"dimensions.width"``.
-
-    This is a Planner-only contract: it is part of ``PlannerPlan``, never of
-    :class:`ModelSpecification`, so it never reaches the CAD backend and the
-    strict LLM<->CAD contract (terv.md 8. fejezet) stays unchanged.
-    """
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     question: str = Field(
         max_length=MAX_CLARIFICATION_QUESTION,
-        description="The question put to the user (or the assumption made explicit).",
+        description="The question asked, or the assumption stated.",
     )
     answer: str = Field(
         default="",
         max_length=MAX_CLARIFICATION_ANSWER,
-        description="The Planner's assumed answer; empty when the user must answer.",
+        description="The assumed answer; empty when the user must answer.",
     )
     kind: Literal["assumed", "needs_user_input"] = Field(
         default="assumed",
-        description=(
-            "assumed means the Planner guessed an answer and the run continues; "
-            "needs_user_input means it must ask the user."
-        ),
+        description="assumed = Planner guessed, run continues; needs_user_input = ask the user.",
     )
     field: str = Field(
         default="",
         max_length=MAX_CLARIFICATION_FIELD,
-        description='Optional dotted spec path the question is about, e.g. "dimensions.width".',
+        description='Optional dotted path, e.g. "dimensions.width".',
     )
 
 
@@ -514,17 +547,18 @@ MAX_REVIEW_ISSUES = 20
 MAX_REVIEW_SUMMARY = 500
 
 
+#: Structured verdict returned by the vision self-check.
+#:
+#: The review node asks a vision-capable provider to compare the rendered
+#: preview against the original request and returns this validated payload.
+#: Like :class:`ModelSpecification`, it is a strict contract: no extra keys,
+#: whitespace-trimmed strings and bounded collections (docs/vision-self-check.md
+#: 3). ``matches`` is required; ``issues``/``summary`` are optional and default
+#: to empty. This model is a sibling of the Planner contract, not part of it, so
+#: it is not in ``PlannerPlan``'s schema -- but it ships in the same 4096-token
+#: budget, so it follows the same rule: human documentation in this comment,
+#: model-facing meaning on the fields.
 class ReviewResult(BaseModel):
-    """Structured verdict returned by the vision self-check.
-
-    The review node asks a vision-capable provider to compare the rendered
-    preview against the original request and returns this validated payload.
-    Like :class:`ModelSpecification`, it is a strict contract: no extra keys,
-    whitespace-trimmed strings and bounded collections (docs/vision-self-check.md
-    3). ``matches`` is required; ``issues``/``summary`` are optional and
-    default to empty.
-    """
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     matches: bool = Field(

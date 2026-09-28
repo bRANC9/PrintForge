@@ -114,6 +114,20 @@
                     <p class="muted field-hint">Egy Ollama LLM-hívás felső időkorlátja másodpercben. Nagyobb, CPU-ra offloadolt modelleknél emeld meg (pl. 300–600), különben a Planner timeoutol.</p>
                 </div>
                 <div class="form-row">
+                    <label for="setting-ollama-context-length">Ollama kontextusablak (token) <span class="badge"
+       :class="'source-' + source('ollama_context_length')"
+       x-text="source('ollama_context_length')"></span></label>
+                    <input id="setting-ollama-context-length"
+                           class="input"
+                           type="number"
+                           min="0"
+                           step="1024"
+                           placeholder="0"
+                           x-model.number="form.ollama_context_length"
+                           :disabled="saving">
+                    <p class="muted field-hint">A Planner kérése kb. 4,2k token, ezért egy 4096-es alapértelmezett kontextusú modell el sem indul: az Ollama a modell futtatása előtt elutasítja a kérést. 0 = ne küldjünk <code>num_ctx</code>-et (a hoszt saját alapértelmezése). Állítsd 16384-re, ha a hoszton 4096-tokenes modellek futnak.</p>
+                </div>
+                <div class="form-row">
                     <label for="setting-embedding-model">Embedding modell <span class="badge"
        :class="'source-' + source('embedding_model')"
        x-text="source('embedding_model')"></span></label>

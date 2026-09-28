@@ -43,6 +43,11 @@ class AppSettings(models.Model):
     # ``OLLAMA_TIMEOUT`` / the hardcoded default (120 s)", matching the
     # ``openscad_timeout_sec`` / ``slicer_timeout_sec`` overrides.
     ollama_timeout = models.PositiveIntegerField(null=True, blank=True)
+    # Request context window sent to Ollama as `num_ctx`. 0 (the default) means
+    # "do not send num_ctx", so an existing deployment keeps the host's own
+    # default until someone opts in. Empty means "fall back to
+    # ``OLLAMA_CONTEXT_LENGTH`` / the hardcoded default (0)".
+    ollama_context_length = models.PositiveIntegerField(null=True, blank=True)
     # LLM provider selection: "ollama" (default) or an OpenAI-compatible
     # endpoint. ``openai_api_key`` is a credential; this model has no dedicated
     # secret field, so it is stored as a plain CharField.

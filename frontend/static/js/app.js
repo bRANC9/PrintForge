@@ -1121,6 +1121,7 @@
                 ollama_model: "",
                 ollama_vision_model: "",
                 ollama_timeout: "",
+                ollama_context_length: "",
                 embedding_model: "",
                 rag_enabled: false,
                 openscad_mode: "",
@@ -1148,6 +1149,12 @@
                     data.ollama_timeout === null || data.ollama_timeout === undefined
                         ? ""
                         : data.ollama_timeout,
+                // 0 is a real value here ("do not send num_ctx"), so this must
+                // keep the explicit null/undefined test -- `|| ""` would eat it.
+                ollama_context_length:
+                    data.ollama_context_length === null || data.ollama_context_length === undefined
+                        ? ""
+                        : data.ollama_context_length,
                 embedding_model: data.embedding_model || "",
                 rag_enabled: Boolean(data.rag_enabled),
                 openscad_mode: data.openscad_mode || "",

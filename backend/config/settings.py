@@ -292,6 +292,16 @@ OLLAMA_VISION_MODEL = env("OLLAMA_VISION_MODEL", default="")
 # Request timeout (seconds) for Ollama LLM calls; raise it for slow/offloaded
 # models. Runtime override: `ollama_timeout`.
 OLLAMA_TIMEOUT = env.int("OLLAMA_TIMEOUT", default=120)
+# Ollama request context window. The Planner's prompt is ~4.2k tokens, so a
+# model served with the 4096 default cannot answer at all -- Ollama rejects the
+# request before the model sees it. Raise this on the Ollama host to match.
+# 0 = do not send `num_ctx` at all, so an existing deployment is unchanged until
+# someone opts in. The int default makes django-environ "smart cast" the value
+# (same as env.int, verified), so this is an int once set and a non-numeric value
+# is a boot-time error, not a silent 0. Consumers should still coerce: the
+# runtime override in `configuration` is the other source of this number.
+# Runtime override: `ollama_context_length`.
+OLLAMA_CONTEXT_LENGTH = env("OLLAMA_CONTEXT_LENGTH", default=0)
 
 # LLM provider selection (terv.md 19. fejezet). "ollama" is the default and
 # needs nothing else; set it to "openai" to use any OpenAI-compatible endpoint

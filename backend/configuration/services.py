@@ -91,6 +91,7 @@ _SETTING_SPECS: dict[str, SettingSpec] = {
     "ollama_model": SettingSpec("OLLAMA_MODEL", "qwen3-coder:30b"),
     "ollama_vision_model": SettingSpec("OLLAMA_VISION_MODEL", ""),
     "ollama_timeout": SettingSpec("OLLAMA_TIMEOUT", 120),
+    "ollama_context_length": SettingSpec("OLLAMA_CONTEXT_LENGTH", 0),
     "llm_provider": SettingSpec("LLM_PROVIDER", "ollama"),
     "openai_base_url": SettingSpec("OPENAI_BASE_URL", ""),
     "openai_api_key": SettingSpec("OPENAI_API_KEY", "", secret=True),

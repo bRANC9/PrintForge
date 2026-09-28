@@ -21,7 +21,12 @@ from agents.llm import (
     get_provider,
     normalise_images,
 )
-from agents.llm.ollama import DEFAULT_TIMEOUT_SEC, _service_setting
+from agents.llm.ollama import (
+    DEFAULT_CONTEXT_LENGTH,
+    DEFAULT_TIMEOUT_SEC,
+    _coerce_num_ctx,
+    _service_setting,
+)
 from agents.spec import ModelSpecification
 
 VALID_SPEC: dict[str, Any] = ModelSpecification.example()
@@ -365,7 +370,95 @@ def test_reload_keeps_explicit_timeout():
     assert provider.timeout == 7.0
 
 
+# ---------------------------------------------------------------------------
+# OllamaProvider request context window (injected seam, no network)
+# ---------------------------------------------------------------------------
+#
+# A model served with the 4096 default rejects the Planner's request outright
+# ("request (4208 tokens) exceeds the available context size"), which is what
+# ``ollama_context_length`` exists to fix on the Ollama host. 0 must mean "do not
+# send num_ctx at all", so an unconfigured deployment is byte-identical to
+# before the knob existed.
+
+
+def test_num_ctx_defaults_to_not_sending_the_option():
+    provider = OllamaProvider(get_setting=fake_settings())
+    assert provider.num_ctx == DEFAULT_CONTEXT_LENGTH == 0
+
+
+def test_num_ctx_uses_runtime_setting():
+    provider = OllamaProvider(get_setting=fake_settings({"ollama_context_length": 8192}))
+    assert provider.num_ctx == 8192
+
+
+def test_num_ctx_accepts_numeric_string_setting():
+    """``env("OLLAMA_CONTEXT_LENGTH")`` in settings.py does not cast."""
+    provider = OllamaProvider(get_setting=fake_settings({"ollama_context_length": "16384"}))
+    assert provider.num_ctx == 16384
+
+
+def test_explicit_num_ctx_wins_over_setting():
+    provider = OllamaProvider(
+        num_ctx=4096, get_setting=fake_settings({"ollama_context_length": 8192})
+    )
+    assert provider.num_ctx == 4096
+
+
+def test_num_ctx_degrades_when_seam_raises():
+    def broken(name: str) -> Any:
+        if name == "ollama_context_length":
+            raise RuntimeError("settings service unavailable")
+        return None
+
+    assert OllamaProvider(get_setting=broken).num_ctx == DEFAULT_CONTEXT_LENGTH
+
+
+def test_num_ctx_degrades_when_setting_is_unregistered():
+    """A deployment without the knob registered must still construct."""
+
+    def unknown(name: str) -> Any:
+        if name == "ollama_context_length":
+            raise ValueError(f"Unknown setting: {name}")
+        return None
+
+    assert OllamaProvider(get_setting=unknown).num_ctx == DEFAULT_CONTEXT_LENGTH
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [0, -5, "0", "-1", "", "   ", "abc", None, True, 1.5, "1.5", float("nan"), float("inf")],
+)
+def test_invalid_num_ctx_setting_falls_back_to_not_sending(bad):
+    provider = OllamaProvider(get_setting=fake_settings({"ollama_context_length": bad}))
+    assert provider.num_ctx == DEFAULT_CONTEXT_LENGTH
+
+
+def test_invalid_explicit_num_ctx_falls_back_to_not_sending():
+    provider = OllamaProvider(
+        num_ctx=-1, get_setting=fake_settings({"ollama_context_length": 8192})
+    )
+    assert provider.num_ctx == DEFAULT_CONTEXT_LENGTH
+
+
+def test_reload_picks_up_num_ctx_change():
+    live = {**SERVICE_VALUES, "ollama_context_length": 4096}
+    provider = OllamaProvider(get_setting=lambda name: live[name])
+    assert provider.num_ctx == 4096
+    live["ollama_context_length"] = 16384
+    provider.reload()
+    assert provider.num_ctx == 16384
+
+
+def test_reload_keeps_explicit_num_ctx():
+    live = {**SERVICE_VALUES, "ollama_context_length": 4096}
+    provider = OllamaProvider(num_ctx=2048, get_setting=lambda name: live[name])
+    live["ollama_context_length"] = 16384
+    provider.reload()
+    assert provider.num_ctx == 2048
+
+
 def test_default_resolver_uses_module_seam(monkeypatch):
+
     monkeypatch.setattr("agents.llm.ollama._service_setting", fake_settings())
     provider = OllamaProvider()
     assert (provider.base_url, provider.model) == ("http://from-service:11434", "service-model")
@@ -490,6 +583,66 @@ def test_structured_rejects_missing_message(monkeypatch):
     provider, _ = _capturing_post(monkeypatch, {"done": True})
     with pytest.raises(LLMError):
         provider.structured("hi", ModelSpecification)
+
+
+# ---------------------------------------------------------------------------
+# Request context window in the payload (``ollama_context_length``)
+# ---------------------------------------------------------------------------
+
+
+def _configured_post(monkeypatch, result: dict[str, Any], num_ctx: Any):
+    provider, calls = _capturing_post(monkeypatch, result)
+    provider.num_ctx = _coerce_num_ctx(num_ctx)
+    return provider, calls
+
+
+def test_unconfigured_provider_sends_no_options_at_all(monkeypatch):
+    """The default deployment's payload must not change."""
+    provider, calls = _configured_post(
+        monkeypatch, {"message": {"content": json.dumps(VALID_SPEC)}}, num_ctx=0
+    )
+    provider.structured("hi", ModelSpecification)
+    assert "options" not in calls[0][1]
+
+    provider, calls = _configured_post(monkeypatch, {"response": "ok"}, num_ctx=0)
+    provider.generate("hi")
+    assert "options" not in calls[0][1]
+
+
+def test_configured_num_ctx_is_sent_on_structured_calls(monkeypatch):
+    """The setting must actually reach Ollama as ``options.num_ctx``."""
+    provider, calls = _configured_post(
+        monkeypatch, {"message": {"content": json.dumps(VALID_SPEC)}}, num_ctx=8192
+    )
+    provider.structured("hi", ModelSpecification)
+    assert calls[0][1]["options"] == {"num_ctx": 8192}
+
+
+def test_configured_num_ctx_is_sent_on_generate_calls(monkeypatch):
+    provider, calls = _configured_post(monkeypatch, {"response": "ok"}, num_ctx=8192)
+    provider.generate("hi")
+    assert calls[0][1]["options"] == {"num_ctx": 8192}
+
+
+def test_caller_options_win_over_configured_num_ctx(monkeypatch):
+    """A per-call override (e.g. the probe harness) must not be clobbered."""
+    provider, calls = _configured_post(
+        monkeypatch, {"message": {"content": json.dumps(VALID_SPEC)}}, num_ctx=8192
+    )
+    provider.structured("hi", ModelSpecification, options={"num_ctx": 4096, "temperature": 0})
+    assert calls[0][1]["options"] == {"num_ctx": 4096, "temperature": 0}
+
+
+def test_configured_num_ctx_merges_with_caller_options(monkeypatch):
+    provider, calls = _configured_post(monkeypatch, {"response": "ok"}, num_ctx=8192)
+    provider.generate("hi", options={"temperature": 0.1})
+    assert calls[0][1]["options"] == {"temperature": 0.1, "num_ctx": 8192}
+
+
+def test_unconfigured_num_ctx_leaves_caller_options_untouched(monkeypatch):
+    provider, calls = _configured_post(monkeypatch, {"response": "ok"}, num_ctx=0)
+    provider.generate("hi", options={"temperature": 0.1})
+    assert calls[0][1]["options"] == {"temperature": 0.1}
 
 
 def test_connection_error_is_wrapped(monkeypatch):
