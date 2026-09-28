@@ -29,6 +29,8 @@ from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
+from .silhouette import check_silhouette
+
 __all__ = [
     "HOLE_PREFIX_WORDS",
     "HOLE_WHOLE_WORDS",
@@ -425,6 +427,13 @@ def consistency_issues(prompt: str, specification: Mapping[str, Any] | None) -> 
                     f"(minimum {_SILHOUETTE_MIN_POINTS}): draw the actual silhouette as a "
                     "polygon (a tree outline needs at least 6 ordered points, more for branches)"
                 )
+            # The point count is a floor, not evidence of a shape. Measured: for a
+            # tree-cookie-cutter request none of thirteen models drew a
+            # recognisable outline -- the best of them a five-point trapezoid,
+            # which clears six points nowhere but is certainly not a tree. The
+            # geometry check is what actually tells the two apart.
+            else:
+                issues.extend(check_silhouette(points))
 
     if _mentions(haystack, PRESS_WORDS):
         for primitive in extrudes:
