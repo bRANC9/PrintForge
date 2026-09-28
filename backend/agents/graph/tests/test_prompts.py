@@ -75,9 +75,19 @@ def test_planner_system_prompt_fits_the_token_budget() -> None:
     build has no tokenize endpoint, so the chars/4 estimate is calibrated
     against the one real ``n_prompt_tokens`` the host reported for this request
     shape (it runs ~12% low).
+
+    The cap was raised from 700 to 850 to fit the "draw simple parts" and
+    "outline, not bounding box" instructions, which are the only thing in the
+    prompt that addresses a *measured* behaviour rather than a schema fact: with
+    a mechanism-only instruction, all three 7B-12B models answered a tree-cookie-
+    cutter request with a four-point rectangle, 0 of 15 attempts recognisable
+    (docs/model-matrix-test-round.md). The real constraint is the whole-request
+    test below, which counts the system message as the model receives it; this
+    per-part figure is a coarser early warning, and it is set with that
+    relationship in mind rather than as the binding limit.
     """
     estimated = len(PLANNER_SYSTEM_PROMPT) // 4
-    assert estimated <= 700, f"PLANNER_SYSTEM_PROMPT grew to ~{estimated} tokens"
+    assert estimated <= 850, f"PLANNER_SYSTEM_PROMPT grew to ~{estimated} tokens"
 
 
 #: The context window a model served with Ollama's default is loaded with. The
@@ -230,13 +240,54 @@ def test_planner_still_teaches_the_flat_extrude_rule() -> None:
     """A flat 2D shape is one ``extrude`` with a real, ordered ``profile``.
 
     This is a behavioural instruction (when to choose a shape), so it cannot
-    live in the schema; it stayed in the prompt through the trim.
+    live in the schema; it stayed in the prompt through the trim. The wording is
+    the one that came out of the silhouette measurement -- see
+    ``test_planner_teaches_what_a_named_outline_looks_like`` for the part that
+    was added because a mechanism-only instruction was not enough.
     """
     prompt = PLANNER_SYSTEM_PROMPT
-    assert "2D-shaped object" in prompt
+    assert "flat 2D shape" in prompt
     assert "'extrude'" in prompt
     assert "'profile'" in prompt
-    assert "outline points in order" in prompt
+    assert "outline" in prompt
+
+
+def test_planner_teaches_what_a_named_outline_looks_like() -> None:
+    """The outline instruction, not just the mechanism.
+
+    Measured: with a prompt that said only "use one extrude whose profile lists
+    the outline points in order", every 7B-12B model answered a tree-cookie-
+    cutter request with a four-point rectangle -- 0 of 15 attempts recognisable.
+    Telling the model *that* it needs a profile was not the missing information;
+    telling it *what the profile looks like* is. These assertions pin that, so
+    the instruction cannot be trimmed back to a mechanism.
+    """
+    prompt = PLANNER_SYSTEM_PROMPT
+    # The failure it prevents, named explicitly.
+    assert "never its\n    bounding box" in prompt or "never its bounding box" in prompt
+    # A concrete, followable recipe rather than an adjective.
+    assert "tiers of branches" in prompt
+    assert "point outward then a notch back inward" in prompt
+    assert "single point at the top" in prompt
+    # The extra part is a separate primitive, not folded into the outline.
+    assert "second\n    primitive" in prompt or "second primitive" in prompt
+
+
+def test_planner_tells_the_model_that_a_simple_part_is_a_good_answer() -> None:
+    """Prefer the plain parametric answer over attempting a complex form.
+
+    Measured motivation: a small model facing a request it cannot satisfy
+    tends to answer with the simplest thing it can name -- a bounding box, or
+    nothing at all (5 of 5 empty specifications on the tree request). Saying
+    that a straightforward adapter or bracket *is* the right answer lowers the
+    pressure to attempt a form it has no vocabulary for, and matches the
+    majority of what PrintForge actually gets asked for.
+    """
+    prompt = PLANNER_SYSTEM_PROMPT
+    assert "simple, clean parts" in prompt
+    assert "adapter" in prompt
+    assert "IS the right answer" in prompt
+    assert "do not attempt" in prompt
 
 
 def test_editor_keeps_base_primitives_and_annotation_anchoring() -> None:

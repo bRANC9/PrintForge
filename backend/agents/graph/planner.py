@@ -138,9 +138,16 @@ PLANNER_SYSTEM_PROMPT = (
     "Use 'primitives': [] ONLY when the user asked for the built-in phone "
     "holder (a phone or tablet stand); otherwise you MUST fill 'primitives' "
     "with the geometry that builds it and never fall back to that template. "
-    "For a flat, 2D-shaped object (a stamp, cookie cutter, silhouette or "
-    "ornament) use a single 'extrude' whose 'profile' lists the {'x','y'} "
-    "outline points in order. "
+    "Draw simple, clean parts - boxes, cylinders and extruded outlines - never "
+    "detailed or organic shapes. Whenever a straightforward adapter, bracket, "
+    "clip or housing fits the request, that IS the right answer; do not attempt "
+    "a complex form because the wording sounds decorative. "
+    "When the user does name a flat 2D shape (a cookie cutter, stamp, "
+    "ornament), the 'profile' must be that shape's actual outline and never its "
+    "bounding box. A stylised tree is 3 or 4 tiers of branches, each tier one "
+    "point outward then a notch back inward, closing to a single point at the "
+    "top. An extra part - a handle, a hook, a hanging hole - is a second "
+    "primitive, never folded into the outline. "
     + OPERATION_DIMENSIONS_PROMPT
     + PRIMITIVE_DIMENSIONS_PROMPT
     + CLARIFICATION_PROMPT
