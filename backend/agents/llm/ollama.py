@@ -20,6 +20,14 @@ invalid/blank/non-positive value degrades to :data:`DEFAULT_TIMEOUT_SEC` /
 Vision (terv.md 27. fejezet) is detected from the model's own capability
 metadata via ``POST /api/show`` (field ``capabilities``) and cached in-process
 per ``(base_url, model)``, so ``/api/show`` is not called on every request.
+
+Error classification is backend-independent (see :class:`LLMResponseError`):
+the three content-shaped failures of ``structured()`` -- not valid JSON, not a
+JSON object, does not match the schema -- are repairable and raise
+``LLMResponseError``. Everything else stays a plain :class:`LLMError`: the
+transport-shaped failures (empty response, no message content, timeout,
+HTTP/connection error, a body that is not a JSON *object*) and the caller
+mistakes (an empty prompt, images on a non-vision model).
 """
 
 from __future__ import annotations
@@ -35,7 +43,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from .base import LLMError, LLMProvider, normalise_images
+from .base import LLMError, LLMProvider, LLMResponseError, normalise_images
 
 DEFAULT_TIMEOUT_SEC = 120.0
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -230,17 +238,27 @@ class OllamaProvider(LLMProvider):
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise LLMError(
+            raise LLMResponseError(
                 f"Ollama structured response is not valid JSON: {content[:200]!r}"
             ) from exc
         if not isinstance(parsed, dict):
-            raise LLMError("Ollama structured response must be a JSON object")
+            raise LLMResponseError("Ollama structured response must be a JSON object")
 
         if isinstance(schema, type) and issubclass(schema, BaseModel):
             try:
                 return schema.model_validate(parsed).model_dump()
             except ValidationError as exc:
-                raise LLMError(f"Ollama response does not match {schema.__name__}: {exc}") from exc
+                # The failure a small local model hits most often on a
+                # structured call -- granite4.2:8b emits an 'extrude' with an
+                # empty profile, llava:13b a depth below the schema minimum
+                # (docs/model-matrix-test-round.md, footnotes 1/3) -- and the
+                # one a re-ask with the concrete complaint can plausibly
+                # repair. ``exc`` rides along so the caller builds the hint
+                # from ``exc.errors()`` rather than from this message.
+                raise LLMResponseError(
+                    f"Ollama response does not match {schema.__name__}: {exc}",
+                    validation_error=exc,
+                ) from exc
         return parsed
 
     # -- request options ----------------------------------------------------
@@ -305,7 +323,10 @@ class OllamaProvider(LLMProvider):
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST *payload* as JSON to *path* and decode the JSON response.
 
-        All transport errors are converted to :class:`LLMError`.
+        All transport errors are converted to :class:`LLMError` and stay
+        non-repairable on purpose: a body that is not JSON, or not a JSON
+        object, is a broken *envelope* rather than an unusable answer, so
+        re-asking the same endpoint would not fix it.
         """
         url = f"{self.base_url}{path}"
         request = urllib.request.Request(

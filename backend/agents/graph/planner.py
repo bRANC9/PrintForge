@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agents.llm import LLMError, LLMProvider
+from agents.llm import LLMError, LLMProvider, LLMResponseError
 from agents.spec import Clarification, ModelSpecification
 
 from .skills import template_object_kind, with_skills
@@ -269,9 +269,25 @@ _REPAIR_PREAMBLE = (
     "and return the complete object again:\n"
 )
 
+#: The single complaint used when a repairable failure has no field-level
+#: detail to quote -- an answer that was not JSON, or was JSON but not an
+#: object. There is no field to name, so the hint names the only thing wrong:
+#: the shape of the whole answer. One bullet, same character cap, same
+#: mechanism as every other hint.
+_REPAIR_SHAPE_COMPLAINT = "return ONE JSON object matching the schema, and nothing else"
 
-def _repair_hint(exc: ValidationError) -> str:
+
+def _repair_hint(exc: ValidationError | LLMResponseError) -> str:
     """Return a bounded repair hint for a schema-invalid Planner answer.
+
+    *exc* is the answer the loop could not accept, in either of the two shapes
+    that mean the same thing: a :class:`~agents.llm.LLMResponseError` the
+    provider raised after validating the model's own answer (the common case on
+    a small local model -- the response did not fit the schema), or a
+    :class:`~pydantic.ValidationError` from :func:`coerce_plan` on a payload the
+    provider accepted (e.g. a bare ``ModelSpecification`` it was lenient
+    about). Both re-ask through this one hint, so both are bounded the same
+    way and neither grows a second mechanism.
 
     The hint carries the problem and the offending location -- the two things a
     model needs to fix itself -- and nothing else. It is bounded twice over, on
@@ -288,6 +304,12 @@ def _repair_hint(exc: ValidationError) -> str:
     :func:`~agents.graph.state.failure_state` on the last attempt, so the
     operator-facing error keeps every violation.
     """
+    if isinstance(exc, LLMResponseError):
+        # No ``validation_error`` means the complaint is about the whole answer
+        # (invalid JSON / not an object), so there are no field errors to list.
+        if exc.validation_error is None:
+            return f"{_REPAIR_PREAMBLE}- (response): {_REPAIR_SHAPE_COMPLAINT}"
+        exc = exc.validation_error
     errors = exc.errors()
     lines = [
         f"- {'.'.join(str(part) for part in error['loc']) or '(root)'}: {error['msg']}"
@@ -315,12 +337,23 @@ def make_planner_node(
     returns a partial state update. All LLM access goes through the injected
     ``LLMProvider``, so tests pass a fake and no live model is required.
 
-    ``planner_retries`` bounds how often a **schema-invalid** answer is re-asked
-    before the run fails. Small local models regularly emit a slightly malformed
+    ``planner_retries`` bounds how often an unusable answer is re-asked before
+    the run fails. Small local models regularly emit a slightly malformed
     structure (e.g. an ``extrude`` whose profile has 2 points instead of 3);
     re-asking usually yields a valid answer, which beats failing the whole
-    generation. ``LLMError`` (timeout / transport) is never retried here -- it
-    would only double the wait for the same timeout.
+    generation. Two shapes of "unusable" are re-asked, because the answer
+    arrived and did not fit: a :class:`~agents.llm.LLMResponseError` the
+    provider raised while validating the model's own answer -- the most frequent
+    non-timeout failure of the 13-model round, 5 of its 39 cells
+    (granite4.2:8b twice, ornith-1.5:9b twice, llava:13b once;
+    docs/model-matrix-test-round.md footnotes 1/3) -- and a
+    :class:`~pydantic.ValidationError` from :func:`coerce_plan` on a payload the
+    provider accepted.
+
+    A plain :class:`~agents.llm.LLMError` (timeout / transport / empty
+    response / caller mistake) is never retried here: the request did not
+    complete, and repeating a timeout would only double the wait for the same
+    timeout.
     """
 
     def planner_node(state: WorkflowState) -> dict[str, Any]:
@@ -334,7 +367,12 @@ def make_planner_node(
             # The re-ask repeats the *question* plus the concrete complaint, so
             # the model can actually repair itself. A blind repeat returns the
             # same malformed structure: measured, granite4.2 / deepseek-r1 always
-            # emit an 'extrude' with an empty profile.
+            # emit an 'extrude' with an empty profile. Measured on the models
+            # that made this loop reachable: the complaint repairs a violated
+            # bound (qwen2.5-coder:7b took wall_thickness 0.2 -> 0.4) but not a
+            # structurally missing field (granite4.2:8b and ornith-1.5:9b both
+            # re-emitted a 0-point extrude profile), so expect the gain on
+            # constraints, not on an absent profile.
             ask = f"{prompt}\n\n{repair_hint}" if repair_hint else prompt
             try:
                 # The optional reference image (terv.md 27.) is attached here; the
@@ -349,7 +387,12 @@ def make_planner_node(
                 )
                 plan = coerce_plan(raw)
                 break
-            except ValidationError as exc:
+            except (LLMResponseError, ValidationError) as exc:
+                # The answer arrived and did not fit, so asking again with the
+                # concrete complaint is worth one more round trip. This is the
+                # measured common case: without it the loop was unreachable for
+                # a provider-raised schema mismatch, which is how granite4.2 /
+                # llava actually failed, and the run died on the first answer.
                 if attempt >= attempts:
                     return failure_state(
                         state,
@@ -357,7 +400,7 @@ def make_planner_node(
                         error_type=type(exc).__name__,
                         message=str(exc),
                     )
-                # Malformed structured output: re-ask with a *bounded* complaint.
+                # Unusable structured output: re-ask with a *bounded* complaint.
                 repair_hint = _repair_hint(exc)
                 logger.warning(
                     "planner returned an invalid plan (attempt %d/%d): %s",
@@ -366,6 +409,8 @@ def make_planner_node(
                     exc,
                 )
             except LLMError as exc:
+                # The request did not complete, so there is nothing to repair:
+                # a timeout would only double the wait for the same timeout.
                 return failure_state(
                     state,
                     stage="planner",

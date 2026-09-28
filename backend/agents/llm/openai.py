@@ -19,6 +19,17 @@ not on the endpoint. Images are sent as ``image_url`` data URIs.
 The API key is a credential: it is read lazily, never logged and never included
 in an error message. Every SDK error is translated to :class:`LLMError`; there is
 no shell execution and no ``eval`` (terv.md 20. fejezet).
+
+Error classification is the same as in the Ollama backend, so the behaviour is
+not Ollama-specific: the three content-shaped failures of ``structured()`` --
+not valid JSON, not a JSON object, does not match the schema -- raise
+:class:`LLMResponseError` (repairable). Everything else stays a plain
+:class:`LLMError`: the transport-shaped failures (empty response, no message
+content and every SDK failure, which is how a gateway surfaces both a timeout
+and an HTTP status) and the caller mistakes (an empty prompt, images without
+vision). The one backend-specific note: the SDK collapses a timeout and an HTTP
+429/5xx into the same exception type, so the two cannot be told apart here --
+and neither is retried, which is the correct outcome for both.
 """
 
 from __future__ import annotations
@@ -31,7 +42,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from .base import LLMError, LLMProvider, normalise_images
+from .base import LLMError, LLMProvider, LLMResponseError, normalise_images
 
 DEFAULT_TIMEOUT_SEC = 120.0
 #: The SDK's own default endpoint; an empty ``openai_base_url`` means "use it".
@@ -185,18 +196,24 @@ class OpenAICompatibleProvider(LLMProvider):
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise LLMError(
+            raise LLMResponseError(
                 f"OpenAI-compatible structured response is not valid JSON: {content[:200]!r}"
             ) from exc
         if not isinstance(parsed, dict):
-            raise LLMError("OpenAI-compatible structured response must be a JSON object")
+            raise LLMResponseError("OpenAI-compatible structured response must be a JSON object")
 
         if isinstance(schema, type) and issubclass(schema, BaseModel):
             try:
                 return schema.model_validate(parsed).model_dump()
             except ValidationError as exc:
-                raise LLMError(
-                    f"OpenAI-compatible response does not match {schema.__name__}: {exc}"
+                # Same three content-shaped failures as the Ollama backend, and
+                # therefore the same repairable classification: a gateway that
+                # ignores or only softly enforces ``response_format`` produces
+                # exactly the unusable answers Ollama does, and the caller can
+                # re-ask with the concrete complaint.
+                raise LLMResponseError(
+                    f"OpenAI-compatible response does not match {schema.__name__}: {exc}",
+                    validation_error=exc,
                 ) from exc
         return parsed
 

@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 #: A single image as raw bytes. ``bytearray``/``memoryview`` are accepted too
 #: and normalised by :func:`normalise_images`.
@@ -73,9 +73,51 @@ class LLMError(RuntimeError):
 
     This is the single error type callers need to handle: transport failures,
     malformed responses, schema-validation failures and requests to use images
-    on a non-vision model are all translated into ``LLMError`` with a
-    human-readable message.
+    on a non-vision model are all translated into ``LLMError`` (or its
+    repairable subclass :class:`LLMResponseError`) with a human-readable
+    message.
     """
+
+
+class LLMResponseError(LLMError):
+    """The model answered, the answer was unusable, and asking again may fix it.
+
+    The distinction this type draws is **repairability**, and it is the one an
+    agent loop needs in order to decide whether to re-ask:
+
+    * a response that *arrived* and does not fit can be asked for again with
+      the concrete complaint attached (the Planner's repair loop does exactly
+      that), so this is raised for the three **content-shaped** failures:
+      the answer is not valid JSON, it is valid JSON but not an object, or it
+      is an object that does not match the requested schema;
+    * a request that *did not complete* cannot be fixed by asking again, so
+      every **transport-shaped** failure stays a plain :class:`LLMError`: a
+      timeout (repeating it would only double the wait for the same timeout),
+      an HTTP or connection error, an empty response, no message content, and
+      a body that is not a JSON *object* -- a broken envelope, not a bad answer;
+    * a **caller** mistake is nobody's answer to fix and re-asking cannot change
+      it either, so an empty prompt and images passed to a non-vision model are
+      a plain :class:`LLMError` as well.
+
+    The classification is identical in every backend, so the behaviour is not
+    Ollama-specific: Ollama's ``/api/chat`` and the OpenAI-compatible
+    ``chat.completions`` differ in transport but produce the same three
+    content-shaped failures, and :mod:`agents.llm.ollama` /
+    :mod:`agents.llm.openai` raise this subclass for exactly those three.
+
+    It is a subclass on purpose: every existing ``except LLMError`` keeps
+    working unchanged, so a caller that does not care about repairability does
+    not have to learn a new type.
+    """
+
+    def __init__(self, message: str, *, validation_error: ValidationError | None = None) -> None:
+        super().__init__(message)
+        #: The Pydantic error behind a schema mismatch, so a caller can build a
+        #: concrete, bounded repair hint out of ``exc.errors()`` instead of
+        #: parsing the message. ``None`` for a failure that is not a
+        #: field-level complaint (invalid JSON, or valid JSON that is not an
+        #: object): there is no field to name in that case.
+        self.validation_error = validation_error
 
 
 class LLMProvider(ABC):
@@ -148,9 +190,12 @@ class LLMProvider(ABC):
                 :meth:`generate`.
 
         Raises:
-            LLMError: on transport failure, malformed JSON, a payload that
-                does not match the requested schema, or images passed to a
+            LLMError: on transport failure, a timeout, or images passed to a
                 non-vision model.
+            LLMResponseError: when the answer arrived but cannot be used --
+                malformed JSON, JSON that is not an object, or a payload that
+                does not match the requested schema. A subclass of
+                :class:`LLMError`, so ``except LLMError`` still catches it.
         """
 
     @staticmethod
